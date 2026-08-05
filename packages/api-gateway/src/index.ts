@@ -6,11 +6,19 @@ import type {
 import {
   type ChatProvider,
   type ProviderContent,
+  type ProviderMetadata,
   type ProviderMessage,
+  type ProviderModelOptions,
   type ProviderRequest,
+  type ProviderRequestIdentity,
   type ProviderResult,
+  type ProviderStreamEvent,
   type ProviderTool,
-  validateProviderRequest
+  type ProviderToolResult,
+  type ProviderUsageInput,
+  normalizeProviderUsage,
+  validateProviderRequest,
+  validateProviderStreamEvent
 } from "chat-provider-interface";
 import {
   executeHarness,
@@ -67,19 +75,28 @@ export type GatewayRuntimeSelection = GatewayRuntimeName | {
 
 export type GatewayExecutionRequest = {
   model: string;
-  messages: readonly ChatMessage[];
+  messages: readonly ProviderMessage[];
   /** Legacy snapshots, or complete tool definitions for the descriptor path. */
   toolPolicies: readonly GatewayToolInput[];
   /** Policy overrides used when definitions are supplied separately. */
   toolPolicyOverrides?: readonly ToolPolicyInput[];
   toolDefinitions?: readonly ToolDefinition[];
   requestId?: string;
+  identity?: ProviderRequestIdentity;
   sessionId?: string;
   runtime?: GatewayRuntimeSelection;
   runtimeFallback?: GatewayRuntimeAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
   deadline?: number;
+  options?: ProviderModelOptions;
+  cacheHints?: {
+    readonly key?: string;
+    readonly ttlMs?: number;
+    readonly read?: boolean;
+    readonly write?: boolean;
+  };
+  metadata?: ProviderMetadata;
   budgets?: HarnessBudgets;
   retryPolicy?: HarnessRetryPolicy;
   toolExecutor?: HarnessToolExecutor;
@@ -98,13 +115,17 @@ export type GatewayResolvedTool = ToolDescriptor | ResolvedTool;
 
 export type GatewayNormalizedRequest = {
   readonly model: string;
-  readonly messages: readonly ChatMessage[];
+  readonly messages: readonly ProviderMessage[];
   readonly tools: readonly GatewayResolvedTool[];
   readonly requestId: string;
+  readonly identity?: ProviderRequestIdentity;
   readonly sessionId: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly deadline?: number;
+  readonly options?: ProviderModelOptions;
+  readonly cacheHints?: GatewayExecutionRequest["cacheHints"];
+  readonly metadata?: ProviderMetadata;
   readonly budgets?: HarnessBudgets;
   readonly retryPolicy?: HarnessRetryPolicy;
   readonly toolExecutor?: HarnessToolExecutor;
@@ -190,6 +211,65 @@ function isToolDefinition(value: unknown): value is ToolDefinition {
   return isRecord(value) && !Object.hasOwn(value, "toolName");
 }
 
+function validateProviderContent(value: unknown, path: string): void {
+  if (typeof value === "string") return;
+  if (!Array.isArray(value)) throw new TypeError(`${path} must be a string or content parts`);
+  for (const [index, part] of value.entries()) {
+    const partPath = `${path}[${index}]`;
+    if (!isRecord(part) || typeof part.type !== "string") {
+      throw new TypeError(`${partPath} is malformed`);
+    }
+    if (part.type === "text" || part.type === "reasoning") {
+      if (typeof part.text !== "string") throw new TypeError(`${partPath}.text must be a string`);
+      continue;
+    }
+    if (part.type === "tool-call") {
+      if (typeof part.id !== "string" || part.id.length === 0 ||
+        typeof part.name !== "string" || part.name.length === 0 ||
+        typeof part.arguments !== "string") {
+        throw new TypeError(`${partPath} is malformed`);
+      }
+      continue;
+    }
+    if (part.type === "tool-result") {
+      if (typeof part.toolCallId !== "string" || part.toolCallId.length === 0 ||
+        (part.isError !== undefined && typeof part.isError !== "boolean")) {
+        throw new TypeError(`${partPath} is malformed`);
+      }
+      validateProviderContent(part.content, `${partPath}.content`);
+      continue;
+    }
+    throw new TypeError(`${partPath}.type is unsupported by the provider interface`);
+  }
+}
+
+function validateGatewayMessages(messages: readonly ProviderMessage[]): void {
+  for (const [index, message] of messages.entries()) {
+    validateProviderContent(message.content, `Gateway request messages[${index}].content`);
+    if (message.reasoning !== undefined && typeof message.reasoning !== "string") {
+      throw new TypeError(`Gateway request messages[${index}].reasoning must be a string`);
+    }
+    if (message.toolCalls !== undefined) {
+      if (!Array.isArray(message.toolCalls)) {
+        throw new TypeError(`Gateway request messages[${index}].toolCalls must be an array`);
+      }
+      for (const [callIndex, call] of message.toolCalls.entries()) {
+        if (!isRecord(call) || typeof call.id !== "string" || call.id.length === 0 ||
+          typeof call.name !== "string" || call.name.length === 0 || typeof call.arguments !== "string") {
+          throw new TypeError(`Gateway request messages[${index}].toolCalls[${callIndex}] is malformed`);
+        }
+      }
+    }
+    if (message.toolCallId !== undefined &&
+      (typeof message.toolCallId !== "string" || message.toolCallId.length === 0)) {
+      throw new TypeError(`Gateway request messages[${index}].toolCallId must be non-empty`);
+    }
+    if (message.name !== undefined && typeof message.name !== "string") {
+      throw new TypeError(`Gateway request messages[${index}].name must be a string`);
+    }
+  }
+}
+
 function validateRequestShape(request: GatewayExecutionRequest): void {
   if (!isRecord(request)) throw new TypeError("Gateway request must be an object");
   if (typeof request.model !== "string" || request.model.trim().length === 0) {
@@ -200,10 +280,8 @@ function validateRequestShape(request: GatewayExecutionRequest): void {
     if (!isRecord(message) || !["system", "user", "assistant", "tool"].includes(String(message.role))) {
       throw new TypeError(`Gateway request messages[${index}] is invalid`);
     }
-    if (typeof message.content !== "string") {
-      throw new TypeError(`Gateway request messages[${index}].content must be a string`);
-    }
   }
+  validateGatewayMessages(request.messages);
   if (!Array.isArray(request.toolPolicies)) {
     throw new TypeError("Gateway request toolPolicies must be an array");
   }
@@ -291,15 +369,31 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
   validateRequestShape(request);
   const requestId = request.requestId ?? `gateway-${++nextRequestId}`;
   const sessionId = request.sessionId ?? requestId;
+  const tools = resolveRequestTools(request);
+  const messages = request.messages.map(message => ({ ...message }));
+  validateProviderRequest({
+    model: request.model.trim(),
+    messages,
+    tools: tools.map(tool => asProviderTool(asHarnessTool(tool))),
+    requestId,
+    ...(request.identity === undefined ? {} : { identity: request.identity }),
+    ...(request.options === undefined ? {} : { options: request.options }),
+    ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
+    ...(request.metadata === undefined ? {} : { metadata: request.metadata })
+  });
   return {
     model: request.model.trim(),
-    messages: request.messages.map(message => ({ role: message.role, content: message.content })),
-    tools: resolveRequestTools(request),
+    messages,
+    tools,
     requestId,
     sessionId,
+    ...(request.identity === undefined ? {} : { identity: request.identity }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
     ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
     ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
+    ...(request.options === undefined ? {} : { options: request.options }),
+    ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
+    ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
     ...(request.budgets === undefined ? {} : { budgets: request.budgets }),
     ...(request.retryPolicy === undefined ? {} : { retryPolicy: request.retryPolicy }),
     ...(request.toolExecutor === undefined ? {} : { toolExecutor: request.toolExecutor }),
@@ -382,21 +476,23 @@ function asHarnessMessage(message: ProviderMessage): HarnessMessage {
 
 function asHarnessResult(result: ProviderResult): HarnessProviderResult {
   return {
+    ...result,
     message: asHarnessMessage(result.message),
-    usage: {
-      inputTokens: result.usage.inputTokens,
-      outputTokens: result.usage.outputTokens,
-      ...(result.usage.totalTokens === undefined ? {} : { totalTokens: result.usage.totalTokens })
-    },
-    ...(result.finishReason === undefined ? {} : { finishReason: result.finishReason })
+    usage: { ...result.usage }
   };
 }
+
+type ProviderRequestBoundary = Pick<
+  HarnessProviderRequest,
+  "signal" | "cancellation" | "timeoutMs" | "deadline" | "requestId"
+>;
 
 function asProviderRequest(
   request: GatewayNormalizedRequest,
   messages: readonly (HarnessMessage | ChatMessage)[],
   tools: readonly GatewayHarnessTool[],
-  harnessRequest?: HarnessProviderRequest
+  harnessRequest?: Partial<ProviderRequestBoundary>,
+  identity?: ProviderRequestIdentity
 ): ProviderRequest {
   const providerRequest: ProviderRequest = {
     model: request.model,
@@ -406,7 +502,11 @@ function asProviderRequest(
     ...(harnessRequest?.cancellation === undefined ? {} : { cancellation: harnessRequest.cancellation }),
     ...(harnessRequest?.timeoutMs === undefined ? {} : { timeoutMs: harnessRequest.timeoutMs }),
     ...(harnessRequest?.deadline === undefined ? {} : { deadline: harnessRequest.deadline }),
-    ...(harnessRequest === undefined ? {} : { requestId: harnessRequest.requestId })
+    requestId: harnessRequest?.requestId ?? request.requestId,
+    ...(identity === undefined ? {} : { identity }),
+    ...(request.options === undefined ? {} : { options: request.options }),
+    ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
+    ...(request.metadata === undefined ? {} : { metadata: request.metadata })
   };
   validateProviderRequest(providerRequest);
   return providerRequest;
@@ -454,15 +554,134 @@ function defaultIdGenerator(): HarnessIdGenerator {
   return kind => `${kind}-${++next}`;
 }
 
-class ProviderHarnessAdapter implements HarnessProvider {
-  constructor(private readonly provider: ChatProvider, private readonly gatewayRequest: GatewayNormalizedRequest) {}
+class ProviderHarnessAdapter {
+  readonly stream?: HarnessProvider["stream"];
+  private providerCalls = 0;
+  private lastStreamExtras: {
+    readonly toolResults?: ProviderResult["toolResults"];
+    readonly usage?: ProviderResult["usage"];
+    readonly requestId?: string;
+    readonly identity?: ProviderRequestIdentity;
+    readonly metadata?: ProviderMetadata;
+  } | undefined;
+
+  constructor(private readonly provider: ChatProvider, private readonly gatewayRequest: GatewayNormalizedRequest) {
+    if (provider.stream !== undefined) this.stream = request => this.forwardStream(request);
+  }
+
+  asHarnessProvider(): HarnessProvider {
+    return {
+      complete: request => this.complete(request),
+      ...(this.stream === undefined ? {} : { stream: this.stream })
+    };
+  }
+
+  private nextIdentity(): ProviderRequestIdentity {
+    const base = this.gatewayRequest.identity;
+    return {
+      ...(base ?? {}),
+      requestId: base?.requestId ?? this.gatewayRequest.requestId,
+      attempt: (base?.attempt ?? 1) + this.providerCalls - 1
+    };
+  }
+
+  private providerRequest(request: HarnessProviderRequest): ProviderRequest {
+    this.providerCalls += 1;
+    return asProviderRequest(this.gatewayRequest, request.messages, request.tools as readonly GatewayHarnessTool[], request, this.nextIdentity());
+  }
 
   async complete(request: HarnessProviderRequest): Promise<HarnessProviderResult> {
-    const tools = request.tools as readonly GatewayHarnessTool[];
-    const result = await this.provider.complete(
-      asProviderRequest(this.gatewayRequest, request.messages, tools, request)
-    );
+    const result = await this.provider.complete(this.providerRequest(request));
     return asHarnessResult(result);
+  }
+
+  private async forwardStream(request: HarnessProviderRequest): Promise<AsyncIterable<ProviderStreamEvent>> {
+    const providerRequest = this.providerRequest(request);
+    const stream = this.provider.stream!(providerRequest);
+
+    const toolResults: ProviderToolResult[] = [];
+    const calls = new Map<string, { id: string | undefined; name: string | undefined; arguments: string; complete: boolean }>();
+    let requestId: string | undefined;
+    let identity: ProviderRequestIdentity | undefined;
+    let metadata: ProviderMetadata | undefined;
+    let usage: ProviderUsageInput | undefined;
+    const mergeMetadata = (value: ProviderMetadata | undefined) => {
+      if (value !== undefined) metadata = { ...metadata, ...value };
+    };
+    const callKey = (event: Extract<ProviderStreamEvent, { type: "tool-call-delta" }>) =>
+      event.id ?? `index:${event.index ?? calls.size}`;
+
+    this.lastStreamExtras = undefined;
+    return (async function* (adapter: ProviderHarnessAdapter): AsyncIterable<ProviderStreamEvent> {
+      for await (const event of await stream) {
+        validateProviderStreamEvent(event);
+        if (event.type === "start" || event.type === "error") {
+          requestId = event.requestId ?? event.identity?.requestId ?? requestId;
+          identity = event.identity ?? identity;
+          mergeMetadata(event.metadata);
+        } else if (event.type === "usage") {
+          usage = { ...usage, ...event.usage };
+          mergeMetadata(event.metadata);
+        } else if (event.type === "finish") {
+          requestId = event.requestId ?? event.identity?.requestId ?? requestId;
+          identity = event.identity ?? identity;
+          usage = { ...usage, ...event.usage };
+          mergeMetadata(event.metadata);
+        } else if (event.type === "tool-result") {
+          toolResults.push({
+            toolCallId: event.toolCallId,
+            content: event.content,
+            ...(event.isError === undefined ? {} : { isError: event.isError })
+          });
+        } else if (event.type === "tool-call-delta") {
+          const key = callKey(event);
+          const current = calls.get(key) ?? { id: undefined, name: undefined, arguments: "", complete: false };
+          const next = {
+            id: event.id ?? current.id,
+            name: event.name ?? current.name,
+            arguments: current.arguments + (event.arguments ?? ""),
+            complete: false
+          };
+          calls.set(key, next);
+        } else if (event.type === "tool-call") {
+          calls.set(event.id, { ...event, complete: true });
+        }
+        yield event;
+      }
+
+      for (const call of calls.values()) {
+        if (call.complete) continue;
+        if (call.id === undefined || call.name === undefined) {
+          throw new TypeError("Provider stream emitted an incomplete tool call");
+        }
+        yield {
+          type: "tool-call",
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments
+        };
+      }
+      adapter.lastStreamExtras = {
+        ...(toolResults.length === 0 ? {} : { toolResults }),
+        ...(usage === undefined ? {} : { usage: normalizeProviderUsage(usage) }),
+        ...(requestId === undefined ? {} : { requestId }),
+        ...(identity === undefined ? {} : { identity }),
+        ...(metadata === undefined ? {} : { metadata })
+      };
+    })(this);
+  }
+
+  result(result: HarnessProviderResult): HarnessProviderResult {
+    const extras = this.lastStreamExtras;
+    if (extras === undefined) return result;
+    return {
+      ...result,
+      ...(extras.toolResults === undefined ? {} : { toolResults: extras.toolResults }),
+      ...(extras.usage === undefined ? {} : { usage: extras.usage }),
+      ...(extras.requestId === undefined ? {} : { requestId: extras.requestId }),
+      ...(extras.identity === undefined ? {} : { identity: extras.identity }),
+      ...(extras.metadata === undefined ? {} : { metadata: { ...result.metadata, ...extras.metadata } })
+    };
   }
 }
 
@@ -471,16 +690,20 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
   supports: request => request.tools.every(tool => !isDescriptor(tool) || typeof tool.inputSchema !== "boolean"),
   async execute(request, provider, eventSink) {
     const toolExecutor = descriptorExecutor(request);
+    const providerAdapter = new ProviderHarnessAdapter(provider, request);
     const harnessRequest = {
       requestId: request.requestId,
       sessionId: request.sessionId,
       model: request.model,
       messages: request.messages.map(message => asProviderMessage(message) as unknown as HarnessMessage),
       tools: request.tools.map(asHarnessTool),
-      provider: new ProviderHarnessAdapter(provider, request),
+      provider: providerAdapter.asHarnessProvider(),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
       ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
+      ...(request.options === undefined ? {} : { options: request.options }),
+      ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
+      ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
       ...(request.budgets === undefined ? {} : { budgets: request.budgets }),
       ...(request.retryPolicy === undefined ? {} : { retryPolicy: request.retryPolicy }),
       clock: request.clock ?? defaultClock(),
@@ -492,7 +715,7 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
       idGenerator: request.idGenerator ?? defaultIdGenerator()
     };
     const outcome: HarnessOutcome = await executeHarness(harnessRequest);
-    if (outcome.outcome === "completed") return outcome.result;
+    if (outcome.outcome === "completed") return providerAdapter.result(outcome.result);
     throw new Error("Harness execution failed");
   }
 };
@@ -502,7 +725,24 @@ export const legacyPythonRuntimeAdapter: GatewayRuntimeAdapter = {
   supports: () => true,
   async execute(request, provider) {
     const tools = request.tools.map(asHarnessTool);
-    return await provider.complete(asProviderRequest(request, request.messages, tools)) as unknown as HarnessResult;
+    const signal = request.signal;
+    const result = await provider.complete(asProviderRequest(
+      request,
+      request.messages,
+      tools,
+      {
+        ...(signal === undefined ? {} : { signal, cancellation: signal }),
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+        ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
+        requestId: request.requestId
+      },
+      {
+        ...(request.identity ?? {}),
+        requestId: request.identity?.requestId ?? request.requestId,
+        attempt: request.identity?.attempt ?? 1
+      }
+    ));
+    return asHarnessResult(result);
   }
 };
 

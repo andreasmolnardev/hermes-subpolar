@@ -12,8 +12,8 @@ import {
   createGatewayEventMapper,
   type GatewayProtocolEvent
 } from "../src/client.ts";
-import type { ProviderRequest } from "chat-provider-interface";
-import type { HarnessAtomicTurnWrite } from "harness";
+import type { ProviderRequest, ProviderResult } from "chat-provider-interface";
+import { HarnessProviderError, type HarnessAtomicTurnWrite } from "harness";
 
 const completion = {
   message: { role: "assistant" as const, content: "safe" },
@@ -65,7 +65,7 @@ test("gateway validates and normalizes request boundaries", () => {
     model: "fake",
     messages: [{ role: "user", content: 42 } as never],
     toolPolicies: []
-  }), /content must be a string/);
+  }), /must be a string or content parts/);
   assert.throws(() => normalizeGatewayRequest({
     model: "fake",
     messages: [{ role: "user", content: "hello" }],
@@ -372,4 +372,233 @@ test("normalized requests retain the injected session repository for harness exe
   });
 
   assert.equal(normalized.sessionRepository, fake.repository);
+});
+
+test("harness runtime passes provider request and result fidelity through the gateway", async () => {
+  clearPinnedRuntime("fidelity-session");
+  const controller = new AbortController();
+  const options = {
+    temperature: 0.25,
+    maxOutputTokens: 128,
+    reasoningEffort: "high" as const,
+    responseFormat: "json" as const
+  };
+  const cacheHints = { key: "prompt-v1", read: true, write: true, ttlMs: 60_000 };
+  const metadata = { traceId: "trace-request", labels: ["gateway"] };
+  const requestIdentity = { requestId: "fidelity-request", attempt: 4, parentRequestId: "parent-1" };
+  const deadline = Date.now() + 4_000;
+  const providerResult: ProviderResult = {
+    message: {
+      role: "assistant",
+      content: [
+        { type: "text", text: "answer" },
+        { type: "reasoning", text: "because" }
+      ],
+      reasoning: "because",
+      metadata: { messageTrace: "trace-message" }
+    },
+    usage: {
+      inputTokens: 11,
+      outputTokens: 7,
+      totalTokens: 18,
+      reasoningTokens: 3,
+      cachedInputTokens: 5,
+      cacheCreationInputTokens: 2,
+      cacheReadInputTokens: 3
+    },
+    finishReason: "stop",
+    reasoning: "because",
+    toolResults: [{
+      toolCallId: "call-1",
+      content: [{ type: "text", text: "tool output" }],
+      isError: false
+    }],
+    requestId: "provider-request",
+    identity: { requestId: "provider-request", attempt: 4, parentRequestId: "parent-1" },
+    metadata: { traceId: "trace-provider" }
+  };
+  let seen: ProviderRequest | undefined;
+  const result = await createGateway().executeRequest({
+    model: "fidelity-model",
+    sessionId: "fidelity-session",
+    runtime: "harness",
+    requestId: "fidelity-request",
+    identity: requestIdentity,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "hello" },
+        { type: "reasoning", text: "context" }
+      ],
+      metadata: { source: "client" }
+    }],
+    toolPolicies: [],
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    deadline,
+    options,
+    cacheHints,
+    metadata
+  }, {
+    async complete(request) {
+      seen = request;
+      return providerResult;
+    }
+  });
+
+  assert.ok(seen);
+  assert.deepEqual(seen.messages, [{
+    role: "user",
+    content: [
+      { type: "text", text: "hello" },
+      { type: "reasoning", text: "context" }
+    ],
+    metadata: { source: "client" }
+  }]);
+  assert.deepEqual(seen.options, options);
+  assert.deepEqual(seen.cacheHints, cacheHints);
+  assert.deepEqual(seen.metadata, metadata);
+  assert.equal(seen.requestId, "fidelity-request");
+  assert.deepEqual(seen.identity, requestIdentity);
+  assert.equal(seen.signal, seen.cancellation);
+  assert.equal(seen.timeoutMs, 5_000);
+  assert.equal(seen.deadline, deadline);
+  assert.deepEqual(result, providerResult);
+});
+
+test("gateway rejects provider-unsupported content before calling the provider", async () => {
+  let calls = 0;
+  await assert.rejects(() => executeRequest({
+    model: "fake",
+    runtime: "harness",
+    messages: [{
+      role: "user",
+      content: [{ type: "image", url: "https://example.test/image.png" }]
+    } as never],
+    toolPolicies: []
+  }, {
+    async complete() {
+      calls += 1;
+      return completion;
+    }
+  }), /unsupported by the provider interface/);
+  assert.equal(calls, 0);
+});
+
+test("gateway increments provider identity attempts across harness retries", async () => {
+  clearPinnedRuntime("attempt-session");
+  const requests: ProviderRequest[] = [];
+  let calls = 0;
+  await executeRequest({
+    model: "retry-model",
+    sessionId: "attempt-session",
+    runtime: "harness",
+    requestId: "attempt-request",
+    identity: { requestId: "attempt-request", attempt: 3, parentRequestId: "parent-request" },
+    messages: [{ role: "user", content: "retry" }],
+    toolPolicies: [],
+    retryPolicy: { maxAttempts: 2 }
+  }, {
+    async complete(request) {
+      requests.push(request);
+      calls += 1;
+      if (calls === 1) throw new HarnessProviderError("busy", { category: "overloaded" });
+      return completion;
+    }
+  });
+
+  assert.deepEqual(requests.map(request => request.identity), [
+    { requestId: "attempt-request", attempt: 3, parentRequestId: "parent-request" },
+    { requestId: "attempt-request", attempt: 4, parentRequestId: "parent-request" }
+  ]);
+});
+
+test("gateway forwards provider streams and restores stream fidelity omitted by harness collection", async () => {
+  clearPinnedRuntime("stream-fidelity-session");
+  const options = { maxTokens: 64, reasoningEffort: "medium" as const };
+  const cacheHints = { key: "stream-prompt", read: true };
+  const metadata = { traceId: "stream-request" };
+  const requestIdentity = { requestId: "stream-request", attempt: 9, parentRequestId: "parent-stream" };
+  let completeCalled = false;
+  let seen: ProviderRequest | undefined;
+  const result = await executeRequest({
+    model: "stream-model",
+    sessionId: "stream-fidelity-session",
+    runtime: "harness",
+    requestId: "stream-request",
+    identity: requestIdentity,
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: [],
+    options,
+    cacheHints,
+    metadata
+  }, {
+    async complete() {
+      completeCalled = true;
+      throw new Error("complete should not be called when stream is available");
+    },
+    async *stream(request) {
+      seen = request;
+      yield { type: "start", requestId: "stream-request", identity: requestIdentity, metadata: { startPhase: true } };
+      yield { type: "text-delta", text: "hello" };
+      yield { type: "reasoning-delta", text: "why" };
+      yield {
+        type: "tool-result",
+        toolCallId: "call-1",
+        content: [{ type: "text", text: "found" }],
+        isError: false
+      };
+      yield { type: "usage", usage: {
+        inputTokens: 6,
+        outputTokens: 5,
+        totalTokens: 11,
+        reasoningTokens: 2,
+        cachedInputTokens: 1,
+        cacheCreationInputTokens: 2,
+        cacheReadInputTokens: 1
+      }, metadata: { usagePhase: true } };
+      yield {
+        type: "finish",
+        finishReason: "tool_call",
+        usage: { inputTokens: 6, outputTokens: 5, totalTokens: 11, reasoningTokens: 2 },
+        metadata: { finishPhase: true },
+        requestId: "stream-request",
+        identity: requestIdentity
+      };
+    }
+  });
+
+  assert.equal(completeCalled, false);
+  assert.ok(seen);
+  assert.deepEqual(seen.options, options);
+  assert.deepEqual(seen.cacheHints, cacheHints);
+  assert.deepEqual(seen.metadata, metadata);
+  assert.deepEqual(seen.identity, { ...requestIdentity, attempt: 9 });
+  assert.deepEqual(result.message.content, [
+    { type: "text", text: "hello" },
+    { type: "tool-result", toolCallId: "call-1", content: [{ type: "text", text: "found" }], isError: false }
+  ]);
+  assert.equal(result.message.reasoning, "why");
+  assert.equal(result.message.toolCalls, undefined);
+  assert.deepEqual(result.toolResults, [{
+    toolCallId: "call-1",
+    content: [{ type: "text", text: "found" }],
+    isError: false
+  }]);
+  assert.deepEqual(result.usage, {
+    inputTokens: 6,
+    outputTokens: 5,
+    totalTokens: 11,
+    reasoningTokens: 2,
+    cachedInputTokens: 1,
+    cacheCreationInputTokens: 2,
+    cacheReadInputTokens: 1
+  });
+  assert.equal(result.finishReason, "tool_call");
+  assert.deepEqual(result.identity, requestIdentity);
+  assert.deepEqual(result.metadata, {
+    startPhase: true,
+    usagePhase: true,
+    finishPhase: true
+  });
 });

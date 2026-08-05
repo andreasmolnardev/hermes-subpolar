@@ -25,7 +25,6 @@ import {
   type HarnessClock,
   type HarnessContent,
   type HarnessEvent,
-  type HarnessEventSink,
   type HarnessIdGenerator,
   type HarnessMessage,
   type HarnessProvider,
@@ -56,6 +55,10 @@ import {
 import {
   createGatewayEventMapper,
   createTransportEventMapper,
+  type GatewayEventProjectionInput,
+  type GatewayProjectionBase,
+  type GatewayProviderProjectionEvent,
+  type GatewayDeltaProjectionEvent,
   type GatewayProtocolEvent,
   type GatewayProtocolEventSink,
   type GatewayClientEventSink,
@@ -67,6 +70,10 @@ import {
   type PythonToolBridgeExecutorOptions,
   type PythonToolBridgeTool
 } from "./python-bridge";
+import {
+  GatewayTurnLeaseManager,
+  type GatewayTurnLeaseManagerOptions
+} from "./turn-lease";
 
 export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
 
@@ -96,6 +103,8 @@ export type GatewayExecutionRequest = {
   runtimeFallback?: GatewayRuntimeAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Maximum time spent waiting for another turn in this session. */
+  turnLeaseTimeoutMs?: number;
   deadline?: number;
   options?: ProviderModelOptions;
   cacheHints?: {
@@ -135,6 +144,7 @@ export type GatewayNormalizedRequest = {
   readonly sessionId: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly turnLeaseTimeoutMs?: number;
   readonly deadline?: number;
   readonly options?: ProviderModelOptions;
   readonly cacheHints?: GatewayExecutionRequest["cacheHints"];
@@ -160,7 +170,7 @@ export interface GatewayRuntimeAdapter {
   execute(
     request: GatewayNormalizedRequest,
     provider: ChatProvider,
-    eventSink?: HarnessEventSink
+    eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
   ): Promise<HarnessResult>;
 }
 
@@ -186,6 +196,8 @@ export type GatewayOptions = {
   readonly toolExecutor?: HarnessToolExecutor;
   readonly pythonToolBridge?: PythonToolBridge;
   readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
+  readonly turnLeaseManager?: GatewayTurnLeaseManager;
+  readonly turnLease?: GatewayTurnLeaseManagerOptions;
 };
 
 export type Gateway = {
@@ -353,7 +365,7 @@ function validateRequestShape(request: GatewayExecutionRequest): void {
       throw new TypeError(`Gateway request ${field} must be a non-empty string`);
     }
   }
-  for (const field of ["timeoutMs", "deadline"] as const) {
+  for (const field of ["timeoutMs", "turnLeaseTimeoutMs", "deadline"] as const) {
     if (request[field] !== undefined &&
       (typeof request[field] !== "number" || !Number.isFinite(request[field]))) {
       throw new TypeError(`Gateway request ${field} must be finite`);
@@ -425,6 +437,7 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.identity === undefined ? {} : { identity: request.identity }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
     ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+    ...(request.turnLeaseTimeoutMs === undefined ? {} : { turnLeaseTimeoutMs: request.turnLeaseTimeoutMs }),
     ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
     ...(request.options === undefined ? {} : { options: request.options }),
     ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
@@ -769,6 +782,7 @@ function defaultIdGenerator(): HarnessIdGenerator {
 class ProviderHarnessAdapter {
   readonly stream?: HarnessProvider["stream"];
   private providerCalls = 0;
+  private providerEventIds = 0;
   private lastStreamExtras: {
     readonly toolResults?: ProviderResult["toolResults"];
     readonly usage?: ProviderResult["usage"];
@@ -777,7 +791,11 @@ class ProviderHarnessAdapter {
     readonly metadata?: ProviderMetadata;
   } | undefined;
 
-  constructor(private readonly provider: ChatProvider, private readonly gatewayRequest: GatewayNormalizedRequest) {
+  constructor(
+    private readonly provider: ChatProvider,
+    private readonly gatewayRequest: GatewayNormalizedRequest,
+    private readonly eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
+  ) {
     if (provider.stream !== undefined) this.stream = request => this.forwardStream(request);
   }
 
@@ -800,6 +818,19 @@ class ProviderHarnessAdapter {
   private providerRequest(request: HarnessProviderRequest): ProviderRequest {
     this.providerCalls += 1;
     return asProviderRequest(this.gatewayRequest, request.messages, request.tools as readonly GatewayHarnessTool[], request, this.nextIdentity());
+  }
+
+  private async emitProviderEvent(
+    event: Record<string, unknown> & { readonly type: GatewayProviderProjectionEvent["type"] }
+  ): Promise<void> {
+    if (this.eventSink === undefined) return;
+    await this.eventSink({
+      ...event,
+      id: `provider-${++this.providerEventIds}`,
+      requestId: this.gatewayRequest.requestId,
+      sessionId: this.gatewayRequest.sessionId,
+      at: Date.now()
+    } as GatewayProviderProjectionEvent);
   }
 
   async complete(request: HarnessProviderRequest): Promise<HarnessProviderResult> {
@@ -859,6 +890,33 @@ class ProviderHarnessAdapter {
         } else if (event.type === "tool-call") {
           calls.set(event.id, { ...event, complete: true });
         }
+        if (event.type === "start") {
+          await adapter.emitProviderEvent({ type: "provider.started", providerIndex: 0 });
+        } else if (event.type === "text-delta") {
+          await adapter.emitProviderEvent({ type: "provider.text.delta", text: event.text });
+        } else if (event.type === "reasoning-delta") {
+          await adapter.emitProviderEvent({ type: "provider.reasoning.delta", text: event.text });
+        } else if (event.type === "tool-call-delta") {
+          await adapter.emitProviderEvent({
+            type: "provider.tool-call.delta",
+            ...(event.id === undefined ? {} : { callId: event.id }),
+            ...(event.name === undefined ? {} : { name: event.name }),
+            ...(event.arguments === undefined ? {} : { arguments: event.arguments })
+          });
+        } else if (event.type === "tool-call") {
+          await adapter.emitProviderEvent({ type: "provider.tool-call", call: event });
+        } else if (event.type === "tool-result") {
+          await adapter.emitProviderEvent({ type: "provider.tool-result", callId: event.toolCallId, result: event });
+        } else if (event.type === "usage") {
+          await adapter.emitProviderEvent({ type: "provider.usage", usage: normalizeProviderUsage(event.usage) });
+        } else if (event.type === "finish") {
+          await adapter.emitProviderEvent({
+            type: "provider.finished",
+            ...(event.usage === undefined ? {} : { usage: normalizeProviderUsage(event.usage) })
+          });
+        } else if (event.type === "error") {
+          await adapter.emitProviderEvent({ type: "provider.failed", providerIndex: 0, category: event.error.category });
+        }
         yield event;
       }
 
@@ -909,7 +967,7 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
   supports: request => request.tools.every(tool => !isDescriptor(tool) || typeof tool.inputSchema !== "boolean"),
   async execute(request, provider, eventSink) {
     const toolExecutor = descriptorExecutor(request, request.pythonToolBridge, request.pythonToolBridgeOptions);
-    const providerAdapter = new ProviderHarnessAdapter(provider, request);
+    const providerAdapter = new ProviderHarnessAdapter(provider, request, eventSink);
     const harnessRequest = {
       requestId: request.requestId,
       sessionId: request.sessionId,
@@ -933,7 +991,7 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
       ...(toolExecutor === undefined ? {} : { toolExecutor }),
       ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
       ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository }),
-      ...(eventSink === undefined ? {} : { eventSink }),
+       ...(eventSink === undefined ? {} : { eventSink: (event: HarnessEvent) => eventSink(event) }),
       idGenerator: request.idGenerator ?? defaultIdGenerator()
     };
     const outcome: HarnessOutcome = await executeHarness(harnessRequest);
@@ -1007,7 +1065,7 @@ async function selectRuntime(
 
 function safeHarnessEventSink(
   request: GatewayExecutionRequest,
-): HarnessEventSink | undefined {
+): ((event: GatewayEventProjectionInput) => Promise<void>) | undefined {
   const gatewayMapper = request.eventSink === undefined ? undefined : createGatewayEventMapper(request.eventSink);
   const transportMapper = request.transportEventSink === undefined
     ? undefined
@@ -1061,6 +1119,7 @@ function configureHarnessRequest(
 
 export function createGateway(options: GatewayOptions = {}): Gateway {
   const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
+  const turnLeases = options.turnLeaseManager ?? new GatewayTurnLeaseManager(options.turnLease);
   const adapters = new Map<GatewayRuntimeName, GatewayRuntimeAdapter>([
     ["harness", harnessRuntimeAdapter],
     ["python", legacyPythonRuntimeAdapter]
@@ -1075,30 +1134,40 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   return {
     async executeRequest(request, provider): Promise<HarnessResult> {
       const normalized = normalizeGatewayRequest(request);
-      const selection = await selectRuntime(
-        normalized,
-        request.runtime,
-        request.runtimeFallback,
-        store,
-        adapters
-      );
-      let adapter = selection.adapter;
-      const validateAdapter = (candidate: GatewayRuntimeAdapter): void => {
-        validateRuntimeName(candidate.runtime);
-      };
-      validateAdapter(adapter);
-      if (!adapter.supports(normalized)) {
-        adapter = selection.fallback;
+      const lease = await turnLeases.acquire(normalized.sessionId, {
+        ...(normalized.signal === undefined ? {} : { signal: normalized.signal }),
+        ...(normalized.turnLeaseTimeoutMs === undefined
+          ? (normalized.timeoutMs === undefined || normalized.timeoutMs < 0 ? {} : { waitTimeoutMs: normalized.timeoutMs })
+          : { waitTimeoutMs: normalized.turnLeaseTimeoutMs })
+      });
+      try {
+        const selection = await selectRuntime(
+          normalized,
+          request.runtime,
+          request.runtimeFallback,
+          store,
+          adapters
+        );
+        let adapter = selection.adapter;
+        const validateAdapter = (candidate: GatewayRuntimeAdapter): void => {
+          validateRuntimeName(candidate.runtime);
+        };
         validateAdapter(adapter);
-        if (!adapter.supports(normalized)) throw new GatewayRuntimeUnsupportedError(adapter.runtime);
+        if (!adapter.supports(normalized)) {
+          adapter = selection.fallback;
+          validateAdapter(adapter);
+          if (!adapter.supports(normalized)) throw new GatewayRuntimeUnsupportedError(adapter.runtime);
+        }
+        if (selection.persistedRuntime === undefined && request.runtime !== undefined) {
+          await store.save(normalized.sessionId, adapter.runtime);
+        }
+        const executionRequest = adapter.runtime === "harness"
+          ? configureHarnessRequest(normalized, options)
+          : normalized;
+        return await adapter.execute(executionRequest, provider, safeHarnessEventSink(request));
+      } finally {
+        lease.release();
       }
-      if (selection.persistedRuntime === undefined && request.runtime !== undefined) {
-        await store.save(normalized.sessionId, adapter.runtime);
-      }
-      const executionRequest = adapter.runtime === "harness"
-        ? configureHarnessRequest(normalized, options)
-        : normalized;
-      return adapter.execute(executionRequest, provider, safeHarnessEventSink(request));
     },
     async clearPinnedRuntime(sessionId): Promise<void> {
       await store.clear?.(sessionId);
@@ -1119,7 +1188,26 @@ export async function executeRequest(
   return legacyGateway.executeRequest(request, provider);
 }
 
-export type { GatewayClientEvent, GatewayProtocolEvent };
+export type {
+  GatewayClientEvent,
+  GatewayEventProjectionInput,
+  GatewayProjectionBase,
+  GatewayProviderProjectionEvent,
+  GatewayDeltaProjectionEvent,
+  GatewayProtocolEvent
+};
+export {
+  GatewayTurnLeaseError,
+  GatewayTurnLeaseManager
+} from "./turn-lease";
+export type {
+  GatewayTurnLease,
+  GatewayTurnLeaseAcquireOptions,
+  GatewayTurnLeaseDiagnostics,
+  GatewayTurnLeaseErrorCode,
+  GatewayTurnLeaseManagerOptions,
+  GatewayTurnLeaseState
+} from "./turn-lease";
 export {
   PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
   PythonToolBridge,

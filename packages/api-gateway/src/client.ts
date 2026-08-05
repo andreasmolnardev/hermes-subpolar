@@ -1,4 +1,9 @@
-import type { HarnessEvent } from "harness";
+import type {
+  HarnessEvent,
+  HarnessToolCall,
+  HarnessToolResult,
+  HarnessUsage
+} from "harness";
 import type { TransportEvent, WorkspaceSummary } from "data-layer/contracts";
 
 type GatewayUsage = { inputTokens: number; outputTokens: number; totalTokens?: number };
@@ -11,10 +16,13 @@ export type GatewayClientRequest = {
 /** Existing JSON gateway event names, kept local so browser clients need no shared implementation import. */
 export type GatewayProtocolEvent =
   | { type: "message.start"; session_id: string; payload: { request_id: string } }
+  | { type: "message.delta"; session_id: string; payload: { text: string } }
   | { type: "message.complete"; session_id: string; payload: { outcome: "completed" } }
+  | { type: "reasoning.delta"; session_id: string; payload: { text: string } }
   | { type: "status.update"; session_id: string; payload: { phase: string; usage?: GatewayUsage } }
   | { type: "approval.request"; session_id: string; payload: { call_id: string; name: string } }
   | { type: "tool.start"; session_id: string; payload: { call_id: string; name: string } }
+  | { type: "tool.generating"; session_id: string; payload: { call_id: string; name: string; arguments?: string } }
   | { type: "tool.complete"; session_id: string; payload: { call_id: string; is_error: boolean } }
   | { type: "error"; session_id: string; payload: { code: string; message: "Request failed" } };
 
@@ -22,7 +30,60 @@ export type GatewayClientEvent = TransportEvent;
 export type GatewayProtocolEventSink = (event: GatewayProtocolEvent) => void | Promise<void>;
 export type GatewayClientEventSink = (event: GatewayClientEvent) => void | Promise<void>;
 
-export function mapHarnessEventToGatewayEvent(event: HarnessEvent): GatewayProtocolEvent | undefined {
+export type GatewayProjectionBase = {
+  readonly id: string;
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly at: number;
+};
+
+/** Provider stream events are promoted to the gateway stream without changing harness contracts. */
+export type GatewayProviderProjectionEvent = GatewayProjectionBase & (
+  | { readonly type: "provider.started"; readonly providerIndex: number }
+  | { readonly type: "provider.failed"; readonly providerIndex: number; readonly category?: string }
+  | { readonly type: "provider.text.delta"; readonly text: string }
+  | { readonly type: "provider.reasoning.delta"; readonly text: string }
+  | { readonly type: "provider.tool-call.delta"; readonly callId?: string; readonly name?: string; readonly arguments?: string }
+  | { readonly type: "provider.tool-call"; readonly call: HarnessToolCall }
+  | { readonly type: "provider.tool-result"; readonly callId: string; readonly result: HarnessToolResult }
+  | { readonly type: "provider.usage"; readonly usage: HarnessUsage }
+  | { readonly type: "provider.finished"; readonly usage?: HarnessUsage }
+);
+
+export type GatewayDeltaProjectionEvent = GatewayProjectionBase & (
+  | { readonly type: "message.delta"; readonly text: string }
+  | { readonly type: "reasoning.delta"; readonly text: string }
+);
+
+export type GatewayEventProjectionInput = HarnessEvent | GatewayProviderProjectionEvent | GatewayDeltaProjectionEvent;
+
+function usage(value: HarnessUsage): GatewayUsage {
+  return {
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+    ...(value.totalTokens === undefined ? {} : { totalTokens: value.totalTokens })
+  };
+}
+
+function generatingEvent(
+  event: GatewayProjectionBase,
+  callId: string | undefined,
+  name: string | undefined,
+  argumentsText?: string
+): GatewayProtocolEvent | undefined {
+  if (callId === undefined || name === undefined) return undefined;
+  return {
+    type: "tool.generating",
+    session_id: event.sessionId,
+    payload: {
+      call_id: callId,
+      name,
+      ...(argumentsText === undefined ? {} : { arguments: argumentsText })
+    }
+  };
+}
+
+export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput): GatewayProtocolEvent | undefined {
   switch (event.type) {
     case "request.started":
       return {
@@ -31,22 +92,53 @@ export function mapHarnessEventToGatewayEvent(event: HarnessEvent): GatewayProto
         payload: { request_id: event.requestId }
       };
     case "provider.requested":
+    case "provider.started":
       return {
         type: "status.update",
         session_id: event.sessionId,
-        payload: { phase: "provider.requested" }
+        payload: { phase: event.type }
       };
     case "provider.completed":
       return {
         type: "status.update",
         session_id: event.sessionId,
+        payload: { phase: "provider.completed", usage: usage(event.usage) }
+      };
+    case "provider.failed":
+      return {
+        type: "status.update",
+        session_id: event.sessionId,
+        payload: { phase: "provider.failed" }
+      };
+    case "provider.text.delta":
+    case "message.delta":
+      return { type: "message.delta", session_id: event.sessionId, payload: { text: event.text } };
+    case "provider.reasoning.delta":
+    case "reasoning.delta":
+      return { type: "reasoning.delta", session_id: event.sessionId, payload: { text: event.text } };
+    case "provider.tool-call.delta":
+      return generatingEvent(event, event.callId, event.name, event.arguments);
+    case "provider.tool-call":
+      return generatingEvent(event, event.call.id, event.call.name, event.call.arguments);
+    case "provider.tool-result":
+      return {
+        type: "tool.complete",
+        session_id: event.sessionId,
+        payload: { call_id: event.callId, is_error: event.result.isError === true }
+      };
+    case "provider.usage":
+      return {
+        type: "status.update",
+        session_id: event.sessionId,
+        payload: { phase: "provider.usage", usage: usage(event.usage) }
+      };
+    case "provider.finished":
+      return {
+        type: "status.update",
+        session_id: event.sessionId,
         payload: {
-          phase: "provider.completed",
-          usage: {
-            inputTokens: event.usage.inputTokens,
-            outputTokens: event.usage.outputTokens,
-            ...(event.usage.totalTokens === undefined ? {} : { totalTokens: event.usage.totalTokens })
-          }
+          phase: "provider.finished",
+          ...(event.usage === undefined ? {} : { usage: usage(event.usage) })
         }
       };
     case "approval.requested":
@@ -96,33 +188,46 @@ export function mapHarnessEventToGatewayEvent(event: HarnessEvent): GatewayProto
   }
 }
 
-export function mapHarnessEventToTransportEvent(event: HarnessEvent): TransportEvent | undefined {
+function transportContent(value: HarnessToolResult["content"]): string {
+  if (typeof value === "string") return value;
+  return value.map(part => {
+    if (part.type === "text" || part.type === "reasoning") return part.text;
+    if (part.type === "tool-call") return part.arguments;
+    return transportContent(part.content);
+  }).join("");
+}
+
+export function mapHarnessEventToTransportEvent(event: GatewayEventProjectionInput): TransportEvent | undefined {
   switch (event.type) {
     case "request.started":
       return { type: "session.started", sessionId: event.sessionId };
     case "provider.completed":
+    case "provider.usage":
       return {
         type: "usage.updated",
         sessionId: event.sessionId,
-        usage: {
-          inputTokens: event.usage.inputTokens,
-          outputTokens: event.usage.outputTokens,
-          ...(event.usage.totalTokens === undefined ? {} : { totalTokens: event.usage.totalTokens })
-        }
+        usage: usage(event.usage)
       };
+    case "provider.text.delta":
+    case "message.delta":
+      return { type: "message.delta", sessionId: event.sessionId, delta: event.text };
     case "tool.called":
       return {
         type: "tool.call",
         sessionId: event.sessionId,
         messageId: event.call.id,
-        call: { id: event.call.id, name: event.call.name, arguments: "" }
+        call: { id: event.call.id, name: event.call.name, arguments: event.call.arguments }
       };
     case "tool.completed":
       return {
         type: "tool.result",
         sessionId: event.sessionId,
         messageId: event.callId,
-        result: { toolCallId: event.callId, content: "", isError: event.result.isError === true }
+        result: {
+          toolCallId: event.callId,
+          content: transportContent(event.result.content),
+          isError: event.result.isError === true
+        }
       };
     case "terminal":
       return event.outcome === "completed"
@@ -135,8 +240,8 @@ export function mapHarnessEventToTransportEvent(event: HarnessEvent): TransportE
 
 function createDedupeMapper<T>(
   sink: (event: T) => void | Promise<void>,
-  map: (event: HarnessEvent) => T | undefined
-): (event: HarnessEvent) => Promise<void> {
+  map: (event: GatewayEventProjectionInput) => T | undefined
+): (event: GatewayEventProjectionInput) => Promise<void> {
   const terminated = new Set<string>();
   return async event => {
     const key = `${event.requestId}\u0000${event.sessionId}`;
@@ -147,10 +252,14 @@ function createDedupeMapper<T>(
   };
 }
 
-export function createGatewayEventMapper(sink: GatewayProtocolEventSink): (event: HarnessEvent) => Promise<void> {
+export function createGatewayEventMapper(
+  sink: GatewayProtocolEventSink
+): (event: GatewayEventProjectionInput) => Promise<void> {
   return createDedupeMapper(sink, mapHarnessEventToGatewayEvent);
 }
 
-export function createTransportEventMapper(sink: GatewayClientEventSink): (event: HarnessEvent) => Promise<void> {
+export function createTransportEventMapper(
+  sink: GatewayClientEventSink
+): (event: GatewayEventProjectionInput) => Promise<void> {
   return createDedupeMapper(sink, mapHarnessEventToTransportEvent);
 }

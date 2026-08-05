@@ -8,11 +8,14 @@ import {
   normalizeGatewayRequest,
   PythonToolBridge,
   PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
+  GatewayTurnLeaseError,
+  GatewayTurnLeaseManager,
   type GatewaySessionRepository,
   type PythonToolBridgeRequest
 } from "../src/index.ts";
 import {
   createGatewayEventMapper,
+  createTransportEventMapper,
   type GatewayProtocolEvent
 } from "../src/client.ts";
 import type { ProviderRequest, ProviderResult } from "chat-provider-interface";
@@ -759,4 +762,187 @@ test("gateway forwards provider streams and restores stream fidelity omitted by 
     usagePhase: true,
     finishPhase: true
   });
+});
+
+test("gateway serializes concurrent turns for one session", async () => {
+  const gateway = createGateway({ turnLease: { defaultWaitTimeoutMs: 1_000 } });
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const started = new Promise<void>(resolve => { firstStarted = resolve; });
+  const provider = {
+    async complete() {
+      if (releaseFirst === undefined) {
+        firstStarted();
+        await new Promise<void>(resolve => { releaseFirst = resolve; });
+      }
+      return completion;
+    }
+  };
+  const request = (message: string) => ({
+    model: "fake",
+    sessionId: "serialized-session",
+    runtime: "harness" as const,
+    messages: [{ role: "user" as const, content: message }],
+    toolPolicies: []
+  });
+
+  const first = gateway.executeRequest(request("one"), provider);
+  await started;
+  const second = gateway.executeRequest(request("two"), provider);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(releaseFirst !== undefined, true);
+  releaseFirst();
+  await Promise.all([first, second]);
+});
+
+test("gateway allows independent sessions to execute concurrently", async () => {
+  const gateway = createGateway({ turnLease: { defaultWaitTimeoutMs: 1_000 } });
+  let active = 0;
+  let maximumActive = 0;
+  let release!: () => void;
+  const bothStarted = new Promise<void>(resolve => { release = resolve; });
+  const provider = {
+    async complete() {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      if (maximumActive === 2) release();
+      await bothStarted;
+      active -= 1;
+      return completion;
+    }
+  };
+  const request = (sessionId: string) => ({
+    model: "fake",
+    sessionId,
+    runtime: "harness" as const,
+    messages: [{ role: "user" as const, content: sessionId }],
+    toolPolicies: []
+  });
+
+  await Promise.all([
+    gateway.executeRequest(request("independent-a"), provider),
+    gateway.executeRequest(request("independent-b"), provider)
+  ]);
+  assert.equal(maximumActive, 2);
+});
+
+test("gateway reports bounded lease timeout and cancellation diagnostics", async () => {
+  const gateway = createGateway({ turnLease: { defaultWaitTimeoutMs: 1_000 } });
+  let release!: () => void;
+  let started!: () => void;
+  const firstStarted = new Promise<void>(resolve => { started = resolve; });
+  const provider = {
+    async complete() {
+      started();
+      await new Promise<void>(resolve => { release = resolve; });
+      return completion;
+    }
+  };
+  const request = (overrides: Record<string, unknown> = {}) => ({
+    model: "fake",
+    sessionId: "lease-diagnostics-session",
+    runtime: "harness" as const,
+    messages: [{ role: "user" as const, content: "hello" }],
+    toolPolicies: [],
+    ...overrides
+  });
+
+  const first = gateway.executeRequest(request(), provider);
+  await firstStarted;
+  await assert.rejects(gateway.executeRequest(request({ turnLeaseTimeoutMs: 5 }), provider), error => {
+    assert(error instanceof GatewayTurnLeaseError);
+    assert.equal(error.code, "wait_timeout");
+    assert.equal(error.diagnostics.sessionId, "lease-diagnostics-session");
+    assert.equal(error.diagnostics.queueDepth, 1);
+    return true;
+  });
+
+  const controller = new AbortController();
+  const cancelled = gateway.executeRequest(request({ signal: controller.signal }), provider);
+  controller.abort();
+  await assert.rejects(cancelled, error => {
+    assert(error instanceof GatewayTurnLeaseError);
+    assert.equal(error.code, "cancelled");
+    return true;
+  });
+  release();
+  await first;
+});
+
+test("turn lease release is generation-safe", async () => {
+  const manager = new GatewayTurnLeaseManager({ defaultWaitTimeoutMs: 10 });
+  const first = await manager.acquire("generation-session");
+  const secondPending = manager.acquire("generation-session");
+  assert.equal(first.release(), true);
+  const second = await secondPending;
+  assert.equal(manager.release("generation-session", first.generation), false);
+  await assert.rejects(manager.acquire("generation-session", { waitTimeoutMs: 1 }), error => {
+    assert(error instanceof GatewayTurnLeaseError);
+    assert.equal(error.code, "wait_timeout");
+    return true;
+  });
+  assert.equal(second.release(), true);
+});
+
+test("provider deltas project in order and terminal output is deduplicated", async () => {
+  const gatewayEvents: GatewayProtocolEvent[] = [];
+  const transportEvents: unknown[] = [];
+  await createGateway().executeRequest({
+    model: "stream-model",
+    requestId: "projection-request",
+    sessionId: "projection-session",
+    runtime: "harness",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: [],
+    eventSink: event => gatewayEvents.push(event),
+    transportEventSink: event => transportEvents.push(event)
+  }, {
+    async *stream() {
+      yield { type: "start" as const };
+      yield { type: "text-delta" as const, text: "hello" };
+      yield { type: "reasoning-delta" as const, text: "because" };
+      yield { type: "usage" as const, usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish" as const, finishReason: "stop" as const };
+    },
+    async complete() {
+      throw new Error("stream should be selected");
+    }
+  });
+
+  assert.deepEqual(gatewayEvents.map(event => event.type), [
+    "message.start",
+    "status.update",
+    "status.update",
+    "message.delta",
+    "reasoning.delta",
+    "status.update",
+    "status.update",
+    "status.update",
+    "message.complete"
+  ]);
+  assert.deepEqual((transportEvents as Array<{ type: string }>).map(event => event.type), [
+    "session.started",
+    "message.delta",
+    "usage.updated",
+    "usage.updated"
+  ]);
+
+  const projectedTerminalEvents: GatewayProtocolEvent[] = [];
+  const map = createGatewayEventMapper(event => projectedTerminalEvents.push(event));
+  const terminal = {
+    id: "terminal-one",
+    requestId: "projection-request",
+    sessionId: "projection-session",
+    at: 1,
+    type: "terminal" as const,
+    outcome: "completed" as const
+  };
+  await map(terminal);
+  await map({ ...terminal, id: "terminal-two", at: 2 });
+  assert.equal(projectedTerminalEvents.length, 1);
+
+  const transportMap = createTransportEventMapper(event => transportEvents.push(event));
+  await transportMap({ ...terminal, outcome: "provider_failure" });
+  await transportMap({ ...terminal, id: "terminal-three", outcome: "provider_failure" });
+  assert.equal((transportEvents as Array<{ type: string }>).filter(event => event.type === "error").length, 1);
 });

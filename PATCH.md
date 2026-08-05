@@ -5,10 +5,16 @@
 - Added Bun migration foundation with six explicitly named runtime packages,
   strict shared TypeScript settings, browser-safe data contracts, dependency
   direction/import-boundary checks, focused behavior tests, and isolated Bun CI.
-- Kept existing npm workspaces, package-lock.json, Python test entry points, and
-  legacy runtime directories during transition. Bun lockfile is authoritative
-  for new packages; package-lock.json remains until legacy npm/Docker install
-  paths are migrated and their CI gate is green.
+- Migrated canonical Vite/Vitest browser app from `web/` to `packages/web-ui/`,
+  preserving its API entrypoint and tests, and moved `@hermes/shared` contracts
+  from `apps/shared/` to `packages/shared/`.
+- Updated workspace manifests, browser aliases, npm and Bun lockfiles, and
+  Docker frontend build paths.
+- Removed obsolete website, Electron desktop, and TUI workspaces. Retained
+  Python compatibility paths, root tests, and plugin-owned sidecars only where
+  runtime parity still requires them.
+- Updated CLI, update, doctor, dashboard, and installer paths to use
+  `packages/web-ui/`; removed obsolete TUI and desktop installer stages.
 
 - Added browser-first Subpolar shell with workspace, Agent, Scheduled, Apps,
   Settings, conversation, Activity, Source Control, and Terminal surfaces.
@@ -38,6 +44,9 @@
 - Removed Electron/Tauri installers, native release scripts, Nix deployment
   paths, and desktop-only lifecycle surfaces while retaining browser-safe
   renderer components and server capabilities.
+- Documented implemented Python/TypeScript runtime boundary, explicit harness
+  lifecycle, neutral contracts, deterministic resolver, in-memory persistence
+  adapter, and retained Python fallback; no default cutover claimed.
 
 Deferred product items remain listed in `TODO.md` and are not reintroduced by
 this patch.

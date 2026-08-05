@@ -30,7 +30,8 @@ import {
   type HarnessOutcome,
   type HarnessApprovalPolicy,
   type HarnessBudgets,
-  type HarnessRetryPolicy
+  type HarnessRetryPolicy,
+  type HarnessSessionRepository
 } from "harness";
 import {
   resolveTools,
@@ -52,6 +53,9 @@ import {
 } from "./client";
 
 export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
+
+/** Structural subset implemented by the durable data-layer session repository. */
+export type GatewaySessionRepository = HarnessSessionRepository;
 
 export type GatewayRuntimeName = "harness" | "python";
 
@@ -83,6 +87,7 @@ export type GatewayExecutionRequest = {
   clock?: HarnessClock;
   sleeper?: HarnessSleeper;
   idGenerator?: HarnessIdGenerator;
+  sessionRepository?: GatewaySessionRepository;
   /** Existing gateway protocol event stream. */
   eventSink?: GatewayProtocolEventSink;
   /** Existing data-layer transport event stream. */
@@ -107,6 +112,7 @@ export type GatewayNormalizedRequest = {
   readonly clock?: HarnessClock;
   readonly sleeper?: HarnessSleeper;
   readonly idGenerator?: HarnessIdGenerator;
+  readonly sessionRepository?: GatewaySessionRepository;
 };
 
 export interface GatewayRuntimeAdapter {
@@ -300,7 +306,8 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
     ...(request.clock === undefined ? {} : { clock: request.clock }),
     ...(request.sleeper === undefined ? {} : { sleeper: request.sleeper }),
-    ...(request.idGenerator === undefined ? {} : { idGenerator: request.idGenerator })
+    ...(request.idGenerator === undefined ? {} : { idGenerator: request.idGenerator }),
+    ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository })
   };
 }
 
@@ -480,6 +487,7 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
       sleeper: request.sleeper ?? defaultSleeper(),
       ...(toolExecutor === undefined ? {} : { toolExecutor }),
       ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
+      ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository }),
       ...(eventSink === undefined ? {} : { eventSink }),
       idGenerator: request.idGenerator ?? defaultIdGenerator()
     };

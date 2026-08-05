@@ -5,18 +5,38 @@ import {
   clearPinnedRuntime,
   createGateway,
   executeRequest,
-  normalizeGatewayRequest
+  normalizeGatewayRequest,
+  type GatewaySessionRepository
 } from "../src/index.ts";
 import {
   createGatewayEventMapper,
   type GatewayProtocolEvent
 } from "../src/client.ts";
 import type { ProviderRequest } from "chat-provider-interface";
+import type { HarnessAtomicTurnWrite } from "harness";
 
 const completion = {
   message: { role: "assistant" as const, content: "safe" },
   usage: { inputTokens: 1, outputTokens: 1 }
 };
+
+function fakeRepository(initialMessages: readonly Record<string, unknown>[] = []) {
+  const messages = new Map<string, Record<string, unknown>[]>([["restart-session", [...initialMessages]]]);
+  const writes: HarnessAtomicTurnWrite[] = [];
+  const runtimes = new Map<string, "harness" | "python">();
+  const repository: GatewaySessionRepository = {
+    async listMessages(sessionId) {
+      return messages.get(sessionId) ?? [];
+    },
+    async commitTurn(write) {
+      const current = messages.get(write.sessionId) ?? [];
+      assert.equal(write.expectedNextSequence, current.length);
+      writes.push(write);
+      messages.set(write.sessionId, [...current, ...write.messages]);
+    }
+  };
+  return { repository, messages, writes, runtimes };
+}
 
 test("gateway preserves legacy ChatMessage and policy snapshot inputs", async () => {
   const result = await executeRequest({
@@ -290,4 +310,66 @@ test("injected gateway uses explicit fallback once when selected runtime is unsu
 
   assert.equal(calls, 1);
   assert.equal(selections.get("injected-fallback-session"), "python");
+});
+
+test("injected session repository resumes persisted history after gateway restart", async () => {
+  const fake = fakeRepository([{ role: "user", content: "start" }]);
+  const runtimeSelectionStore = {
+    load: (sessionId: string) => fake.runtimes.get(sessionId),
+    save: (sessionId: string, runtime: "harness" | "python") => fake.runtimes.set(sessionId, runtime)
+  };
+  let providerCalls = 0;
+  let toolEffects = 0;
+  const provider = {
+    async complete(request: ProviderRequest) {
+      providerCalls += 1;
+      if (request.messages.some(message => message.role === "tool")) return completion;
+      return {
+        message: {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id: "once", name: "once", arguments: "{}" }]
+        },
+        usage: { inputTokens: 1, outputTokens: 1 }
+      };
+    }
+  };
+  const request = {
+    model: "fake",
+    sessionId: "restart-session",
+    runtime: "harness" as const,
+    messages: [{ role: "user" as const, content: "start" }],
+    toolPolicies: [{ toolName: "once", policy: "allow" as const }],
+    toolExecutor: async () => {
+      toolEffects += 1;
+      return { content: "done" };
+    },
+    sessionRepository: fake.repository
+  };
+
+  await createGateway({ runtimeSelectionStore }).executeRequest(request, provider);
+  await createGateway({ runtimeSelectionStore }).executeRequest({
+    ...request,
+    runtime: "python",
+    messages: [{ role: "user", content: "resume" }]
+  }, provider);
+
+  assert.equal(fake.runtimes.get("restart-session"), "harness");
+  assert.equal(toolEffects, 1);
+  assert.equal(providerCalls, 3);
+  assert.equal(fake.writes.length, 3);
+  assert.deepEqual(fake.writes[0]?.messages.map(message => message.role), ["assistant", "tool"]);
+  assert.equal(fake.messages.get("restart-session")?.some(message => message.role === "tool"), true);
+});
+
+test("normalized requests retain the injected session repository for harness execution", () => {
+  const fake = fakeRepository();
+  const normalized = normalizeGatewayRequest({
+    model: "fake",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: [],
+    sessionRepository: fake.repository
+  });
+
+  assert.equal(normalized.sessionRepository, fake.repository);
 });

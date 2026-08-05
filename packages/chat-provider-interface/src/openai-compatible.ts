@@ -1,5 +1,6 @@
 import {
   createProviderRequestContext,
+  normalizeProviderError,
   normalizeProviderFinishReason,
   normalizeProviderUsage,
   ProviderError,
@@ -14,6 +15,7 @@ import {
   type ProviderTool,
   type ProviderToolCall,
   type ProviderErrorCategory,
+  type ProviderErrorContext,
   type ProviderUsageInput
 } from "./index";
 
@@ -252,25 +254,33 @@ function parseResponse(
   return result;
 }
 
-function httpErrorCategory(status: number): "authentication" | "authorization" | "invalid_request" | "model_not_found" | "context_length" | "rate_limit" | "overloaded" | "timeout" | "server" | "unknown" {
-  if (status === 401) return "authentication";
-  if (status === 403) return "authorization";
-  if (status === 404) return "model_not_found";
-  if (status === 408 || status === 504) return "timeout";
-  if (status === 413) return "context_length";
-  if (status === 429) return "rate_limit";
-  if (status === 502 || status === 503 || status === 529) return "overloaded";
-  if (status >= 400 && status < 500) return "invalid_request";
-  if (status >= 500) return "server";
-  return "unknown";
-}
-
 function requestError(message: string, category: ProviderErrorCategory, requestId: string | undefined, statusCode?: number): ProviderError {
   return new ProviderError(message, {
     category,
     ...(statusCode === undefined ? {} : { statusCode }),
     ...(requestId === undefined ? {} : { requestId })
   });
+}
+
+function classifiedRequestError(
+  message: string,
+  error: unknown,
+  context: ProviderErrorContext
+): ProviderError {
+  const info = normalizeProviderError(error, context);
+  return new ProviderError(message, {
+    category: info.category,
+    retryable: info.retryable,
+    ...(info.statusCode === undefined ? {} : { statusCode: info.statusCode }),
+    ...(info.requestId === undefined ? {} : { requestId: info.requestId }),
+    ...(info.metadata === undefined ? {} : { metadata: info.metadata })
+  });
+}
+
+function requestIdFromResponse(response: Response, requestId: string | undefined): string | undefined {
+  if (requestId !== undefined) return requestId;
+  const candidate = response.headers.get("x-request-id")?.trim();
+  return candidate === undefined || candidate.length === 0 ? undefined : candidate;
 }
 
 function abortRequestError(context: ReturnType<typeof createProviderRequestContext>): ProviderError {
@@ -319,16 +329,29 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
           if (context.signal.aborted) {
             throw abortRequestError(context);
           }
-          throw requestError("OpenAI-compatible network request failed", "network", requestId);
+          throw classifiedRequestError(
+            "OpenAI-compatible network request failed",
+            error,
+            { ...(requestId === undefined ? {} : { requestId }), network: true }
+          );
         }
 
         if (!response.ok) {
-          const category = httpErrorCategory(response.status);
-          throw requestError(
+          const responseId = requestIdFromResponse(response, requestId);
+          let body: unknown;
+          try {
+            body = await response.json();
+          } catch {
+            body = undefined;
+          }
+          throw classifiedRequestError(
             `OpenAI-compatible request failed with status ${response.status}`,
-            category,
-            requestId,
-            response.status
+            new Error("OpenAI-compatible provider request failed"),
+            {
+              ...(responseId === undefined ? {} : { requestId: responseId }),
+              statusCode: response.status,
+              body
+            }
           );
         }
 
@@ -339,14 +362,18 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
           if (context.signal.aborted) throw abortRequestError(context);
           throw malformed("body", requestId);
         }
-        const responseRequestId = requestId ?? response.headers.get("x-request-id") ?? undefined;
-        return parseResponse(payload, responseRequestId, request.identity);
+        const responseId = requestIdFromResponse(response, requestId);
+        return parseResponse(payload, responseId, request.identity);
       } catch (error) {
         if (error instanceof ProviderError) throw error;
         if (context.signal.aborted) {
           throw abortRequestError(context);
         }
-        throw requestError("OpenAI-compatible request failed", "unknown", requestId);
+        throw classifiedRequestError(
+          "OpenAI-compatible request failed",
+          error,
+          { ...(requestId === undefined ? {} : { requestId }) }
+        );
       } finally {
         context.dispose();
       }

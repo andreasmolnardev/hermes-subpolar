@@ -1,3 +1,8 @@
+import {
+  classifyProviderError as classifyNeutralProviderError,
+  type ProviderErrorClassifierOptions
+} from "./provider-error-classifier";
+
 export type ProviderJsonPrimitive = string | number | boolean | null;
 
 export type ProviderJsonValue =
@@ -351,14 +356,11 @@ export function classifyProviderError(error: Error): ProviderErrorInfo {
     };
   }
 
-  if (error.name === "AbortError") {
-    return { category: "cancelled", retryable: false, message: error.message };
-  }
-  if (error.name === "TimeoutError") {
-    return { category: "timeout", retryable: true, message: error.message };
-  }
-
-  return { category: "unknown", retryable: false, message: error.message };
+  const classified = classifyNeutralProviderError(error);
+  return {
+    ...classified,
+    message: error.message
+  };
 }
 
 export function isRetryableProviderError(error: Error): boolean {
@@ -597,6 +599,11 @@ export function normalizeProviderFinishReason(value: string | undefined): Provid
 export type ProviderErrorContext = {
   requestId?: string;
   metadata?: ProviderMetadata;
+  statusCode?: number;
+  body?: unknown;
+  cancelled?: boolean;
+  timedOut?: boolean;
+  network?: boolean;
 };
 
 function isProviderErrorInfo(value: unknown): value is ProviderErrorInfo {
@@ -612,10 +619,18 @@ export function normalizeProviderError(error: unknown, context: ProviderErrorCon
   const classified = isProviderErrorInfo(error)
     ? error
     : error instanceof Error
-      ? classifyProviderError(error)
-      : { category: "unknown" as const, retryable: false, message: "Provider failed" };
+      ? {
+          ...classifyNeutralProviderError(error, context as ProviderErrorClassifierOptions),
+          message: error.message
+        }
+      : {
+          ...classifyNeutralProviderError(error, context as ProviderErrorClassifierOptions),
+          message: "Provider failed"
+        };
+  const statusCode = classified.statusCode ?? context.statusCode;
   return {
     ...classified,
+    ...(statusCode === undefined ? {} : { statusCode }),
     ...(context.requestId === undefined && classified.requestId === undefined
       ? {} : { requestId: context.requestId ?? classified.requestId }),
     ...(context.metadata === undefined && classified.metadata === undefined

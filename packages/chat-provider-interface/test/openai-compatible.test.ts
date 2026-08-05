@@ -207,3 +207,27 @@ test("OpenAI-compatible adapter classifies retryable HTTP and network failures",
       !error.message.includes("network fixture")
   );
 });
+
+test("OpenAI-compatible adapter classifies safe body signals and preserves response request IDs", async () => {
+  const policy = providerWith({
+    status: 400,
+    headers: { "x-request-id": "server-request-4" },
+    body: { error: { message: "violates our usage policies: secret prompt payload" } }
+  });
+
+  await assert.rejects(
+    policy.provider.complete({ model: "fixture-model", messages: [], tools: [] }),
+    (error: Error) => error instanceof ProviderError &&
+      error.category === "content_filter" &&
+      error.retryable === false &&
+      error.statusCode === 400 &&
+      error.requestId === "server-request-4" &&
+      !error.message.includes("secret prompt payload")
+  );
+
+  const gateway = providerWith({ status: 502, body: { error: { message: "bad gateway" } } });
+  await assert.rejects(
+    gateway.provider.complete({ model: "fixture-model", messages: [], tools: [] }),
+    (error: Error) => error instanceof ProviderError && error.category === "server" && error.retryable
+  );
+});

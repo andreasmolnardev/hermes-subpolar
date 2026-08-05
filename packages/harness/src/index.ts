@@ -140,12 +140,39 @@ type HarnessEventInput =
 
 export type HarnessEventSink = (event: HarnessEvent) => void | Promise<void>;
 
+export type HarnessRecoveredToolCall = {
+  readonly call: HarnessToolCall;
+  readonly result: HarnessToolResult;
+};
+
+export type HarnessRecoveryMetadata = {
+  readonly turnId: string;
+  readonly status: "running" | "interrupted" | "recoverable";
+  readonly pendingToolCallIds?: readonly string[];
+  readonly completedToolCallIds?: readonly string[];
+  readonly completedToolCalls?: readonly HarnessRecoveredToolCall[];
+};
+
+export type HarnessToolCheckpoint = {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly call: HarnessToolCall;
+  readonly phase: "before-tool" | "tool-completed";
+  readonly pendingToolCallIds: readonly string[];
+  readonly completedToolCalls: readonly HarnessRecoveredToolCall[];
+  readonly result?: HarnessToolResult;
+  readonly at: string;
+};
+
 export type HarnessPersistencePort = {
   append?(event: HarnessEvent): Promise<void>;
   load?(sessionId: string): Promise<readonly HarnessMessage[]>;
   listMessages?(sessionId: string): Promise<readonly unknown[]>;
   commitTurn?(write: HarnessAtomicTurnWrite): Promise<unknown>;
   transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
+  checkpoint?(checkpoint: HarnessToolCheckpoint): Promise<void>;
+  recover?(sessionId: string): Promise<HarnessRecoveryMetadata | undefined>;
 };
 
 // Structural subset of data-layer's SessionRepository. Keeping this shape here
@@ -989,6 +1016,41 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       request.logger?.warn?.(`Harness persistence failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
   };
+  const completedTurnTools: HarnessRecoveredToolCall[] = [];
+  const checkpointTool = async (
+    task: { readonly call: HarnessToolCall },
+    phase: HarnessToolCheckpoint["phase"],
+    pendingToolCallIds: readonly string[],
+    result?: HarnessToolResult
+  ): Promise<boolean> => {
+    if (request.persistence?.checkpoint === undefined) return true;
+    const completedToolCalls = phase === "tool-completed" && result !== undefined
+      ? [...completedTurnTools, { call: task.call, result }]
+      : completedTurnTools;
+    try {
+      await request.persistence.checkpoint({
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        turnId: request.requestId,
+        call: task.call,
+        phase,
+        pendingToolCallIds,
+        completedToolCalls,
+        ...(result === undefined ? {} : { result }),
+        at: new Date(request.clock.now()).toISOString()
+      });
+      if (phase === "tool-completed" && result !== undefined) {
+        completedTurnTools.push({ call: task.call, result });
+      }
+      return true;
+    } catch (error) {
+      persistenceFailure = typeof error === "object" && error !== null
+        ? error instanceof Error ? error : new Error("Tool checkpoint persistence failed")
+        : new Error(String(error));
+      request.logger?.warn?.(`Tool checkpoint persistence failed: ${persistenceFailure.message}`);
+      return false;
+    }
+  };
   const terminal = async (outcome: HarnessOutcome): Promise<HarnessOutcome> => {
     let finalOutcome = outcome;
     if (persistenceFailure !== undefined) {
@@ -1030,6 +1092,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   }
 
   let messages = request.messages;
+  let recovery: HarnessRecoveryMetadata | undefined;
   const repositoryLoader = request.sessionRepository?.listMessages !== undefined
     ? (sessionId: string) => request.sessionRepository!.listMessages!(sessionId)
     : request.persistence?.listMessages !== undefined
@@ -1046,6 +1109,29 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       request.logger?.warn?.(`Harness message recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
   }
+  if (request.persistence?.recover !== undefined) {
+    try {
+      recovery = await request.persistence.recover(request.sessionId);
+      for (const completed of recovery?.completedToolCalls ?? []) {
+        const hasCall = messages.some(message => message.role === "assistant" &&
+          message.toolCalls?.some(call => call.id === completed.call.id));
+        if (!hasCall) {
+          messages = [...messages, { role: "assistant", content: "", toolCalls: [completed.call] }];
+        }
+        const hasResult = messages.some(message => message.role === "tool" && message.toolCallId === completed.call.id);
+        if (!hasResult) {
+          messages = [...messages, {
+            role: "tool",
+            toolCallId: completed.call.id,
+            name: completed.call.name,
+            content: completed.result.content
+          }];
+        }
+      }
+    } catch (error) {
+      request.logger?.warn?.(`Harness turn recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
+    }
+  }
   try {
     messages = normalizeHarnessMessages(messages);
   } catch (error) {
@@ -1057,6 +1143,27 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   const toolResults = new Map<string, HarnessToolResult>();
   const toolResultsByCall = new Map<string, HarnessToolResult>();
   const toolMessages = new Set<string>();
+  const completedToolCallIds = new Set(recovery?.completedToolCallIds ?? []);
+  const recoveredToolCalls = new Map<string, HarnessRecoveredToolCall>();
+  for (const completed of recovery?.completedToolCalls ?? []) {
+    recoveredToolCalls.set(completed.call.id, completed);
+  }
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== "tool" || message.toolCallId === undefined) continue;
+    const call = messages.slice(0, index).findLast(candidate => candidate.role === "assistant" &&
+      candidate.toolCalls?.some(toolCall => toolCall.id === message.toolCallId))?.toolCalls?.find(toolCall => toolCall.id === message.toolCallId);
+    if (call === undefined) continue;
+    const result = { content: message.content };
+    toolResults.set(call.id, result);
+    toolMessages.add(call.id);
+    completedToolCallIds.add(call.id);
+  }
+  for (const completed of recoveredToolCalls.values()) {
+    toolResults.set(completed.call.id, completed.result);
+    toolMessages.add(completed.call.id);
+    completedToolCallIds.add(completed.call.id);
+    completedTurnTools.push(completed);
+  }
   let providerCalls = 0;
   let turns = 0;
   let toolCalls = 0;
@@ -1187,6 +1294,9 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           }
           continue;
         }
+        if (completedToolCallIds.has(call.id)) {
+          return terminal(failureOutcome("tool_failure", new Error(`Recovered tool result unavailable: ${call.id}`), "recovery"));
+        }
         const tool = toolsByName.get(call.name);
         const parsed = parseArguments(call.arguments);
         if (tool === undefined) {
@@ -1237,6 +1347,18 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       const concurrency = Number.isFinite(concurrencyCandidate) && concurrencyCandidate > 0
         ? Math.max(1, Math.floor(concurrencyCandidate))
         : 1;
+      for (const [index, task] of pendingTools.entries()) {
+        const stopBeforeCheckpoint = stopped();
+        if (stopBeforeCheckpoint !== undefined) return terminal(stopBeforeCheckpoint);
+        if (!(await checkpointTool(
+          task,
+          "before-tool",
+          pendingTools.slice(index).map(pending => pending.call.id)
+        ))) {
+          controller.abort();
+          return terminal(persistenceFailureOutcome(persistenceFailure ?? new Error("Tool checkpoint persistence failed")));
+        }
+      }
       const toolResultsForRound: Array<
         | { readonly task: PendingTool; readonly result: HarnessToolResult }
         | { readonly task: PendingTool; readonly error: object }
@@ -1259,7 +1381,24 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             controller.signal,
             request.toolTimeoutMs
           );
-          return { task, result: boundedToolResult(raw, maxBytes) } as const;
+          const result = boundedToolResult(raw, maxBytes);
+          if (!(await checkpointTool(
+            task,
+            "tool-completed",
+            pendingTools
+              .filter(pending => pending.call.id !== task.call.id &&
+                !completedTurnTools.some(completed => completed.call.id === pending.call.id))
+              .map(pending => pending.call.id),
+            result
+          ))) {
+            stopStarting = true;
+            controller.abort();
+            return {
+              task,
+              error: persistenceFailure ?? new Error("Tool checkpoint persistence failed")
+            } as const;
+          }
+          return { task, result } as const;
         } catch (error) {
           stopStarting = true;
           return {

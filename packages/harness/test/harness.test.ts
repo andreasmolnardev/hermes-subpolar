@@ -11,7 +11,8 @@ import {
   type HarnessProvider,
   type HarnessProviderRequest,
   type HarnessProviderResult,
-  type HarnessRequest
+  type HarnessRequest,
+  type HarnessToolCheckpoint
 } from "../src/index.ts";
 
 function response(message: HarnessMessage, inputTokens = 1, outputTokens = 1) {
@@ -94,6 +95,105 @@ test("one tool call executes with parsed arguments, then completes", async () =>
   assert.equal(result.outcome, "completed");
   assert.deepEqual(calls, ["weather:Paris"]);
   assert.equal(providerCalls, 2);
+});
+
+test("tool checkpoints are durable before and after the tool side effect", async () => {
+  const order: string[] = [];
+  const checkpoints: HarnessToolCheckpoint[] = [];
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return providerCalls === 1
+        ? response({
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "checkpointed", name: "write", arguments: "{}" }]
+        })
+        : response({ role: "assistant", content: "done" });
+    }
+  }, {
+    tools: [{ name: "write", policy: "allow" }],
+    toolExecutor: async () => {
+      order.push("execute");
+      return { content: "written" };
+    },
+    persistence: {
+      async checkpoint(checkpoint) {
+        order.push(`checkpoint:${checkpoint.phase}`);
+        checkpoints.push(checkpoint);
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(order, ["checkpoint:before-tool", "execute", "checkpoint:tool-completed"]);
+  assert.deepEqual(checkpoints[0]?.pendingToolCallIds, ["checkpointed"]);
+  assert.equal(checkpoints[1]?.result?.content, "written");
+});
+
+test("checkpoint failure aborts before the tool side effect", async () => {
+  let executed = false;
+  let checkpoints = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      return response({
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "blocked", name: "write", arguments: "{}" }]
+      });
+    }
+  }, {
+    tools: [{ name: "write", policy: "allow" }],
+    toolExecutor: async () => {
+      executed = true;
+      return { content: "must not run" };
+    },
+    persistence: {
+      async checkpoint(checkpoint) {
+        checkpoints += 1;
+        if (checkpoint.phase === "before-tool") throw new Error("checkpoint unavailable");
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "provider_failure");
+  assert.equal(result.error.category, "persistence");
+  assert.equal(checkpoints, 1);
+  assert.equal(executed, false);
+});
+
+test("recovery metadata supplies completed tool results without replaying the call", async () => {
+  const completedCall = { id: "recovered", name: "write", arguments: "{}" };
+  let executed = false;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      const toolMessage = providerRequest.messages.at(-1);
+      assert.equal(toolMessage?.role, "tool");
+      assert.equal(toolMessage?.content, "already written");
+      return response({ role: "assistant", content: "continued" });
+    }
+  }, {
+    persistence: {
+      async recover() {
+        return {
+          turnId: "request-1",
+          status: "recoverable" as const,
+          pendingToolCallIds: [],
+          completedToolCallIds: ["recovered"],
+          completedToolCalls: [{ call: completedCall, result: { content: "already written" } }]
+        };
+      }
+    },
+    tools: [{ name: "write", policy: "allow" }],
+    toolExecutor: async () => {
+      executed = true;
+      return { content: "replayed" };
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(executed, false);
 });
 
 test("provider fields and detailed result survive retries and fallback", async () => {

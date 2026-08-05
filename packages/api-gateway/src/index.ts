@@ -39,6 +39,7 @@ import {
   type HarnessApprovalPolicy,
   type HarnessBudgets,
   type HarnessRetryPolicy,
+  type HarnessToolOutputLimits,
   type HarnessSessionRepository
 } from "harness";
 import {
@@ -49,7 +50,8 @@ import {
   type ToolDefinition,
   type ToolDescriptor,
   type ToolExecutable,
-  type ToolPolicyInput
+  type ToolPolicyInput,
+  validateJsonSchema
 } from "tool-resolver";
 import {
   createGatewayEventMapper,
@@ -59,6 +61,12 @@ import {
   type GatewayClientEventSink,
   type GatewayClientEvent
 } from "./client";
+import {
+  createPythonToolBridgeExecutor,
+  PythonToolBridge,
+  type PythonToolBridgeExecutorOptions,
+  type PythonToolBridgeTool
+} from "./python-bridge";
 
 export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
 
@@ -100,6 +108,11 @@ export type GatewayExecutionRequest = {
   budgets?: HarnessBudgets;
   retryPolicy?: HarnessRetryPolicy;
   toolExecutor?: HarnessToolExecutor;
+  pythonToolBridge?: PythonToolBridge;
+  pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
+  toolTimeoutMs?: number;
+  toolConcurrency?: number;
+  toolOutputLimits?: HarnessToolOutputLimits;
   approvalPolicy?: HarnessApprovalPolicy;
   clock?: HarnessClock;
   sleeper?: HarnessSleeper;
@@ -129,6 +142,11 @@ export type GatewayNormalizedRequest = {
   readonly budgets?: HarnessBudgets;
   readonly retryPolicy?: HarnessRetryPolicy;
   readonly toolExecutor?: HarnessToolExecutor;
+  readonly pythonToolBridge?: PythonToolBridge;
+  readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
+  readonly toolTimeoutMs?: number;
+  readonly toolConcurrency?: number;
+  readonly toolOutputLimits?: HarnessToolOutputLimits;
   readonly approvalPolicy?: HarnessApprovalPolicy;
   readonly clock?: HarnessClock;
   readonly sleeper?: HarnessSleeper;
@@ -165,6 +183,9 @@ export type GatewayRuntimeSelectionStore = {
 export type GatewayOptions = {
   readonly runtimeSelectionStore?: GatewayRuntimeSelectionStore;
   readonly runtimeAdapters?: Partial<Record<GatewayRuntimeName, GatewayRuntimeAdapter>>;
+  readonly toolExecutor?: HarnessToolExecutor;
+  readonly pythonToolBridge?: PythonToolBridge;
+  readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
 };
 
 export type Gateway = {
@@ -338,6 +359,18 @@ function validateRequestShape(request: GatewayExecutionRequest): void {
       throw new TypeError(`Gateway request ${field} must be finite`);
     }
   }
+  if (request.toolTimeoutMs !== undefined &&
+    (typeof request.toolTimeoutMs !== "number" || !Number.isFinite(request.toolTimeoutMs))) {
+    throw new TypeError("Gateway request toolTimeoutMs must be finite");
+  }
+  if (request.toolConcurrency !== undefined &&
+    (typeof request.toolConcurrency !== "number" || !Number.isFinite(request.toolConcurrency))) {
+    throw new TypeError("Gateway request toolConcurrency must be finite");
+  }
+  if (request.toolOutputLimits?.maxBytes !== undefined &&
+    (typeof request.toolOutputLimits.maxBytes !== "number" || !Number.isFinite(request.toolOutputLimits.maxBytes))) {
+    throw new TypeError("Gateway request toolOutputLimits.maxBytes must be finite");
+  }
 }
 
 function resolveRequestTools(request: GatewayExecutionRequest): readonly GatewayResolvedTool[] {
@@ -370,6 +403,8 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
   const requestId = request.requestId ?? `gateway-${++nextRequestId}`;
   const sessionId = request.sessionId ?? requestId;
   const tools = resolveRequestTools(request);
+  validateDescriptorSchemas(tools);
+  validateReferencedTools(tools);
   const messages = request.messages.map(message => ({ ...message }));
   validateProviderRequest({
     model: request.model.trim(),
@@ -397,6 +432,11 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.budgets === undefined ? {} : { budgets: request.budgets }),
     ...(request.retryPolicy === undefined ? {} : { retryPolicy: request.retryPolicy }),
     ...(request.toolExecutor === undefined ? {} : { toolExecutor: request.toolExecutor }),
+    ...(request.pythonToolBridge === undefined ? {} : { pythonToolBridge: request.pythonToolBridge }),
+    ...(request.pythonToolBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: request.pythonToolBridgeOptions }),
+    ...(request.toolTimeoutMs === undefined ? {} : { toolTimeoutMs: request.toolTimeoutMs }),
+    ...(request.toolConcurrency === undefined ? {} : { toolConcurrency: request.toolConcurrency }),
+    ...(request.toolOutputLimits === undefined ? {} : { toolOutputLimits: request.toolOutputLimits }),
     ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
     ...(request.clock === undefined ? {} : { clock: request.clock }),
     ...(request.sleeper === undefined ? {} : { sleeper: request.sleeper }),
@@ -430,6 +470,156 @@ function asHarnessTool(tool: GatewayResolvedTool): GatewayHarnessTool {
     capabilities: tool.capabilities,
     executable: tool.executable
   };
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function schemaTypeMatches(value: unknown, type: string): boolean {
+  if (type === "null") return value === null;
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") return isRecord(value);
+  if (type === "integer") return typeof value === "number" && Number.isInteger(value);
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  return typeof value === type;
+}
+
+function schemaMatches(value: unknown, schema: JsonSchema): boolean {
+  if (typeof schema === "boolean") return schema;
+  const rules = schema as Record<string, unknown>;
+  const type = rules.type;
+  if (typeof type === "string" && !schemaTypeMatches(value, type)) return false;
+  if (Array.isArray(type) && !type.some(candidate => typeof candidate === "string" && schemaTypeMatches(value, candidate))) {
+    return false;
+  }
+  if (Array.isArray(rules.enum) && !rules.enum.some(candidate => jsonEqual(candidate, value))) return false;
+  if (Object.hasOwn(rules, "const") && !jsonEqual(rules.const, value)) return false;
+
+  if (Array.isArray(rules.allOf) && !rules.allOf.every(candidate => schemaMatches(value, candidate as JsonSchema))) return false;
+  if (Array.isArray(rules.anyOf) && !rules.anyOf.some(candidate => schemaMatches(value, candidate as JsonSchema))) return false;
+  if (Array.isArray(rules.oneOf) && rules.oneOf.filter(candidate => schemaMatches(value, candidate as JsonSchema)).length !== 1) {
+    return false;
+  }
+  if (Object.hasOwn(rules, "not") && schemaMatches(value, rules.not as JsonSchema)) return false;
+
+  if (typeof value === "string") {
+    if (typeof rules.minLength === "number" && [...value].length < rules.minLength) return false;
+    if (typeof rules.maxLength === "number" && [...value].length > rules.maxLength) return false;
+    if (typeof rules.pattern === "string") {
+      try {
+        if (!new RegExp(rules.pattern).test(value)) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (typeof rules.minimum === "number" && value < rules.minimum) return false;
+    if (typeof rules.maximum === "number" && value > rules.maximum) return false;
+    if (typeof rules.exclusiveMinimum === "number" && value <= rules.exclusiveMinimum) return false;
+    if (typeof rules.exclusiveMaximum === "number" && value >= rules.exclusiveMaximum) return false;
+    if (typeof rules.multipleOf === "number" && rules.multipleOf > 0 && value % rules.multipleOf !== 0) return false;
+  }
+  if (Array.isArray(value)) {
+    if (typeof rules.minItems === "number" && value.length < rules.minItems) return false;
+    if (typeof rules.maxItems === "number" && value.length > rules.maxItems) return false;
+    if (rules.uniqueItems === true && value.some((item, index) => value.slice(index + 1).some(other => jsonEqual(item, other)))) {
+      return false;
+    }
+    if (rules.items !== undefined && !value.every(item => schemaMatches(item, rules.items as JsonSchema))) return false;
+    if (Array.isArray(rules.prefixItems) && rules.prefixItems.some((item, index) => index < value.length &&
+      !schemaMatches(value[index], item as JsonSchema))) return false;
+  }
+  if (isRecord(value)) {
+    const properties = isRecord(rules.properties) ? rules.properties : {};
+    if (Array.isArray(rules.required) && rules.required.some(name => typeof name !== "string" || !Object.hasOwn(value, name))) {
+      return false;
+    }
+    if (typeof rules.minProperties === "number" && Object.keys(value).length < rules.minProperties) return false;
+    if (typeof rules.maxProperties === "number" && Object.keys(value).length > rules.maxProperties) return false;
+    for (const [name, propertySchema] of Object.entries(properties)) {
+      if (Object.hasOwn(value, name) && !schemaMatches(value[name], propertySchema as JsonSchema)) return false;
+    }
+    if (rules.additionalProperties === false) {
+      const patterns = isRecord(rules.patternProperties) ? Object.keys(rules.patternProperties) : [];
+      for (const name of Object.keys(value)) {
+        if (Object.hasOwn(properties, name)) continue;
+        let matched = false;
+        for (const pattern of patterns) {
+          try {
+            if (new RegExp(pattern).test(name)) {
+              matched = true;
+              if (!schemaMatches(value[name], (rules.patternProperties as Record<string, unknown>)[pattern] as JsonSchema)) return false;
+            }
+          } catch {
+            return false;
+          }
+        }
+        if (!matched) return false;
+      }
+    } else if (isRecord(rules.additionalProperties)) {
+      for (const name of Object.keys(value)) {
+        if (!Object.hasOwn(properties, name) && !schemaMatches(value[name], rules.additionalProperties as JsonSchema)) return false;
+      }
+    }
+    if (isRecord(rules.dependentSchemas)) {
+      for (const [name, dependent] of Object.entries(rules.dependentSchemas)) {
+        if (Object.hasOwn(value, name) && !schemaMatches(value, dependent as JsonSchema)) return false;
+      }
+    }
+  }
+  if (Object.hasOwn(rules, "if")) {
+    const branch = schemaMatches(value, rules.if as JsonSchema) ? rules.then : rules.else;
+    if (branch !== undefined && !schemaMatches(value, branch as JsonSchema)) return false;
+  }
+  return true;
+}
+
+function validateDescriptorToolCalls(
+  calls: readonly { readonly name: string; readonly arguments: string }[],
+  tools: readonly GatewayResolvedTool[]
+): void {
+  const byName = new Map(tools.filter(isDescriptor).map(tool => [tool.name, tool]));
+  for (const call of calls) {
+    const tool = byName.get(call.name);
+    if (tool === undefined) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(call.arguments) as unknown;
+    } catch {
+      throw new TypeError(`Malformed arguments for tool: ${call.name}`);
+    }
+    if (!isRecord(parsed) || !schemaMatches(parsed, tool.inputSchema)) {
+      throw new TypeError(`Arguments do not match schema for tool: ${call.name}`);
+    }
+  }
+}
+
+function validateDescriptorSchemas(tools: readonly GatewayResolvedTool[]): void {
+  for (const tool of tools) {
+    if (isDescriptor(tool)) validateJsonSchema(tool.inputSchema, tool.name);
+  }
+}
+
+function isSafeBridgeIdentifier(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && !/[\r\n\u0000]/.test(value);
+}
+
+function validateReferencedTools(tools: readonly GatewayResolvedTool[]): readonly PythonToolBridgeTool[] {
+  const references: PythonToolBridgeTool[] = [];
+  for (const tool of tools) {
+    if (!isDescriptor(tool) || !("reference" in tool.executable)) continue;
+    if (!isSafeBridgeIdentifier(tool.name) || !isSafeBridgeIdentifier(tool.executable.reference)) {
+      throw new TypeError(`Unsafe Python tool bridge reference for tool: ${tool.name}`);
+    }
+    references.push({ name: tool.name, reference: tool.executable.reference });
+  }
+  return references;
 }
 
 function asProviderMessage(message: HarnessMessage | ChatMessage): ProviderMessage {
@@ -512,20 +702,42 @@ function asProviderRequest(
   return providerRequest;
 }
 
-function descriptorExecutor(request: GatewayNormalizedRequest): HarnessToolExecutor | undefined {
+function descriptorExecutor(
+  request: GatewayNormalizedRequest,
+  bridge?: PythonToolBridge,
+  bridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">
+): HarnessToolExecutor | undefined {
   if (request.toolExecutor !== undefined) return request.toolExecutor;
   const handles = new Map<string, (...args: readonly unknown[]) => unknown>();
+  const references = validateReferencedTools(request.tools);
+  if (references.length > 0 && (bridge === undefined || bridgeOptions === undefined)) {
+    throw new TypeError(bridge === undefined
+      ? "No Python tool bridge or tool executor configured for referenced tools"
+      : "Python tool bridge cwd is not configured");
+  }
   for (const tool of request.tools) {
     if (isDescriptor(tool) && "handle" in tool.executable) {
       handles.set(tool.name, tool.executable.handle.execute);
     }
   }
-  if (handles.size === 0) return undefined;
+  const referenceExecutor = references.length === 0
+    ? undefined
+      : createPythonToolBridgeExecutor({
+        ...(bridgeOptions as Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">),
+        bridge: bridge as PythonToolBridge,
+        tools: references
+      });
+  if (handles.size === 0 && referenceExecutor === undefined) {
+    return undefined;
+  }
   return async execution => {
     const handle = handles.get(execution.call.name);
-    if (handle === undefined) throw new Error(`No executor for tool: ${execution.call.name}`);
-    const value = await handle(execution.arguments);
-    return { content: typeof value === "string" ? value : JSON.stringify(value) ?? "" };
+    if (handle !== undefined) {
+      const value = await handle(execution.arguments);
+      return { content: typeof value === "string" ? value : JSON.stringify(value) ?? "" };
+    }
+    if (referenceExecutor !== undefined) return referenceExecutor(execution);
+    throw new Error(`No executor for tool: ${execution.call.name}`);
   };
 }
 
@@ -592,6 +804,7 @@ class ProviderHarnessAdapter {
 
   async complete(request: HarnessProviderRequest): Promise<HarnessProviderResult> {
     const result = await this.provider.complete(this.providerRequest(request));
+    validateDescriptorToolCalls(result.message.toolCalls ?? [], this.gatewayRequest.tools);
     return asHarnessResult(result);
   }
 
@@ -649,6 +862,12 @@ class ProviderHarnessAdapter {
         yield event;
       }
 
+      validateDescriptorToolCalls(
+        [...calls.values()]
+          .filter(call => call.complete && call.name !== undefined)
+          .map(call => ({ name: call.name!, arguments: call.arguments })),
+        adapter.gatewayRequest.tools
+      );
       for (const call of calls.values()) {
         if (call.complete) continue;
         if (call.id === undefined || call.name === undefined) {
@@ -689,7 +908,7 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
   runtime: "harness",
   supports: request => request.tools.every(tool => !isDescriptor(tool) || typeof tool.inputSchema !== "boolean"),
   async execute(request, provider, eventSink) {
-    const toolExecutor = descriptorExecutor(request);
+    const toolExecutor = descriptorExecutor(request, request.pythonToolBridge, request.pythonToolBridgeOptions);
     const providerAdapter = new ProviderHarnessAdapter(provider, request);
     const harnessRequest = {
       requestId: request.requestId,
@@ -706,6 +925,9 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
       ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
       ...(request.budgets === undefined ? {} : { budgets: request.budgets }),
       ...(request.retryPolicy === undefined ? {} : { retryPolicy: request.retryPolicy }),
+      ...(request.toolTimeoutMs === undefined ? {} : { toolTimeoutMs: request.toolTimeoutMs }),
+      ...(request.toolConcurrency === undefined ? {} : { toolConcurrency: request.toolConcurrency }),
+      ...(request.toolOutputLimits === undefined ? {} : { toolOutputLimits: request.toolOutputLimits }),
       clock: request.clock ?? defaultClock(),
       sleeper: request.sleeper ?? defaultSleeper(),
       ...(toolExecutor === undefined ? {} : { toolExecutor }),
@@ -797,6 +1019,46 @@ function safeHarnessEventSink(
   };
 }
 
+function configureHarnessRequest(
+  request: GatewayNormalizedRequest,
+  options: GatewayOptions
+): GatewayNormalizedRequest {
+  const references = validateReferencedTools(request.tools);
+  const toolExecutor = request.toolExecutor ?? options.toolExecutor;
+  const bridge = request.pythonToolBridge ?? options.pythonToolBridge;
+  const bridgeOptions = request.pythonToolBridgeOptions ?? options.pythonToolBridgeOptions;
+  if (references.length > 0 && toolExecutor === undefined && bridge === undefined) {
+    throw new TypeError("No Python tool bridge or tool executor configured for referenced tools");
+  }
+  if (references.length > 0 && toolExecutor === undefined && bridge !== undefined) {
+    if (bridgeOptions === undefined || bridgeOptions.cwd === undefined) {
+      throw new TypeError("Python tool bridge cwd is not configured");
+    }
+    if (typeof bridgeOptions.cwd === "string" &&
+      !(bridgeOptions.cwd.startsWith("/") || /^[A-Za-z]:[\\/]/.test(bridgeOptions.cwd))) {
+      throw new TypeError("Python tool bridge cwd must be absolute");
+    }
+    if (bridgeOptions.environmentAllowlist?.some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+      throw new TypeError("Python tool bridge environment allowlist is invalid");
+    }
+    for (const value of Object.values(bridgeOptions.environment ?? {})) {
+      if (value.includes("\u0000")) throw new TypeError("Python tool bridge environment is invalid");
+    }
+  }
+  const bridgeDeadline = request.deadline ?? (request.timeoutMs === undefined
+    ? undefined
+    : (request.clock ?? defaultClock()).now() + request.timeoutMs);
+  const effectiveBridgeOptions = bridgeOptions === undefined || bridgeDeadline === undefined
+    ? bridgeOptions
+    : { ...bridgeOptions, deadline: bridgeDeadline };
+  return {
+    ...request,
+    ...(toolExecutor === undefined ? {} : { toolExecutor }),
+    ...(bridge === undefined ? {} : { pythonToolBridge: bridge }),
+    ...(effectiveBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: effectiveBridgeOptions })
+  };
+}
+
 export function createGateway(options: GatewayOptions = {}): Gateway {
   const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
   const adapters = new Map<GatewayRuntimeName, GatewayRuntimeAdapter>([
@@ -833,7 +1095,10 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
       if (selection.persistedRuntime === undefined && request.runtime !== undefined) {
         await store.save(normalized.sessionId, adapter.runtime);
       }
-      return adapter.execute(normalized, provider, safeHarnessEventSink(request));
+      const executionRequest = adapter.runtime === "harness"
+        ? configureHarnessRequest(normalized, options)
+        : normalized;
+      return adapter.execute(executionRequest, provider, safeHarnessEventSink(request));
     },
     async clearPinnedRuntime(sessionId): Promise<void> {
       await store.clear?.(sessionId);

@@ -6,7 +6,10 @@ import {
   createGateway,
   executeRequest,
   normalizeGatewayRequest,
-  type GatewaySessionRepository
+  PythonToolBridge,
+  PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
+  type GatewaySessionRepository,
+  type PythonToolBridgeRequest
 } from "../src/index.ts";
 import {
   createGatewayEventMapper,
@@ -76,6 +79,13 @@ test("gateway validates and normalizes request boundaries", () => {
 test("descriptor path preserves schema and metadata through harness adapter", async () => {
   clearPinnedRuntime("descriptor-session");
   const schema = { type: "object", properties: { query: { type: "string" } } } as const;
+  const bridge = new PythonToolBridge({ send: async request => ({
+    protocolVersion: PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
+    type: "tool.result",
+    requestId: request.requestId,
+    toolCallId: request.toolCallId,
+    content: "unused"
+  }) });
   const result = await executeRequest({
     model: "fake",
     sessionId: "descriptor-session",
@@ -89,7 +99,9 @@ test("descriptor path preserves schema and metadata through harness adapter", as
       capabilities: { network: true },
       executable: { reference: "plugin.search" },
       policy: "allow"
-    }]
+    }],
+    pythonToolBridge: bridge,
+    pythonToolBridgeOptions: { cwd: "/workspace" }
   }, {
     async complete(request) {
       const tool = request.tools[0] as unknown as Record<string, unknown>;
@@ -103,6 +115,152 @@ test("descriptor path preserves schema and metadata through harness adapter", as
   });
 
   assert.equal(result.message.content, "safe");
+});
+
+test("harness automatically executes reference descriptors through the injected bridge", async () => {
+  const requests: PythonToolBridgeRequest[] = [];
+  const deadline = Date.now() + 5_000;
+  const bridge = new PythonToolBridge({
+    async send(request) {
+      requests.push(request);
+      return {
+        protocolVersion: PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
+        type: "tool.result",
+        requestId: request.requestId,
+        toolCallId: request.toolCallId,
+        content: request.toolCallId === "call-a" ? "abcdef" : "second"
+      };
+    }
+  });
+  const providerMessages: ProviderRequest[] = [];
+  let providerCalls = 0;
+  const result = await createGateway().executeRequest({
+    model: "fake",
+    requestId: "request-reference",
+    sessionId: "reference-session",
+    runtime: "harness",
+    deadline,
+    messages: [{ role: "user", content: "lookup" }],
+    toolPolicies: [
+      {
+        name: "first",
+        description: "first",
+        inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" } } },
+        source: "python",
+        executable: { reference: "python:first" },
+        policy: "allow"
+      },
+      {
+        name: "second",
+        description: "second",
+        inputSchema: { type: "object", properties: {} },
+        source: "python",
+        executable: { reference: "python:second" },
+        policy: "allow"
+      }
+    ],
+    pythonToolBridge: bridge,
+    pythonToolBridgeOptions: {
+      cwd: "/workspace",
+      environment: { PATH: "/bin", SECRET: "hidden" },
+      environmentAllowlist: ["PATH"]
+    },
+    toolOutputLimits: { maxBytes: 4 }
+  }, {
+    async complete(request) {
+      providerCalls += 1;
+      providerMessages.push(request);
+      if (providerCalls === 1) {
+        return {
+          message: {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              { id: "call-a", name: "first", arguments: JSON.stringify({ query: "one" }) },
+              { id: "call-b", name: "second", arguments: "{}" }
+            ]
+          },
+          usage: { inputTokens: 1, outputTokens: 1 }
+        };
+      }
+      return completion;
+    }
+  });
+
+  assert.equal(result.message.content, "safe");
+  assert.equal(providerCalls, 2);
+  assert.deepEqual(requests.map(request => ({
+    requestId: request.requestId,
+    toolCallId: request.toolCallId,
+    cwd: request.cwd,
+    env: request.env,
+    deadline: request.deadline
+  })), [
+    { requestId: "request-reference", toolCallId: "call-a", cwd: "/workspace", env: { PATH: "/bin" }, deadline },
+    { requestId: "request-reference", toolCallId: "call-b", cwd: "/workspace", env: { PATH: "/bin" }, deadline }
+  ]);
+  assert.deepEqual(providerMessages[1]?.messages.slice(-2).map(message => ({
+    role: message.role,
+    toolCallId: message.toolCallId,
+    content: message.content
+  })), [
+    { role: "tool", toolCallId: "call-a", content: "abcd" },
+    { role: "tool", toolCallId: "call-b", content: "seco" }
+  ]);
+});
+
+test("reference execution fails closed before provider effects when bridge or schema is unsafe", async () => {
+  let providerCalls = 0;
+  const base = {
+    model: "fake",
+    runtime: "harness" as const,
+    messages: [{ role: "user" as const, content: "lookup" }],
+    toolPolicies: [{
+      name: "lookup",
+      description: "lookup",
+      inputSchema: { type: "object" },
+      source: "python",
+      executable: { reference: "python:lookup" },
+      policy: "allow" as const
+    }]
+  };
+  const provider = {
+    async complete() {
+      providerCalls += 1;
+      return completion;
+    }
+  };
+
+  await assert.rejects(() => createGateway().executeRequest(base, provider), /No Python tool bridge/);
+  assert.equal(providerCalls, 0);
+
+  await assert.rejects(() => createGateway().executeRequest({
+    ...base,
+    toolPolicies: [{ ...base.toolPolicies[0], executable: { reference: "python:lookup\nunsafe" } }]
+  }, provider), /Unsafe Python tool bridge reference/);
+  assert.equal(providerCalls, 0);
+
+  const bridge = new PythonToolBridge({ send: async () => {
+    throw new Error("bridge must not be reached for invalid arguments");
+  } });
+  await assert.rejects(() => createGateway().executeRequest({
+    ...base,
+    pythonToolBridge: bridge,
+    pythonToolBridgeOptions: { cwd: "/workspace" }
+  }, {
+    async complete() {
+      providerCalls += 1;
+      return {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "invalid", name: "lookup", arguments: JSON.stringify({ value: 1 }) }]
+        },
+        usage: { inputTokens: 1, outputTokens: 1 }
+      };
+    }
+  }), /Harness execution failed/);
+  assert.equal(providerCalls, 1);
 });
 
 test("mapped harness events stay ordered, deduplicate terminal, and redact diagnostics", async () => {

@@ -998,3 +998,10 @@ export interface ChatProvider {
   complete(request: ProviderRequest): Promise<ProviderResult>;
   stream?(request: ProviderRequest): ProviderStream;
 }
+
+export {
+  createOpenAICompatibleProvider,
+  type OpenAICompatibleCredentials,
+  type OpenAICompatibleFetch,
+  type OpenAICompatibleProviderOptions
+} from "./openai-compatible";

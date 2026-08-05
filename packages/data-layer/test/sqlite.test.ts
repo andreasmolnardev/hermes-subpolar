@@ -59,6 +59,46 @@ test("SQLite repository orders messages and correlates tools", async () => {
   });
 });
 
+test("SQLite round-trips structured content and every message sidecar exactly", async () => {
+  await withRepo(async (repo) => {
+    await repo.createSession(session());
+    const message: SessionMessageDraft = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "visible" },
+        { type: "image_url", imageUrl: { url: "https://example.test/image", detail: "high" } },
+      ],
+      apiContent: [{ type: "text", text: "provider" }],
+      displayKind: "hidden",
+      displayMetadata: { reason: "retry", count: 2 },
+      synthetic: true,
+      context: { source: "gateway", values: [1, true, null] },
+      createdAt: "2026-08-05T00:00:01.000Z",
+    };
+
+    const result = await repo.appendMessages("session-1", [message]);
+    (message.content[0] as { type: "text"; text: string }).text = "changed caller content";
+    (result.messages[0]!.apiContent![0] as { type: "text"; text: string }).text = "changed returned API content";
+    expect(await repo.listMessages("session-1")).toEqual([{
+      schemaVersion: 1,
+      id: "session-1:message:0",
+      sessionId: "session-1",
+      sequence: 0,
+      role: "assistant",
+      content: [
+        { type: "text", text: "visible" },
+        { type: "image_url", imageUrl: { url: "https://example.test/image", detail: "high" } },
+      ],
+      apiContent: message.apiContent,
+      displayKind: "hidden",
+      displayMetadata: message.displayMetadata,
+      synthetic: true,
+      context: message.context,
+      createdAt: message.createdAt,
+    }]);
+  });
+});
+
 test("SQLite transaction rolls back all writes", async () => {
   await withRepo(async (repo) => {
     await repo.createSession(session());
@@ -289,6 +329,67 @@ test("SQLite preserves Python insertion order and normalizes persisted tool call
   }
 });
 
+test("SQLite reads Python-shaped sidecars and preserves structured row order", async () => {
+  const paths = homePath();
+  const database = new Database(paths.database);
+  database.exec(`
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    INSERT INTO schema_version VALUES (25);
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL
+    );
+    CREATE TABLE messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+      role TEXT NOT NULL, content TEXT, api_content TEXT, display_kind TEXT,
+      display_metadata TEXT, synthetic INTEGER, context TEXT, timestamp REAL NOT NULL
+    );
+    INSERT INTO sessions VALUES ('legacy-1', 'cli', 1785888000);
+    INSERT INTO messages (session_id, role, content, api_content, display_kind,
+      display_metadata, synthetic, context, timestamp)
+      VALUES ('legacy-1', 'user',
+        '[{"type":"text","text":"visible"},{"type":"image_url","imageUrl":{"url":"https://example.test/a"}}]',
+        '[{"type":"text","text":"provider"}]', 'model_switch',
+        '{"model":"next","attempt":2}', 1, '{"source":"gateway","tags":["one"]}', 1785888002);
+    INSERT INTO messages (session_id, role, content, api_content, context, timestamp)
+      VALUES ('legacy-1', 'assistant', 'answer', 'provider answer', 'plain-context', 1785888001);
+  `);
+  database.close();
+
+  const repo = new SQLiteSessionRepository(paths.database);
+  try {
+    expect(await repo.listMessages("legacy-1")).toEqual([{
+      schemaVersion: 1,
+      id: "1",
+      sessionId: "legacy-1",
+      sequence: 0,
+      role: "user",
+      content: [
+        { type: "text", text: "visible" },
+        { type: "image_url", imageUrl: { url: "https://example.test/a" } },
+      ],
+      apiContent: [{ type: "text", text: "provider" }],
+      displayKind: "model_switch",
+      displayMetadata: { model: "next", attempt: 2 },
+      synthetic: true,
+      context: { source: "gateway", tags: ["one"] },
+      createdAt: "2026-08-05T00:00:02.000Z",
+    }, {
+      schemaVersion: 1,
+      id: "2",
+      sessionId: "legacy-1",
+      sequence: 1,
+      role: "assistant",
+      content: "answer",
+      apiContent: "provider answer",
+      context: "plain-context",
+      createdAt: "2026-08-05T00:00:01.000Z",
+    }]);
+  } finally {
+    repo.close();
+    rmSync(paths.home, { recursive: true, force: true });
+  }
+});
+
 test("SQLite adds missing contract metadata columns without rewriting an older database", async () => {
   const paths = homePath();
   const database = new Database(paths.database);
@@ -328,6 +429,21 @@ test("SQLite adds missing contract metadata columns without rewriting an older d
   const repo = new SQLiteSessionRepository(paths.database);
   try {
     await repo.appendMessages("old-1", [message("reply", { role: "assistant" })]);
+    await repo.appendMessages("old-1", [message("sidecar", {
+      role: "assistant",
+      apiContent: [{ type: "text", text: "provider" }],
+      displayKind: "hidden",
+      displayMetadata: { source: "test" },
+      synthetic: true,
+      context: { retry: 1 },
+    })]);
+    expect((await repo.listMessages("old-1"))[2]).toMatchObject({
+      apiContent: [{ type: "text", text: "provider" }],
+      displayKind: "hidden",
+      displayMetadata: { source: "test" },
+      synthetic: true,
+      context: { retry: 1 },
+    });
     await repo.saveCheckpoint({
       schemaVersion: 1, id: "old-checkpoint", sessionId: "old-1", messageSequence: 2,
       createdAt: "2026-08-05T00:00:02.000Z", reason: "migration",
@@ -341,7 +457,7 @@ test("SQLite adds missing contract metadata columns without rewriting an older d
         updatedAt: "2026-08-05T00:00:02.000Z", checkpointId: "old-checkpoint",
       },
     });
-    expect((await repo.listMessages("old-1")).map(({ content }) => content)).toEqual(["hello", "reply"]);
+    expect((await repo.listMessages("old-1")).map(({ content }) => content)).toEqual(["hello", "reply", "sidecar"]);
     expect((await repo.getCheckpoint("old-1", "old-checkpoint"))?.formatVersion).toBe(1);
     expect((await repo.getMigrationState("old-1"))?.recovery?.checkpointId).toBe("old-checkpoint");
   } finally {

@@ -279,4 +279,77 @@ describe("InMemorySessionRepository", () => {
     assert.equal((await repository.listMessages("session-1"))[0]?.content instanceof Array, true);
     assert.equal(((await repository.listMessages("session-1"))[0]?.content as { text: string }[])[0]?.text, "inspect image");
   });
+
+  test("round-trips message sidecars through drafts and atomic writes defensively", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+    const content = [{ type: "text" as const, text: "visible" }];
+    const apiContent = [{ type: "text" as const, text: "provider" }];
+    const context = { source: "gateway", tags: ["one"] };
+    const draft = {
+      role: "user" as const,
+      content,
+      apiContent,
+      displayKind: "model_switch",
+      displayMetadata: { model: "next" },
+      synthetic: true,
+      context,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    };
+
+    await repository.commitTurn({ sessionId: "session-1", messages: [draft] });
+    content[0].text = "changed caller content";
+    apiContent[0].text = "changed caller API content";
+    context.tags[0] = "changed caller context";
+
+    const read = (await repository.listMessages("session-1"))[0];
+    assert.deepEqual(read, {
+      schemaVersion: PERSISTENCE_SCHEMA_VERSION,
+      id: "session-1:message:0",
+      sessionId: "session-1",
+      sequence: 0,
+      role: "user",
+      content: [{ type: "text", text: "visible" }],
+      apiContent: [{ type: "text", text: "provider" }],
+      displayKind: "model_switch",
+      displayMetadata: { model: "next" },
+      synthetic: true,
+      context: { source: "gateway", tags: ["one"] },
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    (read!.context as { tags: string[] }).tags[0] = "changed returned context";
+    assert.equal(((await repository.listMessages("session-1"))[0]!.context as { tags: string[] }).tags[0], "one");
+  });
+
+  test("rolls back sidecar-bearing atomic drafts with the complete turn", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+
+    await assert.rejects(repository.commitTurn({
+      sessionId: "session-1",
+      messages: [{
+        ...message("synthetic"),
+        apiContent: "provider-only",
+        displayKind: "hidden",
+        synthetic: true,
+        context: { reason: "retry" },
+      }],
+      migrationState: {
+        schemaVersion: PERSISTENCE_SCHEMA_VERSION,
+        sessionId: "session-1",
+        updatedAt: "2026-01-01T00:00:02.000Z",
+        runtime,
+        recovery: {
+          turnId: "turn-invalid",
+          status: "running",
+          startedAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:02.000Z",
+          pendingToolCallIds: ["missing"],
+        },
+      },
+    }), /unknown tool call/);
+
+    assert.deepEqual(await repository.listMessages("session-1"), []);
+  });
 });

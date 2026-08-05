@@ -53,7 +53,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isJsonValue(value: unknown): boolean {
+function copy<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => copy(item)) as T;
+  if (value !== null && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) result[key] = copy(item);
+    return result as T;
+  }
+  return value;
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (Array.isArray(value)) return value.every(isJsonValue);
@@ -167,6 +177,31 @@ function legacyContent(row: SqlRow): MessageContent {
   return decoded !== undefined && isMessageContent(decoded) ? decoded : raw;
 }
 
+function legacyMessageContent(value: SqlValue): MessageContent | undefined {
+  if (typeof value !== "string") return undefined;
+  const decoded = legacyJson(value);
+  return decoded !== undefined && isMessageContent(decoded) ? decoded : value;
+}
+
+function legacyJsonObject(value: SqlValue): JsonObject | undefined {
+  const decoded = legacyJson(value);
+  return isJsonObject(decoded) ? decoded : undefined;
+}
+
+function legacyJsonValue(value: SqlValue): JsonValue | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const decoded = legacyJson(value);
+  return decoded !== undefined && isJsonValue(decoded) ? decoded :
+    (typeof value === "string" ? value : undefined);
+}
+
+function legacyBoolean(value: SqlValue): boolean | undefined {
+  if (value === 0 || value === "0" || value === "false") return false;
+  if (value === 1 || value === "1" || value === "true") return true;
+  return undefined;
+}
+
 function legacyToolCalls(row: SqlRow): readonly ToolCall[] | undefined {
   const decoded = legacyJson(row.tool_calls);
   if (!Array.isArray(decoded)) return undefined;
@@ -225,6 +260,11 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_result_json TEXT,
   finish_reason TEXT,
   usage_json TEXT,
+  api_content_json TEXT,
+  display_kind TEXT,
+  display_metadata_json TEXT,
+  synthetic INTEGER,
+  context_json TEXT,
   UNIQUE(session_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS idx_data_layer_messages_session_sequence
@@ -436,6 +476,11 @@ export class SQLiteSessionRepository implements SessionRepository {
       ["messages", "tool_result_json", "TEXT"],
       ["messages", "finish_reason", "TEXT"],
       ["messages", "usage_json", "TEXT"],
+      ["messages", "api_content_json", "TEXT"],
+      ["messages", "display_kind", "TEXT"],
+      ["messages", "display_metadata_json", "TEXT"],
+      ["messages", "synthetic", "INTEGER"],
+      ["messages", "context_json", "TEXT"],
     ];
     const known = new Map<"sessions" | "messages", Set<string>>([
       ["sessions", columns("sessions")],
@@ -519,6 +564,29 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   private addOptionalMessageFields(message: SessionMessage, row: SqlRow): void {
+    if (row.api_content_json !== null && row.api_content_json !== undefined) {
+      const content = parseJson(row.api_content_json, "messages.api_content_json");
+      if (!isMessageContent(content)) throw new UnsupportedSchemaError("messages.api_content_json is invalid content");
+      message.apiContent = content;
+    }
+    const displayKind = optionalString(row, "display_kind", "messages");
+    if (displayKind !== undefined) message.displayKind = displayKind;
+    if (row.display_metadata_json !== null && row.display_metadata_json !== undefined) {
+      const metadata = parseJson(row.display_metadata_json, "messages.display_metadata_json");
+      if (!isJsonObject(metadata)) throw new UnsupportedSchemaError("messages.display_metadata_json is invalid");
+      message.displayMetadata = metadata;
+    }
+    if (row.synthetic !== null && row.synthetic !== undefined) {
+      if (row.synthetic !== 0 && row.synthetic !== 1) {
+        throw new UnsupportedSchemaError("messages.synthetic is invalid");
+      }
+      message.synthetic = row.synthetic === 1;
+    }
+    if (row.context_json !== null && row.context_json !== undefined) {
+      const context = parseJson(row.context_json, "messages.context_json");
+      if (!isJsonValue(context)) throw new UnsupportedSchemaError("messages.context_json is invalid");
+      message.context = context;
+    }
     const name = optionalString(row, "name", "messages");
     const toolCallId = optionalString(row, "tool_call_id", "messages");
     const finishReason = optionalString(row, "finish_reason", "messages");
@@ -601,6 +669,18 @@ export class SQLiteSessionRepository implements SessionRepository {
       content: legacyContent(row),
       createdAt: timestamp(row.timestamp, "messages.timestamp"),
     };
+    const apiContent = legacyMessageContent(row.api_content);
+    if (apiContent !== undefined && row.content !== null && row.content !== undefined) {
+      message.apiContent = apiContent;
+    }
+    const displayKind = optionalString(row, "display_kind", "messages");
+    if (displayKind !== undefined) message.displayKind = displayKind;
+    const displayMetadata = legacyJsonObject(row.display_metadata);
+    if (displayMetadata !== undefined) message.displayMetadata = displayMetadata;
+    const synthetic = legacyBoolean(row.synthetic);
+    if (synthetic !== undefined) message.synthetic = synthetic;
+    const context = legacyJsonValue(row.context);
+    if (context !== undefined) message.context = context;
     if (toolCallId !== undefined) {
       message.toolCallId = toolCallId;
       const toolResult: ToolResult = {
@@ -655,8 +735,8 @@ export class SQLiteSessionRepository implements SessionRepository {
       const id = draft.id ?? `${sessionId}:message:${nextSequence + offset}`;
       if (id.length === 0 || ids.has(id)) throw new Error(`Duplicate message id: ${id}`);
       ids.add(id);
-      return { ...draft, schemaVersion: PERSISTENCE_SCHEMA_VERSION, id, sessionId,
-        sequence: nextSequence + offset };
+      return copy({ ...draft, schemaVersion: PERSISTENCE_SCHEMA_VERSION, id, sessionId,
+        sequence: nextSequence + offset });
     });
     assertValidSessionMessages([...existing, ...appended], sessionId);
     const callIds = new Set(this.listToolCallsNow(sessionId).map((call) => call.id));
@@ -665,12 +745,16 @@ export class SQLiteSessionRepository implements SessionRepository {
       this.run(
         `INSERT INTO messages
           (id, session_id, schema_version, sequence, role, content_json, created_at, name,
-           tool_calls_json, tool_call_id, tool_result_json, finish_reason, usage_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           tool_calls_json, tool_call_id, tool_result_json, finish_reason, usage_json,
+           api_content_json, display_kind, display_metadata_json, synthetic, context_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         message.id, message.sessionId, message.schemaVersion, message.sequence, message.role,
         json(message.content), message.createdAt, message.name ?? null,
         optionalJson(message.toolCalls), message.toolCallId ?? null, optionalJson(message.toolResult),
-        message.finishReason ?? null, optionalJson(message.usage),
+        message.finishReason ?? null, optionalJson(message.usage), optionalJson(message.apiContent),
+        message.displayKind ?? null, optionalJson(message.displayMetadata),
+        message.synthetic === undefined ? null : message.synthetic ? 1 : 0,
+        optionalJson(message.context),
       );
       for (const call of message.toolCalls ?? []) {
         if (callIds.has(call.id)) throw new Error(`Duplicate tool call id: ${call.id}`);
@@ -699,7 +783,7 @@ export class SQLiteSessionRepository implements SessionRepository {
         );
       }
     }
-    return { messages: appended, firstSequence: appended[0]?.sequence ?? null,
+    return { messages: copy(appended), firstSequence: appended[0]?.sequence ?? null,
       lastSequence: appended[appended.length - 1]?.sequence ?? null };
   }
 

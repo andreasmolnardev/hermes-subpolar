@@ -175,6 +175,13 @@ export type SessionMessage = {
   role: ChatRole;
   content: MessageContent;
   createdAt: string;
+  /** Exact provider-facing content when it differs from display content. */
+  apiContent?: MessageContent;
+  /** Presentation-only metadata retained for session resume and UI projections. */
+  displayKind?: string;
+  displayMetadata?: JsonObject;
+  synthetic?: boolean;
+  context?: JsonValue;
   name?: string;
   toolCalls?: readonly ToolCall[];
   toolCallId?: string;
@@ -413,6 +420,21 @@ function validatePersistedMessage(value: unknown): ContractValidation {
   if (!isChatRole(value.role)) return { valid: false, reason: "invalid message role" };
   if (!isMessageContent(value.content)) return { valid: false, reason: "invalid message content" };
   if (!isTimestamp(value.createdAt)) return { valid: false, reason: "message timestamp must be valid" };
+  if (value.apiContent !== undefined && !isMessageContent(value.apiContent)) {
+    return { valid: false, reason: "invalid API message content" };
+  }
+  if (value.displayKind !== undefined && typeof value.displayKind !== "string") {
+    return { valid: false, reason: "message display kind must be a string" };
+  }
+  if (value.displayMetadata !== undefined && !isJsonObject(value.displayMetadata)) {
+    return { valid: false, reason: "invalid message display metadata" };
+  }
+  if (value.synthetic !== undefined && typeof value.synthetic !== "boolean") {
+    return { valid: false, reason: "message synthetic flag must be a boolean" };
+  }
+  if (value.context !== undefined && !isJsonValue(value.context)) {
+    return { valid: false, reason: "invalid message context" };
+  }
   if (value.name !== undefined && typeof value.name !== "string") {
     return { valid: false, reason: "message name must be a string" };
   }

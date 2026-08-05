@@ -1,8 +1,5 @@
 # Subpolar UI Screen Specification (Hermes Fork)
-
-> Based solely on the UI sketches in the provided PDF. This document
-> intentionally describes the desired screens, their layout, components
-> and mental models. It is **not** an implementation plan.
+Web ui as only remaining ui. Remove tui and desktop app.
 
 ## Shared Layout
 
@@ -60,6 +57,26 @@ Center: - Conversation history - User and assistant messages - Explain
 Changes action - Composer - Workspace selector - Agent selector - Model
 selector - Permission selector - Attachment button
 
+Conversation history with realtime diff streaming. shows thinking as 'working...' until final message is generated. also shows diffviews:
+### Inline Change Reviews
+
+Whenever an agent modifies one or more files, the conversation displays inline diff views directly within the message stream.
+
+Each change block includes:
+
+- File name
+- Change summary
+- Unified or split diff view
+- Syntax highlighting
+- Added and removed lines
+- Collapsible unchanged sections
+- Expand to full file
+- Explain Changes action
+
+Multiple files are grouped together when they belong to the same task.
+
+This allows users to review modifications in context without leaving the conversation.
+
 Right: - Activity Panel
 
 ### Activity Panel
@@ -76,6 +93,17 @@ Shows: - Thinking - Planning - Tool calls - Browser automation - Git
 operations - Searches - Sub-agent activity - Completion
 
 Each entry displays duration.
+
+Each activity entry may reference generated artifacts, including:
+
+- File edits
+- Terminal output
+- Browser actions
+- Search results
+- Generated images
+- Diff reviews
+
+Selecting a file edit opens the corresponding inline diff within the conversation.
 
 #### Source Control
 
@@ -147,7 +175,8 @@ Contains a row of configurable execution context selectors.
 
 Workspace
 
-Displays the currently selected workspace (only shows when workspace isnt selected yet).
+Displays the currently selected workspace (only shows when workspace isnt selected yet so only in new convesation screen not in existing conversations).
+Also should feature Worktree support inspired by T3 Code.
 
 Determines:
 
@@ -252,6 +281,8 @@ Tools and skills are both searchable multi-select inputs with ability to create 
 
 The default hermes agent should be called master from now on.
 
+Tools should also be editable with their permissions either as allow, ask, auto or deny. auto does internal risk assesment using internal agent and using either of those other three or two depending when run from scheduled task or normal conversation.
+
 Agents define *who* performs work, which context and tools they have access to rather than *where* work happens.
 
 ------------------------------------------------------------------------
@@ -351,11 +382,12 @@ They are **not** selectable in the workspace selector.
 - Billing *explicitly removed*
 - Models: with pill shaped tab bar with Providers (Configure provider accounts, API keys, and custom endpoints) and Defaults.
 - New: Chat Providers (moved from 'messaging' tab in sidebar)
-- Gateway: Configure local, remote, or cloud Hermes gateway connections.
+- Gateway: Configure local, remote.
+ * todo * remove cloud hermes support. its purpose is to be a self hosted web app. so one instance only.
 - Keybinds: Customize keyboard shortcuts.
 - API Keys: Manage stored credentials and tool-related keys.
   * delete this. some of these now in tools section *
-- Tools: List of available tools. Tools should have a provider and a tool name. so when for example searxngs openapi tool server has a search tool, it should be identified through  searxng.web_search 
+- Intergrations: List of available tools. Tools should have a provider and a tool name. so when for example searxngs openapi tool server has a search tool, it should be identified through  searxng.web_search. Also add the abliity to add mcps, openapi servers, and other integrations such as git logins.
 - Skills: Markdown files explaining behaviour to agents.
 - Plugins: Enable and configure installed plugins.
 - Archived Chats: Browse and manage archived sessions.
@@ -369,3 +401,12 @@ Features that are for now removed:
 
 - Pets
 - Artifacts
+- Kanban
+
+#  Subpolar architecture
+- Tool backend
+- Harness - Agent loop
+- Frontend - web app
+
+## Roadmap:
+- Agent templates

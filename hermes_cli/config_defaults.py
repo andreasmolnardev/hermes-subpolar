@@ -1358,10 +1358,9 @@ DEFAULT_CONFIG = {
         # empty (the default) to keep the plugin a no-op — loopback /
         # ``--insecure`` operators and OAuth users are unaffected.
         #
-        # ``secret`` is the HMAC key used to sign the stateless session
-        # tokens this provider mints. When empty, a random per-process key
-        # is generated — fine for a single process, but sessions then
-        # don't survive a restart or span multiple workers. Set an
+        # ``secret`` remains accepted for legacy stateless provider instances.
+        # Subpolar persistent mode uses opaque tokens and SQLite digests, so
+        # it does not persist token plaintext or require a signing key.
         # explicit ``secret`` (32+ random bytes, base64/hex/raw) for
         # stable multi-worker / restart-surviving sessions. Compute a
         # ``password_hash`` with
@@ -1370,8 +1369,9 @@ DEFAULT_CONFIG = {
             "username": "",  # blank → plugin no-op (no password provider)
             "password_hash": "",  # scrypt$... (preferred — no plaintext at rest)
             "password": "",  # plaintext fallback (hashed in-memory at load)
-            "secret": "",  # token-signing key; blank → random per-process
+            "secret": "",  # token-signing key; Subpolar persists when blank
             "session_ttl_seconds": 0,  # 0 → plugin default (12h)
+            "allow_registration": False,  # explicit multi-user signup policy
         },
         # Drain-control service-credential configuration — read by the
         # bundled ``dashboard_auth/drain`` plugin (the first consumer of the

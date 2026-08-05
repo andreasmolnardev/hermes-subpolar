@@ -54,6 +54,24 @@ export {
   type SkinColors,
   type SkinColorToken
 } from './skin'
+export type {
+  SubpolarBootstrap,
+  SubpolarProjectGroup,
+  SubpolarWorkspace,
+  SubpolarWorktree,
+  WorkspaceMode
+} from './subpolar'
+export type {
+  AgentPermission,
+  AgentScope,
+  IntegrationKind,
+  SubpolarActivity,
+  SubpolarActivityKind,
+  SubpolarAgent,
+  SubpolarIntegration,
+  SubpolarScheduledTask,
+  SubpolarTerminal
+} from './subpolar-domain'
 export {
   buildHermesWebSocketUrl,
   type GatewayAuthMode,

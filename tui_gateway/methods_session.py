@@ -107,6 +107,11 @@ def _(rid, params: dict) -> dict:
             "tool_progress_mode": _load_tool_progress_mode(),
             "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
+            "owner": (
+                dict(current_principal())
+                if isinstance(current_principal(), dict)
+                else None
+            ),
         }
         _register_session_cwd(_sessions[sid])
 
@@ -190,7 +195,11 @@ def _(rid, params: dict) -> dict:
                     compact_rows=True,
                 )
                 if (s.get("source") or "").strip().lower() not in deny
-            ][:limit]
+            ]
+            if _authorization_user_id():
+                user_id = _authorization_user_id()
+                rows = [s for s in rows if _owner_user_id(s) == user_id]
+            rows = rows[:limit]
             return _ok(
                 rid,
                 {
@@ -308,6 +317,9 @@ def _(rid, params: dict) -> dict:
     target = params.get("session_id", "")
     if not target:
         return _err(rid, 4006, "session_id required")
+    if live := _find_live_session_by_key(target):
+        if err := _session_owner_error(rid, live[1]):
+            return err
     try:
         cols = int(params.get("cols", 80))
     except (TypeError, ValueError):
@@ -352,6 +364,8 @@ def _(rid, params: dict) -> dict:
             found = {}
         else:
             return _err(rid, 4007, "session not found")
+    if err := _durable_owner_error(rid, found):
+        return err
 
     # Follow the compression-continuation chain to the live tip so a resume on
     # a rotated-out parent id binds to the descendant that actually holds the
@@ -372,6 +386,8 @@ def _(rid, params: dict) -> dict:
         if tip and tip != target:
             target = tip
             found = db.get_session(target) or found
+            if err := _durable_owner_error(rid, found):
+                return err
 
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
@@ -399,6 +415,8 @@ def _(rid, params: dict) -> dict:
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
         if live is not None:
+            if err := _session_owner_error(rid, live[1]):
+                return err
             return _ok(rid, _reuse_live_payload(*live))
 
     # Lazy/watch resume: register the live session WITHOUT building an agent.
@@ -436,6 +454,7 @@ def _(rid, params: dict) -> dict:
             close_on_disconnect=is_truthy_value(params.get("close_on_disconnect", False)),
             profile_home=profile_home,
             lazy=True,
+            owner=current_principal(),
         )
         if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
             return _ok(rid, _reuse_live_payload(*live))
@@ -534,6 +553,7 @@ def _(rid, params: dict) -> dict:
             profile_home=profile_home,
             model_override=overrides.get("model_override"),
             resume_runtime_overrides=overrides or None,
+            owner=current_principal(),
         )
         if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
             return _ok(rid, _reuse_live_payload(*live))
@@ -678,6 +698,7 @@ def _(rid, params: dict) -> dict:
                     cwd=profile_resume_cwd,
                     session_db=db,
                     source=source,
+                    owner=current_principal(),
                 )
             finally:
                 if init_home_token is not None:
@@ -839,6 +860,10 @@ def _(rid, params: dict) -> dict:
             snapshot = list(_sessions.values())
     except Exception as e:
         return _err(rid, 5036, f"could not enumerate active sessions: {e}")
+    for session in snapshot:
+        if session.get("session_key") == target:
+            if err := _session_owner_error(rid, session):
+                return err
     active = {s.get("session_key") for s in snapshot if s.get("session_key")}
     if target in active:
         return _err(rid, 4023, "cannot delete an active session")
@@ -852,6 +877,9 @@ def _(rid, params: dict) -> dict:
         else:
             sessions_dir = get_hermes_home() / "sessions"
         try:
+            if hasattr(db, "get_session"):
+                if err := _durable_owner_error(rid, db.get_session(target)):
+                    return err
             deleted = db.delete_session(target, sessions_dir=sessions_dir)
         except Exception as e:
             return _err(rid, 5036, f"delete failed: {e}")
@@ -2720,6 +2748,7 @@ def _(rid, params: dict) -> dict:
                 session_db=branch_db,
                 source=source,
                 profile_home=parent_home,
+                owner=session.get("owner"),
             )
         finally:
             if secret_token is not None:

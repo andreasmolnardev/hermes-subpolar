@@ -2371,8 +2371,9 @@ dashboard:
     username: ""              # blank → plugin no-op
     password_hash: ""         # scrypt$... (preferred — no plaintext at rest)
     password: ""              # plaintext fallback (hashed in-memory at load)
-    secret: ""                # token-signing key; blank → random per-process
+    secret: ""                # legacy stateless key; SQLite mode stores token digests
     session_ttl_seconds: 0    # 0 → plugin default (12h)
+    allow_registration: false # explicit signup policy after bootstrap
   drain_auth:                 # Drain-control service-credential gate (dashboard_auth/drain plugin)
     scope: "drain"            # capability label on the verified principal
     min_secret_chars: 43      # entropy bar (url-safe-b64 chars; 43 ≈ 256 bits)
@@ -2381,4 +2382,4 @@ dashboard:
 - `theme` — dashboard visual theme.
 - `show_token_analytics` — off by default. The Analytics page and token/cost figures are a **local lower-bound estimate** (they exclude auxiliary calls, retries, fallbacks, and cache writes), so they can read far below the provider bill. Set `true` only if you understand they're not billing.
 - `public_url` — when set, this is the complete authority (scheme + host + optional path prefix) the OAuth `redirect_uri` is built from. Set it for deploys behind reverse proxies that don't reliably forward `X-Forwarded-*` headers. Leave empty to use proxy-header reconstruction.
-- `oauth` / `basic_auth` / `drain_auth` — auth provider config read by the bundled dashboard-auth plugins. The drain secret itself is **not** set here; it's provisioned via the `HERMES_DASHBOARD_DRAIN_SECRET` env var. See [Web Dashboard](/user-guide/features/web-dashboard) for full auth setup.
+- `oauth` / `basic_auth` / `drain_auth` — auth provider config read by bundled dashboard-auth plugins. Subpolar stores multi-user auth in `HERMES_HOME/dashboard_auth.db`; `allow_registration` must be explicit after first-user bootstrap. The drain secret itself is **not** set here; it's provisioned via the `HERMES_DASHBOARD_DRAIN_SECRET` env var. See [Web Dashboard](/user-guide/features/web-dashboard) for full auth setup.

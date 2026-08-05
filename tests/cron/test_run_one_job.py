@@ -10,11 +10,19 @@ The first test characterizes the sequence as driven through `tick()` (proving
 the extraction didn't change `tick`'s behavior); the rest unit-test the
 extracted helper directly.
 """
+
 import cron.scheduler as s
 
 
-def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final response",
-                    error=None, silent_marker_in=None):
+def _patch_pipeline(
+    monkeypatch,
+    *,
+    success=True,
+    output="out",
+    final="final response",
+    error=None,
+    silent_marker_in=None,
+):
     """Patch the job pipeline primitives and record the call order."""
     calls = []
 
@@ -109,3 +117,85 @@ def test_run_one_job_installs_secret_scope_under_multiplex(monkeypatch, tmp_path
     assert ss.current_secret_scope() is None
 
 
+def test_subpolar_runtime_policy_blocks_changed_task_before_agent(
+    monkeypatch, tmp_path
+):
+    """Runtime policy is re-read after publication; no approval waiter or agent runs."""
+    from hermes_cli.subpolar_agents import AgentStore
+    from hermes_cli.subpolar_schedules import (
+        SubpolarScheduleService,
+        SubpolarScheduleStore,
+    )
+    from hermes_cli.subpolar_store import SubpolarStore
+
+    home = tmp_path / "home"
+    root = home / "workspace"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("SUBPOLAR_ALLOWED_ROOTS", str(home))
+    db = home / "subpolar.db"
+    subpolar = SubpolarStore(db)
+    workspace = subpolar.create_workspace(
+        owner="alice", name="main", mode="local", root=str(root)
+    )
+    agents = AgentStore(db)
+    agent = agents.ensure_master("alice")
+    service = SubpolarScheduleService(
+        store=SubpolarScheduleStore(db), subpolar=subpolar, agents=agents
+    )
+    task = service.create(
+        owner="alice",
+        values={
+            "name": "report",
+            "prompt": "report",
+            "schedule": "every 1h",
+            "workspace_id": workspace["id"],
+            "agent_id": agent["id"],
+        },
+        draft=True,
+    )
+    task = service.store.update_task(
+        owner="alice", task_id=task["id"], changes={"cron_job_id": "cron-subpolar"}
+    )
+    # Change policy after publication: requested tool now lacks a non-interactive allow.
+    service.save_draft(
+        owner="alice", task_id=task["id"], draft={"requested_tools": ["provider.shell"]}
+    )
+
+    agent_calls = []
+    monkeypatch.setattr(
+        s,
+        "run_job",
+        lambda *args, **kwargs: (
+            agent_calls.append(args) or (True, "out", "final", None)
+        ),
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda *args: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(s, "mark_job_run", lambda *args, **kwargs: None)
+
+    assert (
+        s.run_one_job({
+            "id": "cron-subpolar",
+            "subpolar_owner": "alice",
+            "subpolar_task_id": task["id"],
+        })
+        is False
+    )
+    assert agent_calls == []
+
+    for invalid_context in (
+        {
+            "id": "cron-missing-task",
+            "subpolar_owner": "alice",
+            "subpolar_task_id": "missing",
+        },
+        {
+            "id": "cron-missing-owner",
+            "subpolar_owner": "",
+            "subpolar_task_id": task["id"],
+        },
+        {"id": "cron-partial-context", "subpolar_owner": "alice"},
+    ):
+        assert s.run_one_job(invalid_context) is False
+    assert agent_calls == []

@@ -55,11 +55,13 @@ def _ensure_croniter() -> bool:
     if HAS_CRONITER is None:
         try:
             from croniter import croniter as _croniter
+
             croniter = _croniter
             HAS_CRONITER = True
         except ImportError:
             HAS_CRONITER = False
     return bool(HAS_CRONITER)
+
 
 # =============================================================================
 # Configuration
@@ -251,6 +253,7 @@ def _job_running_in_this_process(job_id: str) -> bool:
     """
     try:
         from cron.scheduler import get_running_job_ids
+
         return job_id in get_running_job_ids()
     except Exception:
         logger.warning(
@@ -342,12 +345,17 @@ def _jobs_lock():
                                 break
                             time.sleep(0.1)
                 elif msvcrt is not None:
-                    getattr(msvcrt, "locking")(lock_fd.fileno(), getattr(msvcrt, "LK_LOCK"), 1)
+                    getattr(msvcrt, "locking")(
+                        lock_fd.fileno(), getattr(msvcrt, "LK_LOCK"), 1
+                    )
             except (OSError, IOError) as e:
                 # Never let a locking failure take down cron writes — fall back to
                 # in-process-only protection (still held via _jobs_file_lock).
-                logger.warning("jobs.json cross-process lock unavailable (%s); "
-                               "proceeding with in-process lock only", e)
+                logger.warning(
+                    "jobs.json cross-process lock unavailable (%s); "
+                    "proceeding with in-process lock only",
+                    e,
+                )
             try:
                 yield
             finally:
@@ -356,7 +364,9 @@ def _jobs_lock():
                         if fcntl is not None:
                             fcntl.flock(lock_fd, fcntl.LOCK_UN)
                         elif msvcrt is not None:
-                            getattr(msvcrt, "locking")(lock_fd.fileno(), getattr(msvcrt, "LK_UNLCK"), 1)
+                            getattr(msvcrt, "locking")(
+                                lock_fd.fileno(), getattr(msvcrt, "LK_UNLCK"), 1
+                            )
                     except (OSError, IOError):
                         pass
                     finally:
@@ -364,11 +374,12 @@ def _jobs_lock():
         finally:
             _jobs_lock_state.depth = 0
 
+
 # Fields on a cron job that must never change after creation. ``id`` is used
 # as a filesystem path component under ``OUTPUT_DIR``; allowing it to be
 # updated lets an unsafe value (``../escape``, absolute path, nested) leak
 # into output writes/deletes.
-_IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+_IMMUTABLE_JOB_FIELDS = frozenset({"id", "subpolar_owner", "subpolar_task_id"})
 
 
 def _job_output_dir(job_id: str) -> Path:
@@ -387,7 +398,9 @@ def _job_output_dir(job_id: str) -> Path:
     return _current_cron_store().output_dir / text
 
 
-def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
+def _normalize_skill_list(
+    skill: Optional[str] = None, skills: Optional[Any] = None
+) -> List[str]:
     """Normalize legacy/single-skill and multi-skill inputs into a unique ordered list."""
     if skills is None:
         raw_items = [skill] if skill else []
@@ -523,7 +536,10 @@ def _preserve_file_ownership(path: Path, before: Optional[os.stat_result]) -> No
             "Could not restore ownership of %s to uid=%s gid=%s after rewrite: %s "
             "— if the gateway runs as a different user, its cron ticker may now "
             "be locked out (see issue #68483).",
-            path, before.st_uid, before.st_gid, e,
+            path,
+            before.st_uid,
+            before.st_gid,
+            e,
         )
 
 
@@ -540,37 +556,42 @@ def ensure_dirs():
 # Schedule Parsing
 # =============================================================================
 
+
 def parse_duration(s: str) -> int:
     """
     Parse duration string into minutes.
-    
+
     Examples:
         "30m" → 30
         "2h" → 120
         "1d" → 1440
     """
     s = s.strip().lower()
-    match = re.match(r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$', s)
+    match = re.match(
+        r"^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$", s
+    )
     if not match:
-        raise ValueError(f"Invalid duration: '{s}'. Use format like '30m', '2h', or '1d'")
-    
+        raise ValueError(
+            f"Invalid duration: '{s}'. Use format like '30m', '2h', or '1d'"
+        )
+
     value = int(match.group(1))
     unit = match.group(2)[0]  # First char: m, h, or d
-    
-    multipliers = {'m': 1, 'h': 60, 'd': 1440}
+
+    multipliers = {"m": 1, "h": 60, "d": 1440}
     return value * multipliers[unit]
 
 
 def parse_schedule(schedule: str) -> Dict[str, Any]:
     """
     Parse schedule string into structured format.
-    
+
     Returns dict with:
         - kind: "once" | "interval" | "cron"
         - For "once": "run_at" (ISO timestamp)
         - For "interval": "minutes" (int)
         - For "cron": "expr" (cron expression)
-    
+
     Examples:
         "30m"              → once in 30 minutes
         "2h"               → once in 2 hours
@@ -582,41 +603,33 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     schedule = schedule.strip()
     original = schedule
     schedule_lower = schedule.lower()
-    
+
     # "every X" pattern → recurring interval
     if schedule_lower.startswith("every "):
         duration_str = schedule[6:].strip()
         minutes = parse_duration(duration_str)
-        return {
-            "kind": "interval",
-            "minutes": minutes,
-            "display": f"every {minutes}m"
-        }
-    
+        return {"kind": "interval", "minutes": minutes, "display": f"every {minutes}m"}
+
     # Check for cron expression (5 or 6 space-separated fields)
     # Cron fields: minute hour day month weekday [year]
     parts = schedule.split()
-    if len(parts) >= 5 and all(
-        re.match(r'^[\d\*\-,/]+$', p) for p in parts[:5]
-    ):
+    if len(parts) >= 5 and all(re.match(r"^[\d\*\-,/]+$", p) for p in parts[:5]):
         if not _ensure_croniter():
-            raise ValueError("Cron expressions require 'croniter' package. Install with: pip install croniter")
+            raise ValueError(
+                "Cron expressions require 'croniter' package. Install with: pip install croniter"
+            )
         # Validate cron expression
         try:
             croniter(schedule)
         except Exception as e:
             raise ValueError(f"Invalid cron expression '{schedule}': {e}")
-        return {
-            "kind": "cron",
-            "expr": schedule,
-            "display": schedule
-        }
-    
+        return {"kind": "cron", "expr": schedule, "display": schedule}
+
     # ISO timestamp (contains T or looks like date)
-    if 'T' in schedule or re.match(r'^\d{4}-\d{2}-\d{2}', schedule):
+    if "T" in schedule or re.match(r"^\d{4}-\d{2}-\d{2}", schedule):
         try:
             # Parse and validate
-            dt = datetime.fromisoformat(schedule.replace('Z', '+00:00'))
+            dt = datetime.fromisoformat(schedule.replace("Z", "+00:00"))
             # Make naive timestamps timezone-aware at parse time so the stored
             # value doesn't depend on the system timezone matching at check time.
             #
@@ -635,11 +648,11 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             return {
                 "kind": "once",
                 "run_at": dt.isoformat(),
-                "display": f"once at {dt.strftime('%Y-%m-%d %H:%M')}"
+                "display": f"once at {dt.strftime('%Y-%m-%d %H:%M')}",
             }
         except ValueError as e:
             raise ValueError(f"Invalid timestamp '{schedule}': {e}")
-    
+
     # Duration like "30m", "2h", "1d" → one-shot from now
     try:
         minutes = parse_duration(schedule)
@@ -647,11 +660,11 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         return {
             "kind": "once",
             "run_at": run_at.isoformat(),
-            "display": f"once in {original}"
+            "display": f"once in {original}",
         }
     except ValueError:
         pass
-    
+
     raise ValueError(
         f"Invalid schedule '{original}'. Use:\n"
         f"  - Duration: '30m', '2h', '1d' (one-shot)\n"
@@ -769,7 +782,9 @@ def _compute_grace_seconds(schedule: dict) -> int:
     return MIN_GRACE
 
 
-def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None) -> Optional[str]:
+def compute_next_run(
+    schedule: Dict[str, Any], last_run_at: Optional[str] = None
+) -> Optional[str]:
     """
     Compute the next run time for a schedule.
 
@@ -835,6 +850,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Ticker heartbeat (liveness signal for `hermes cron status`)
 # =============================================================================
 
+
 def _atomic_write_epoch(path: Path) -> None:
     """Atomically write the current epoch time to ``path``.
 
@@ -850,7 +866,9 @@ def _atomic_write_epoch(path: Path) -> None:
 def _atomic_write_counter(path: Path, value: int) -> None:
     """Atomically persist a non-negative integer counter."""
     ensure_dirs()
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".count_")
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), suffix=".tmp", prefix=".count_"
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(str(max(0, value)))
@@ -1010,6 +1028,7 @@ def get_ticker_last_error() -> Optional[str]:
 # Job CRUD Operations
 # =============================================================================
 
+
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     jobs_file = _current_cron_store().jobs_file
@@ -1023,13 +1042,13 @@ def load_jobs() -> List[Dict[str, Any]]:
         # utf-8-sig: Windows Notepad / PowerShell 5.1 Set-Content -Encoding UTF8
         # write a leading BOM; json.load under plain utf-8 raises
         # JSONDecodeError("Unexpected UTF-8 BOM") and takes down cron.
-        with open(jobs_file, 'r', encoding='utf-8-sig') as f:
+        with open(jobs_file, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         _strict_retry = True
         try:
-            with open(jobs_file, 'r', encoding='utf-8-sig') as f:
+            with open(jobs_file, "r", encoding="utf-8-sig") as f:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
@@ -1079,10 +1098,14 @@ def _save_jobs_unlocked(jobs: List[Dict[str, Any]]):
             _stat_before = os.stat(jobs_file.parent)
         except OSError:
             _stat_before = None
-    fd, tmp_path = tempfile.mkstemp(dir=str(jobs_file.parent), suffix='.tmp', prefix='.jobs_')
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_"
+    )
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(
+                {"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2
+            )
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, jobs_file)
@@ -1156,6 +1179,7 @@ def _resolve_default_model_snapshot() -> Optional[str]:
         cfg = read_user_config_raw(cfg_path)
         try:
             from hermes_cli import managed_scope
+
             cfg = managed_scope.apply_managed_overlay(cfg)
         except Exception:
             pass
@@ -1179,7 +1203,9 @@ def _resolve_default_model_snapshot() -> Optional[str]:
         return None
 
 
-def _normalize_job_optional_text(value: Any, *, strip_trailing_slash: bool = False) -> Optional[str]:
+def _normalize_job_optional_text(
+    value: Any, *, strip_trailing_slash: bool = False
+) -> Optional[str]:
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -1233,7 +1259,9 @@ def _compute_provider_model_snapshots(
     return provider_snapshot, model_snapshot
 
 
-def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+def _normalized_inference_axes(
+    job: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
     """Return the stored inference-routing fields in their semantic form."""
     return (
         _normalize_job_optional_text(job.get("provider")),
@@ -1261,6 +1289,8 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    subpolar_owner: Optional[str] = None,
+    subpolar_task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1329,14 +1359,28 @@ def create_job(
     normalized_skills = _normalize_skill_list(skill, skills)
     normalized_model = _normalize_job_optional_text(model)
     normalized_provider = _normalize_job_optional_text(provider)
-    normalized_base_url = _normalize_job_optional_text(base_url, strip_trailing_slash=True)
+    normalized_base_url = _normalize_job_optional_text(
+        base_url, strip_trailing_slash=True
+    )
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
-    normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
+    normalized_toolsets = (
+        [str(t).strip() for t in enabled_toolsets if str(t).strip()]
+        if enabled_toolsets
+        else None
+    )
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
-    normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    normalized_attach = (
+        attach_to_session if isinstance(attach_to_session, bool) else None
+    )
+    normalized_subpolar_owner = _normalize_job_optional_text(subpolar_owner)
+    normalized_subpolar_task_id = _normalize_job_optional_text(subpolar_task_id)
+    if (normalized_subpolar_owner is None) != (normalized_subpolar_task_id is None):
+        raise ValueError(
+            "subpolar_owner and subpolar_task_id must be provided together"
+        )
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1363,9 +1407,14 @@ def create_job(
     # `cronjob` model tool — which calls create_job directly — is also
     # covered, not just `hermes cron create`.
     from cron.lifecycle_guard import check_gateway_lifecycle
+
     check_gateway_lifecycle(prompt_text, normalized_script)
 
-    label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
+    label_source = (
+        prompt_text
+        or (normalized_skills[0] if normalized_skills else None)
+        or (normalized_script if normalized_no_agent else None)
+    ) or "cron job"
 
     provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
         provider=normalized_provider,
@@ -1409,7 +1458,7 @@ def create_job(
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
             "times": repeat,  # None = forever
-            "completed": 0
+            "completed": 0,
         },
         "enabled": True,
         "state": "scheduled",
@@ -1427,6 +1476,9 @@ def create_job(
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
     }
+    if normalized_subpolar_owner is not None:
+        job["subpolar_owner"] = normalized_subpolar_owner
+        job["subpolar_task_id"] = normalized_subpolar_task_id
     # Only persist attach_to_session when explicitly set, so existing jobs and
     # the common case stay byte-identical (absent key => fall back to the
     # global cron.mirror_delivery config, default off).
@@ -1533,12 +1585,17 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
             schedule_changed = "schedule" in updates
-            inference_fields_changed = bool(
-                {"provider", "model", "base_url", "no_agent"}.intersection(updates)
-            ) and _normalized_inference_axes(updated) != previous_inference_axes
+            inference_fields_changed = (
+                bool(
+                    {"provider", "model", "base_url", "no_agent"}.intersection(updates)
+                )
+                and _normalized_inference_axes(updated) != previous_inference_axes
+            )
 
             if "skills" in updates or "skill" in updates:
-                normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
+                normalized_skills = _normalize_skill_list(
+                    updated.get("skill"), updated.get("skills")
+                )
                 updated["skills"] = normalized_skills
                 updated["skill"] = normalized_skills[0] if normalized_skills else None
 
@@ -1589,7 +1646,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updated["provider_snapshot"] = provider_snapshot
                 updated["model_snapshot"] = model_snapshot
 
-            if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
+            if (
+                updated.get("enabled", True)
+                and updated.get("state") != "paused"
+                and not updated.get("next_run_at")
+            ):
                 next_run = compute_next_run(updated["schedule"])
                 if next_run is None and updated["schedule"].get("kind") == "once":
                     run_at = updated["schedule"].get("run_at", "unknown")
@@ -1686,11 +1747,15 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
-def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+def mark_job_run(
+    job_id: str,
+    success: bool,
+    error: Optional[str] = None,
+    delivery_error: Optional[str] = None,
+):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
 
@@ -1715,7 +1780,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # is claimable again. No-op if the job never carried a claim.
                 if job.get("run_claim") is not None:
                     job["run_claim"] = None
-                
+
                 # Increment completed count.  Finite one-shot jobs are
                 # pre-claimed by claim_dispatch() BEFORE the side effect runs
                 # (issue #38758), which already incremented completed — do not
@@ -1753,7 +1818,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         job["next_run_at"] = None
                         save_jobs(jobs)
                         return
-                
+
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
 
@@ -1832,7 +1897,8 @@ def _write_wedged_oneshot_diagnostic(job: Dict[str, Any]) -> None:
     except Exception as e:
         logger.debug(
             "Failed to write wedged-oneshot diagnostic for job %r: %s",
-            job.get("id"), e,
+            job.get("id"),
+            e,
         )
 
 
@@ -1859,7 +1925,9 @@ def claim_dispatch(job_id: str) -> bool:
             if job["id"] != job_id:
                 continue
             if job.get("schedule", {}).get("kind") != "once":
-                return True  # recurring jobs use advance_next_run(), not dispatch claims
+                return (
+                    True  # recurring jobs use advance_next_run(), not dispatch claims
+                )
             repeat = job.get("repeat")
             if not repeat:
                 return True  # no repeat limit — always dispatch
@@ -2015,6 +2083,7 @@ def _machine_id() -> str:
         return explicit
     try:
         import socket
+
         host = socket.gethostname()
     except Exception:
         host = "unknown"
@@ -2091,12 +2160,11 @@ def _completed_oneshot_retention_days() -> float:
     """
     try:
         from hermes_cli.config import load_config
+
         cfg = load_config() or {}
         cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
         return float(
-            cron_cfg.get(
-                "completed_retention_days", COMPLETED_ONESHOT_RETENTION_DAYS
-            )
+            cron_cfg.get("completed_retention_days", COMPLETED_ONESHOT_RETENTION_DAYS)
         )
     except Exception:
         return float(COMPLETED_ONESHOT_RETENTION_DAYS)
@@ -2397,12 +2465,14 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                     continue
 
             if next_run_dt <= now:
-
                 # For recurring jobs, check if the scheduled time is stale
                 # (gateway was down and missed the window). Fast-forward to
                 # the next future occurrence instead of firing a stale run.
                 grace = _compute_grace_seconds(schedule)
-                if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
+                if (
+                    kind in {"cron", "interval"}
+                    and (now - next_run_dt).total_seconds() > grace
+                ):
                     # Job is past its catch-up grace window — skip accumulated
                     # missed runs but still execute once now to avoid deferring
                     # indefinitely (e.g. a long-running job just finished).
@@ -2533,6 +2603,7 @@ def _cron_output_keep() -> int:
     """Resolve the per-job output-file retention cap from config (``cron.output_retention``)."""
     try:
         from hermes_cli.config import load_config
+
         cfg = load_config() or {}
         cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
         return int(cron_cfg.get("output_retention", _CRON_OUTPUT_DEFAULT_KEEP))
@@ -2579,9 +2650,11 @@ def save_job_output(job_id: str, output: str):
     timestamp = _hermes_now().strftime("%Y-%m-%d_%H-%M-%S")
     output_file = job_output_dir / f"{timestamp}.md"
 
-    fd, tmp_path = tempfile.mkstemp(dir=str(job_output_dir), suffix='.tmp', prefix='.output_')
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(job_output_dir), suffix=".tmp", prefix=".output_"
+    )
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(output)
             f.flush()
             os.fsync(f.fileno())
@@ -2603,6 +2676,7 @@ def save_job_output(job_id: str, output: str):
 # =============================================================================
 # Skill reference rewriting (curator integration)
 # =============================================================================
+
 
 def referenced_skill_names() -> Set[str]:
     """Return the set of skill names referenced by ANY cron job.

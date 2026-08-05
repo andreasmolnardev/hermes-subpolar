@@ -151,6 +151,9 @@ _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
 _sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
 _prompt_lock = threading.Lock()
+_current_principal: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "hermes_gateway_principal", default=None
+)
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
@@ -1858,6 +1861,47 @@ def _err(rid, code: int, msg: str) -> dict:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
 
 
+def current_principal() -> Optional[dict]:
+    """Return authenticated identity bound to current RPC, if any."""
+    return _current_principal.get()
+
+
+def _authorization_user_id() -> str:
+    """Return browser identity; trusted internal and stdio stay unrestricted."""
+    principal = current_principal()
+    if not isinstance(principal, dict) or principal.get("provider") == "server-internal":
+        return ""
+    return str(principal.get("user_id") or "").strip()
+
+
+def _owner_user_id(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    owner = record.get("owner")
+    if isinstance(owner, dict):
+        return str(owner.get("user_id") or "").strip()
+    if isinstance(owner, str):
+        return owner.strip()
+    return str(record.get("owner_user_id") or "").strip()
+
+
+def _session_owner_error(rid, session: dict | None) -> dict | None:
+    user_id = _authorization_user_id()
+    owner_id = _owner_user_id(session)
+    if user_id and owner_id != user_id:
+        return _err(rid, -32001, "not authorized for session")
+    return None
+
+
+def _durable_owner_error(rid, row: dict | None) -> dict | None:
+    """Deny browser access to durable rows without a matching owner stamp."""
+    user_id = _authorization_user_id()
+    owner_id = _owner_user_id(row)
+    if user_id and owner_id != user_id:
+        return _err(rid, -32001, "not authorized for session")
+    return None
+
+
 def method(name: str):
     def dec(fn):
         _methods[name] = fn
@@ -1910,7 +1954,8 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
     the original behaviour for ``tui_gateway.entry``.
     """
     t = transport or _stdio_transport
-    token = bind_transport(t)
+    transport_token = bind_transport(t)
+    principal_token = _current_principal.set(getattr(t, "principal", None))
     try:
         normalized = _normalize_request(req)
         if isinstance(normalized, dict):
@@ -1935,7 +1980,8 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
 
         return None
     finally:
-        reset_transport(token)
+        _current_principal.reset(principal_token)
+        reset_transport(transport_token)
 
 
 def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
@@ -2271,7 +2317,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
 def _sess_nowait(params, rid):
     s = _sessions.get(params.get("session_id") or "")
-    return (s, None) if s else (None, _err(rid, 4001, "session not found"))
+    if not s:
+        return None, _err(rid, 4001, "session not found")
+    if err := _session_owner_error(rid, s):
+        return None, err
+    return s, None
 
 
 def _sess(params, rid):
@@ -2710,6 +2760,14 @@ def _ensure_session_db_row(session: dict) -> None:
             # means the launch/default profile (matches run_agent's convention).
             profile_name=Path(profile_home).name if profile_home else None,
         )
+        owner_id = _owner_user_id(session)
+        if owner_id:
+            from hermes_cli.subpolar_store import SubpolarStore
+
+            metadata_home = Path(profile_home) if profile_home else get_hermes_home()
+            SubpolarStore(metadata_home / "subpolar.db").claim_session_owner(
+                owner=owner_id, session_id=key
+            )
     except Exception as exc:
         # Disk-full is not a soft failure: if we swallow it here, prompt.submit
         # returns {"status":"streaming"} and the user's message vanishes with
@@ -6473,6 +6531,7 @@ def _init_session(
     session_db=None,
     source: str | None = None,
     profile_home: str | None = None,
+    owner: dict | None = None,
 ):
     now = time.time()
     with _sessions_lock:
@@ -6507,6 +6566,7 @@ def _init_session(
             # Pin async event emissions to whichever transport created the
             # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
             "transport": current_transport() or _stdio_transport,
+            "owner": dict(owner) if isinstance(owner, dict) else None,
         }
     _init_owns_db = False
     if session_db is not None:
@@ -7669,6 +7729,7 @@ def _deferred_session_record(
     lazy: bool = False,
     model_override=None,
     resume_runtime_overrides: dict | None = None,
+    owner: dict | None = None,
 ) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold
     resume) — _init_session's shape minus the agent."""
@@ -7706,6 +7767,7 @@ def _deferred_session_record(
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
         "transport": current_transport() or _stdio_transport,
+        "owner": dict(owner) if isinstance(owner, dict) else None,
     }
 
 

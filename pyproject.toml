@@ -194,9 +194,8 @@ voice = [
 # "Hey Hermes" wake word — on-device hotword detection. All engines are
 # optional; openWakeWord (ONNX) is the free default, sherpa-onnx adds
 # open-vocabulary phrases (any typed phrase, zero training), Porcupine is
-# the premium alternative. Desktop installs ([--include-desktop]) eager-install
-# [wake]+[voice] so the ear works instantly; CLI-only installs lazy-install on
-# first /wake; mirrored in tools/lazy_deps.py.
+# the premium alternative. Installations lazy-install [wake]+[voice] on first
+# use; mirrored in tools/lazy_deps.py.
 wake = [
   "openwakeword==0.6.0",
   "onnxruntime==1.27.0",
@@ -293,8 +292,8 @@ feishu = ["lark-oapi==1.6.8", "qrcode==7.4.2"]
 google = [
   # Required by the google-workspace skill (Gmail, Calendar, Drive, Contacts,
   # Sheets, Docs).  Declared here so dev environments (`uv sync --extra google`)
-  # and packagers ship them without hitting runtime `pip install` paths that
-  # fail in environments without pip (e.g. Nix-managed Python).
+  # and development environments ship them without hitting runtime install
+  # paths.
   "google-api-python-client==2.194.0",
   "google-auth==2.55.1",
   "google-auth-oauthlib==1.3.1",
@@ -372,8 +371,7 @@ exclude-newer = "14 days"
 exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false }
 
 [tool.setuptools]
-# Top-level single-file modules (not packages). Without this, uv2nix's
-# sealed venv is missing hermes_constants, run_agent, etc.
+# Top-level single-file modules (not packages).
 py-modules = [
   "run_agent",
   "model_tools",
@@ -401,9 +399,7 @@ include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*",
 [tool.setuptools.package-data]
 hermes_cli = ["observability/schemas/*.json"]
 # gateway/assets/ ships status_phrases.yaml and the Telegram BotFather
-# screenshot. Without this, sealed venvs (uv2nix) silently lose both —
-# status phrases fall back to the tiny hardcoded set and the Telegram
-# topic-setup image disappears. Loaded via Path(__file__).parent / "assets"
+# screenshot. Loaded via Path(__file__).parent / "assets"
 # in gateway/status_phrases.py and gateway/run.py.
 gateway = ["assets/**/*"]
 

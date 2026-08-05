@@ -119,10 +119,6 @@ CASES = {
         ["apps/shared/eslint.config.mjs"],
         _lanes(frontend=True, ci_review=True),
     ),
-    "bootstrap-installer eslint config → ci_review": (
-        ["apps/bootstrap-installer/eslint.config.mjs"],
-        _lanes(frontend=True, ci_review=True),
-    ),
     "prettier config → ci_review": (
         [".prettierrc"],
         _lanes(python=True, ci_review=True),

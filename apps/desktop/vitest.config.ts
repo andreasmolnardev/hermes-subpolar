@@ -16,16 +16,8 @@ const reactUi: TestProjectConfiguration = {
   }
 }
 
-const electronNative: TestProjectConfiguration = {
-  test: {
-    name: 'electron',
-    environment: 'node',
-    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}']
-  }
-}
-
 export default defineConfig({
   test: {
-    projects: [reactUi, electronNative]
+    projects: [reactUi]
   }
 })

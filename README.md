@@ -6,6 +6,10 @@ Hermes Subpolar transforms Hermes Agent into a graphical, self-hostable AI devel
 
 Whether running locally or as a Docker deployment in your homelab, Subpolar aims to provide an environment where humans and AI collaborate inside the same workspace rather than through an isolated chat window.
 
+## Supported Deployment
+
+Production deployment uses Docker Compose only. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
 ---
 
 # Philosophy
@@ -21,7 +25,7 @@ Users shouldn't have to wonder which files, terminals or repositories an agent c
 ### Implementation
 
 * Persistent Workspaces
-* Agent Profiles
+* Agents
 * Project Organization
 * Explicit Permissions
 * Workspace-specific resources
@@ -116,7 +120,7 @@ Changing workspaces changes the execution environment.
 
 ---
 
-## Reusable Agent Profiles
+## Reusable Agents
 
 Agents define **who** performs work.
 
@@ -253,15 +257,9 @@ Changing models never requires changing agents or workspaces.
 
 ## Docker-first Deployment
 
-Subpolar is designed to run equally well:
-
-* Locally
-* On workstations
-* Inside Docker
-* On home servers
-* On VPS deployments
-
-Persistent workspaces make remote deployments practical while preserving a desktop-like experience.
+Subpolar production deployment uses Docker Compose. Persistent workspaces make
+remote deployments practical while preserving a desktop-like experience. See
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ---
 
@@ -272,7 +270,7 @@ Subpolar extends Hermes rather than replacing it.
 ```
                  ┌─────────────────────┐
                  │     User Interface  │
-                 │ Desktop / Web / App │
+                  │      Web UI         │
                  └──────────┬──────────┘
                             │
                    Workspace Layer
@@ -297,26 +295,20 @@ Hermes continues to provide the execution engine while Subpolar provides the wor
 # Getting Started
 
 ```bash
-git clone https://github.com/<your-org>/hermes-subpolar
+git clone https://github.com/andreasmolnardev/hermes-subpolar
 cd hermes-subpolar
 
-# Install dependencies
-...
-
-# Start desktop
-...
-
-# Or run with Docker
-docker compose up
+# Start Subpolar
+docker compose up -d --build
 ```
 
-> Installation instructions will evolve alongside the project.
+Open `http://127.0.0.1:9119` after first-user authentication is configured.
 
 ---
 
 # Screens
 
-The desktop application currently consists of:
+The Subpolar web application currently consists of:
 
 * Conversation
 * New Chat
@@ -339,7 +331,7 @@ Every screen shares a common application shell consisting of:
 
 Current focus:
 
-* Hermes Desktop foundation
+* Web application foundation
 * Workspace management
 * Agent management
 * Activity Panel
@@ -364,7 +356,7 @@ Contributions are welcome.
 
 Areas of particular interest include:
 
-* Desktop development
+* Web application development
 * React
 * TypeScript
 * Agent UX

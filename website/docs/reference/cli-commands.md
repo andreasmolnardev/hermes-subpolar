@@ -92,7 +92,6 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes import-agent` | Import a Claude Code (`~/.claude`) or Codex CLI (`~/.codex`) setup. |
 | `hermes dashboard` | Launch the web dashboard for managing config, API keys, and sessions. |
 | `hermes serve` | Start the Hermes backend server (headless; powers the desktop app and remote backends). |
-| `hermes desktop` (alias `gui`) | Build and launch the native Electron desktop app. |
 | `hermes profile` | Manage profiles — multiple isolated Hermes instances. |
 | `hermes completion` | Print shell completion scripts (bash/zsh/fish). |
 | `hermes version` | Show version information. |
@@ -1549,7 +1548,7 @@ See the **[import guide](../user-guide/import-from-other-agents.md)** for the fu
 hermes serve [options]
 ```
 
-Start the Hermes **backend server** — the JSON-RPC/WebSocket gateway the [desktop app](/user-guide/desktop) and remote clients connect to. It is the same server `hermes dashboard` runs, but **headless**: it never opens a browser UI. The desktop app launches its own `hermes serve` backend; use this command directly when you want a headless backend on a remote host. Accepts the same `--host` / `--port` / `--insecure` / `--skip-build` / `--stop` / `--status` options as `hermes dashboard` below (a non-loopback bind engages the same auth gate). Requires the `[web]` extra; the embedded Chat socket additionally needs `[pty]` on a POSIX host.
+Start the Hermes **backend server** — the JSON-RPC/WebSocket gateway for remote clients. It is the same server `hermes dashboard` runs, but **headless**: it never opens a browser UI. Use this command directly when you want a headless backend on a remote host. Accepts the same `--host` / `--port` / `--insecure` / `--skip-build` / `--stop` / `--status` options as `hermes dashboard` below (a non-loopback bind engages the same auth gate). Requires the `[web]` extra; the embedded Chat socket additionally needs `[pty]` on a POSIX host.
 
 ## `hermes dashboard`
 
@@ -1684,7 +1683,7 @@ Additional behavior:
 | `hermes version` | Print version information. |
 | `hermes update` | Pull latest changes and reinstall dependencies. |
 
-| `hermes uninstall [--full] [--gui] [--dry-run] [--yes]` | Remove Hermes, optionally deleting all config/data. `--gui` removes only the desktop Chat GUI, leaving the agent intact; `--full` also deletes config/data; `--dry-run` prints what would be removed without changing anything; `--yes` skips prompts. |
+| `hermes uninstall [--full] [--dry-run] [--yes]` | Remove Hermes, optionally deleting all config/data. `--full` also deletes config/data; `--dry-run` prints what would be removed without changing anything; `--yes` skips prompts. |
 
 ## See also
 

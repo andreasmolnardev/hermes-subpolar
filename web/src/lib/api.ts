@@ -1,4 +1,11 @@
 import { buildHermesWebSocketUrl } from "@hermes/shared";
+import type {
+  SubpolarActivity,
+  SubpolarAgent,
+  SubpolarBootstrap,
+  SubpolarIntegration,
+  SubpolarScheduledTask,
+} from "@hermes/shared";
 
 // The dashboard can be served either at the root of its host (e.g.
 // https://kanban.tilos.com/) or under a URL prefix when reverse-proxied
@@ -301,6 +308,8 @@ function appendQueryParam(url: string, key: string, value?: string): string {
 }
 
 export interface SessionQueryOptions {
+  archived?: "exclude" | "only" | "include";
+  cwdPrefix?: string;
   profile?: string;
   order?: "created" | "recent";
   source?: string | null;
@@ -324,6 +333,8 @@ function normalizeSessionQueryOptions(
 
 function appendSessionFilters(url: string, options: SessionQueryOptions): string {
   let next = url;
+  next = appendQueryParam(next, "archived", options.archived);
+  next = appendQueryParam(next, "cwd_prefix", options.cwdPrefix);
   next = appendQueryParam(next, "source", options.source ?? undefined);
   if (options.sources && options.sources.length > 0) {
     next = appendQueryParam(next, "sources", options.sources.join(","));
@@ -1319,6 +1330,16 @@ export const api = {
     fetchJSON<SkillHubScan>(
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
+};
+
+export const subpolarApi = {
+  bootstrap: () => fetchJSON<SubpolarBootstrap>("/api/subpolar/bootstrap"),
+  agents: () => fetchJSON<{ agents: SubpolarAgent[] }>("/api/subpolar/agents"),
+  integrations: () => fetchJSON<{ integrations: SubpolarIntegration[] }>("/api/subpolar/integrations"),
+  schedules: () => fetchJSON<{ tasks: SubpolarScheduledTask[] }>("/api/subpolar/schedules"),
+  activity: (workspaceId?: string) => fetchJSON<{ activities: SubpolarActivity[]; next_cursor: string | null }>(
+    `/api/subpolar/activity${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ""}`,
+  ),
 };
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).

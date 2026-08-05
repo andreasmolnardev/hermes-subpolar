@@ -89,10 +89,12 @@ class WSTransport:
         loop: asyncio.AbstractEventLoop,
         *,
         peer: str = "unknown",
+        principal: dict | None = None,
     ) -> None:
         self._ws = ws
         self._loop = loop
         self._peer = peer
+        self.principal = principal
         self._closed = False
         # Token-coalescing buffer (CF-2). Streamed token frames land here and a
         # short timer flushes the batch. The lock guards the buffer + the
@@ -301,7 +303,14 @@ async def handle_ws(ws: Any) -> None:
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
 
-        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
+        scope = getattr(ws, "scope", None) or {}
+        principal = scope.get("subpolar_principal") if isinstance(scope, dict) else None
+        transport = WSTransport(
+            ws,
+            asyncio.get_running_loop(),
+            peer=peer,
+            principal=principal,
+        )
 
         # resolve_skin() reads config + initializes the skin engine —
         # synchronous I/O + CPU work that should not block the event loop

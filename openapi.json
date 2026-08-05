@@ -1,0 +1,102 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Subpolar API",
+    "version": "1.0.0",
+    "description": "Authenticated owner-scoped browser API for self-hosted Subpolar."
+  },
+  "paths": {
+    "/api/auth/bootstrap": {
+      "get": { "summary": "Return first-user bootstrap status" }
+    },
+    "/api/auth/providers": {
+      "get": { "summary": "List interactive auth providers and registration policy" }
+    },
+    "/auth/bootstrap": {
+      "post": { "summary": "Create first self-hosted dashboard user and session" }
+    },
+    "/signup": {
+      "get": { "summary": "Render self-hosted signup page" }
+    },
+    "/auth/register": {
+      "post": { "summary": "Register self-hosted dashboard user and session" }
+    },
+    "/auth/password-login": {
+      "post": { "summary": "Create password-authenticated dashboard session" }
+    },
+    "/auth/password-change": {
+      "post": { "summary": "Change authenticated self-hosted user password" }
+    },
+    "/auth/password-reset": {
+      "post": { "summary": "Reset password with operator reset token" }
+    },
+    "/auth/logout": {
+      "post": { "summary": "Revoke current session and clear auth cookies" }
+    },
+    "/api/auth/me": {
+      "get": { "summary": "Return authenticated dashboard identity" }
+    },
+    "/api/auth/sessions": {
+      "get": { "summary": "List active sessions for authenticated user" }
+    },
+    "/api/auth/sessions/{session_id}": {
+      "delete": { "summary": "Revoke one active session" }
+    },
+    "/api/auth/tokens": {
+      "get": { "summary": "List scoped client tokens" },
+      "post": { "summary": "Issue scoped client token" }
+    },
+    "/api/auth/tokens/{token_id}": {
+      "delete": { "summary": "Revoke scoped client token" }
+    },
+    "/api/subpolar/bootstrap": { "get": { "summary": "Load workspace bootstrap metadata" } },
+    "/api/subpolar/workspaces": {
+      "get": { "summary": "List owned workspaces" },
+      "post": { "summary": "Create owned workspace" }
+    },
+    "/api/subpolar/workspaces/{workspace_id}": {
+      "get": { "summary": "Read owned workspace" },
+      "patch": { "summary": "Update owned workspace" },
+      "delete": { "summary": "Delete owned workspace" }
+    },
+    "/api/subpolar/groups": { "post": { "summary": "Create organization-only project group" } },
+    "/api/subpolar/worktrees": {
+      "get": { "summary": "List owned worktrees" },
+      "post": { "summary": "Register owned worktree" }
+    },
+    "/api/subpolar/agents": {
+      "get": { "summary": "List owned Agents" },
+      "post": { "summary": "Create Agent" }
+    },
+    "/api/subpolar/agents/{agent_id}": {
+      "get": { "summary": "Read Agent" },
+      "patch": { "summary": "Update or fork Agent" },
+      "delete": { "summary": "Archive Agent" }
+    },
+    "/api/subpolar/agents/{agent_id}/effective": { "get": { "summary": "Resolve effective Agent" } },
+    "/api/subpolar/tools": { "get": { "summary": "List provider-qualified tools" } },
+    "/api/subpolar/integrations": {
+      "get": { "summary": "List central Integrations" },
+      "post": { "summary": "Create central Integration" }
+    },
+    "/api/subpolar/schedules": {
+      "get": { "summary": "List owned scheduled tasks" },
+      "post": { "summary": "Create scheduled task" }
+    },
+    "/api/subpolar/schedules/{task_id}/run-now": { "post": { "summary": "Run scheduled task" } },
+    "/api/subpolar/activity": {
+      "get": { "summary": "List Activity events" },
+      "post": { "summary": "Append Activity event" }
+    },
+    "/api/subpolar/audit": {
+      "get": { "summary": "List security audit events" },
+      "post": { "summary": "Append security audit event" }
+    },
+    "/api/subpolar/source-control/status": { "get": { "summary": "Read workspace Git status" } },
+    "/api/subpolar/source-control/diff": { "get": { "summary": "Read workspace unified diff" } },
+    "/api/subpolar/source-control/stage": { "post": { "summary": "Stage workspace file" } },
+    "/api/subpolar/source-control/commit": { "post": { "summary": "Commit workspace changes" } },
+    "/api/subpolar/sessions": { "get": { "summary": "List owned conversations" } },
+    "/api/subpolar/sessions/{session_id}/messages": { "get": { "summary": "Read owned transcript" } }
+  }
+}

@@ -468,7 +468,6 @@ from hermes_cli.subcommands.version import build_version_parser
 from hermes_cli.subcommands.update import build_update_parser
 from hermes_cli.subcommands.uninstall import build_uninstall_parser
 from hermes_cli.subcommands.dashboard import build_dashboard_parser
-from hermes_cli.subcommands.gui import build_gui_parser
 from hermes_cli.subcommands.logs import build_logs_parser
 from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
 from hermes_cli.subcommands.memory import build_memory_parser
@@ -4973,24 +4972,6 @@ def cmd_version(args):
 
 def cmd_uninstall(args):
     """Uninstall Hermes Agent (or just the Chat GUI with --gui)."""
-    # Machine-readable install snapshot for the desktop app's uninstall UI.
-    # Must run before any TTY gate — it's called from a non-interactive child.
-    if getattr(args, "gui_summary", False):
-        from hermes_cli.gui_uninstall import gui_install_summary
-
-        print(json.dumps(gui_install_summary()))
-        return
-
-    # GUI-only uninstall. The desktop app shells out to this non-interactively
-    # with --yes, so only gate on a TTY when we actually need to prompt.
-    if getattr(args, "gui", False):
-        if not getattr(args, "yes", False):
-            _require_tty("uninstall --gui")
-        from hermes_cli.uninstall import run_gui_uninstall
-
-        run_gui_uninstall(args)
-        return
-
     # Full/keep-data uninstall. ``--yes`` runs non-interactively (the desktop
     # app's lite/full modes drive this from a detached cleanup script), so only
     # gate on a TTY when we actually need to prompt for the option + confirm.
@@ -10082,7 +10063,7 @@ def _read_ssh_session_token_file(path: str) -> str:
 
     token_path = _Path(path)
     # The Desktop client writes the token under $HOME/.hermes/desktop-ssh: a
-    # literal "~/.hermes/desktop-ssh" in apps/desktop/electron/remote-lifecycle.ts
+    # literal "~/.hermes/desktop-ssh" in the legacy remote lifecycle
     # expanded against the account's $HOME, independent of HERMES_HOME and the
     # active profile. Anchor validation to that same OS-home path, NOT to
     # get_hermes_home(): a non-default sticky profile (or any HERMES_HOME pointing
@@ -12402,19 +12383,6 @@ def main():
         cmd_dashboard_register=cmd_dashboard_register,
     )
 
-
-    # =========================================================================
-    # desktop (a.k.a. gui) command
-    #
-    # The canonical name is "desktop"; "gui" is kept as a deprecated alias
-    # for one release. The Hermes-Setup.exe success screen tells users to
-    # run `hermes desktop` from a terminal, so the canonical name needs
-    # to be the one that appears in --help (argparse promotes the primary
-    # name; aliases stay hidden).
-    # =========================================================================
-    # gui command  (parser built in hermes_cli/subcommands/gui.py)
-    # =========================================================================
-    build_gui_parser(subparsers, cmd_gui=cmd_gui)
 
     # =========================================================================
     # logs command  (parser built in hermes_cli/subcommands/logs.py)

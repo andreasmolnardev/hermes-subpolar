@@ -11,7 +11,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _build_artifact(kind: str, tmp_path, *, nix_build: bool) -> subprocess.CompletedProcess[str]:
+def _build_artifact(kind: str, tmp_path) -> subprocess.CompletedProcess[str]:
     """Invoke the real PEP 517 hook (build_sdist / build_wheel) as a subprocess.
 
     The wheel and sdist guards live in SEPARATE cmdclass entries in setup.py
@@ -20,15 +20,8 @@ def _build_artifact(kind: str, tmp_path, *, nix_build: bool) -> subprocess.Compl
     the wheel path.
     """
     env = os.environ.copy()
-    # nix develop exports this too, so it must not grant permission to build
-    # a distributable artifact.
-    env["NIX_BUILD_TOP"] = "/build/devshell"
-    if nix_build:
-        env["HERMES_NIX_BUILD"] = "1"
-    else:
-        env.pop("HERMES_NIX_BUILD", None)
     # Redirect setuptools' scratch dirs (build/, *.egg-info) into tmp_path so
-    # the allowed-marker build doesn't litter the real worktree.
+    # rejected builds don't litter the real worktree.
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     extra_cfg = tmp_path / "dist-extra.cfg"
@@ -54,19 +47,8 @@ def _build_artifact(kind: str, tmp_path, *, nix_build: bool) -> subprocess.Compl
 
 
 @pytest.mark.parametrize("kind", ["sdist", "wheel"])
-def test_artifact_build_rejects_nix_development_shell_environment(kind, tmp_path):
-    result = _build_artifact(kind, tmp_path, nix_build=False)
+def test_artifact_build_is_rejected(kind, tmp_path):
+    result = _build_artifact(kind, tmp_path)
 
     assert result.returncode != 0
     assert "Building wheels or sdists for hermes-agent is not supported" in result.stderr
-
-
-@pytest.mark.parametrize(
-    ("kind", "artifact_glob"),
-    [("sdist", "hermes_agent-*.tar.gz"), ("wheel", "hermes_agent-*.whl")],
-)
-def test_artifact_build_allows_explicit_nix_package_build_marker(kind, artifact_glob, tmp_path):
-    result = _build_artifact(kind, tmp_path, nix_build=True)
-
-    assert result.returncode == 0, result.stderr
-    assert list(tmp_path.glob(artifact_glob))

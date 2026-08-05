@@ -92,7 +92,6 @@ apps/desktop/src/**/*.d.ts
 apps/shared/src/**/*.js
 apps/shared/src/**/*.js.map
 apps/shared/src/**/*.d.ts
-apps/desktop/release/
 *.tsbuildinfo
 
 # Web UI assets — synced from @nous-research/ui at build time via
@@ -104,10 +103,6 @@ web/public/ds-assets/
 .release_notes.md
 mini-swe-agent/
 
-# Nix
-.direnv/
-.nix-stamps/
-result
 website/static/api/skills-index.json
 # skills.json + skills-meta.json are build artifacts emitted by
 # website/scripts/extract-skills.py during prebuild — keep them out of

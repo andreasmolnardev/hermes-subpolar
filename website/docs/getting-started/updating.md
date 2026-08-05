@@ -46,7 +46,9 @@ If your local checkout is on a different branch, Hermes auto-stashes any uncommi
 
 When you run `hermes update` in a terminal, Hermes stashes any uncommitted source-tree changes, pulls, then **asks** whether to restore them — exactly as it always has. Nothing changes for interactive updates.
 
-When the update runs **without a terminal** — from the desktop/chat app's "Update" button or a gateway-triggered update — there's no prompt to answer. The `updates.non_interactive_local_changes` setting decides what happens to your stashed changes:
+When the update runs **without a terminal** from a gateway-triggered update,
+there's no prompt to answer. The `updates.non_interactive_local_changes` setting
+decides what happens to your stashed changes:
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -57,8 +59,6 @@ updates:
 
 - `stash` (default) — auto-stash, pull, then auto-restore your changes on top of the updated code. Nothing is lost; if a restore hits conflicts they're preserved in a git stash for manual recovery.
 - `discard` — auto-stash and drop the stash after the pull, so the update always lands on a clean tree. Use this only on machines where you never intend to keep local edits to the Hermes source. It stash-drops (not `git reset --hard` + `git clean -fd`), so ignored paths like `node_modules`, `venv`, and build outputs are never touched.
-
-In the desktop app this is **Settings → Advanced → In-App Update Local Changes**.
 
 ### Preview-only: `hermes update --check`
 
@@ -84,7 +84,9 @@ updates:
 
 ### Windows: another `hermes.exe` is running
 
-On Windows, `hermes update` will refuse to run if it detects another `hermes.exe` process holding the venv's entry-point executable open — most commonly the Hermes Desktop app's spawned backend, an open `hermes` REPL in another terminal, or a running gateway:
+On Windows, `hermes update` will refuse to run if it detects another
+`hermes.exe` process holding the venv's entry-point executable open — most
+commonly an open `hermes` REPL or a running gateway:
 
 ```
 $ hermes update
@@ -94,7 +96,7 @@ $ hermes update
   Updating now would fail to overwrite ...\venv\Scripts\hermes.exe because
   Windows blocks REPLACE on a running executable.
 
-  Close Hermes Desktop, exit any open `hermes` REPLs, and
+  Exit any open `hermes` REPLs and
   stop the gateway (`hermes gateway stop`) before retrying.
   Override with `hermes update --force` if you've already
   confirmed those processes will not write to the venv.
@@ -102,7 +104,12 @@ $ hermes update
 
 Close the listed processes and re-run. If you're sure the concurrent process won't interfere (rare — usually only useful when an antivirus shim is mis-attributed), pass `--force` to skip the check. In that case the updater will still retry the `.exe` rename with exponential backoff and, on stubborn locks, schedule the replacement for next reboot via `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` so the update can complete.
 
-A second, separate guard refuses to touch the venv while any process is running from its Python interpreter (the Desktop app's backend, a gateway, a Python REPL). Those processes keep native extension files (`.pyd`) locked, and a dependency sync that dies partway on an access-denied error strands the install between versions. This guard is **not** bypassed by `--force`; if you're certain the detected holders are false positives, use the explicit `hermes update --force-venv`.
+A second, separate guard refuses to touch the venv while any process is running
+from its Python interpreter (a gateway or Python REPL). Those processes keep
+native extension files (`.pyd`) locked, and a dependency sync that dies partway
+on an access-denied error strands the install between versions. This guard is
+**not** bypassed by `--force`; if you're certain the detected holders are false
+positives, use the explicit `hermes update --force-venv`.
 
 Expected output looks like:
 
@@ -216,28 +223,6 @@ uv pip install -e ".[all]"
 :::warning
 Rolling back may cause config incompatibilities if new options were added. Run `hermes config check` after rolling back and remove any unrecognized options from `config.yaml` if you encounter errors.
 :::
-
-### Note for Nix users
-
-Nix is no longer an explicitly supported install path (best-effort only) — see [Nix Setup](./nix-setup.md). If you installed via Nix flake, updates are managed through the Nix package manager:
-
-```bash
-# Update the flake input
-nix flake update hermes-agent
-
-# Or rebuild with the latest
-nix profile upgrade hermes-agent
-```
-
-Nix installations are immutable — rollback is handled by Nix's generation system:
-
-```bash
-nix profile rollback
-```
-
-See [Nix Setup](./nix-setup.md) for more details.
-
----
 
 ## Uninstalling
 

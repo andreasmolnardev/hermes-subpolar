@@ -73,6 +73,6 @@ Examples:
     logs_parser.add_argument(
         "--component",
         metavar="NAME",
-        help="Filter by component: gateway, agent, tools, cli, cron, gui",
+        help="Filter by component: gateway, agent, tools, cli, cron",
     )
     logs_parser.set_defaults(func=cmd_logs)

@@ -310,6 +310,7 @@ _LOGIN_HTML_TEMPLATE = """\
 {provider_buttons}
     </div>
   </div>
+{signup_link}
   <footer>
     <span class="sep"></span>Public bind &middot; Auth required<span class="sep"></span>
   </footer>
@@ -492,9 +493,15 @@ def render_login_html(*, next_path: str = "") -> str:
                 f'Sign in with {html.escape(p.display_name)}</a>'
             )
     script = _PASSWORD_FORM_SCRIPT if needs_password_script else ""
+    signup_link = ""
+    if any(getattr(p, "supports_registration", False) for p in providers):
+        signup_link = (
+            '  <p class="signup-link"><a href="/signup">Create an account</a></p>'
+        )
     return _LOGIN_HTML_TEMPLATE.format(
         provider_buttons="\n".join(buttons),
         password_script=script,
+        signup_link=signup_link,
     )
 
 
@@ -532,3 +539,52 @@ def _render_password_form(provider, next_path: str) -> str:
         f'        <button class="provider-btn" type="submit">Sign in</button>\n'
         f'      </form>'
     )
+
+
+def render_signup_html(*, login_path: str = "/login") -> str:
+    """Return public, server-rendered self-hosted registration page."""
+    login_path = html.escape(login_path, quote=True)
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create account — Hermes Agent</title>
+<style>
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+    padding: 1.5rem; box-sizing: border-box; background: #170d02; color: #fff;
+    font: 16px system-ui, sans-serif; }}
+  main {{ width: min(100%, 26rem); padding: 2rem; box-sizing: border-box;
+    border: 1px solid #ffac0255; background: #211407; }}
+  h1 {{ margin-top: 0; color: #ffac02; }}
+  form {{ display: grid; gap: .8rem; }}
+  label {{ display: grid; gap: .3rem; }}
+  input {{ padding: .7rem; background: #120a02; color: #fff;
+    border: 1px solid #ffac0255; }}
+  button {{ padding: .8rem; border: 0; background: #ffac02; color: #170d02;
+    font-weight: 700; cursor: pointer; }}
+  a {{ color: #ffac02; }}
+  #error {{ color: #ff8080; min-height: 1.2em; }}
+</style></head><body><main>
+<h1>Create account</h1>
+<p>Register a dashboard user.</p>
+<form id="signup-form">
+<label>Username<input name="username" autocomplete="username" required></label>
+<label>Display name<input name="display_name" autocomplete="name"></label>
+<label>Password<input name="password" type="password" autocomplete="new-password" required></label>
+<div id="error" role="alert"></div>
+<button type="submit">Create account</button>
+</form>
+<p><a href="{login_path}">Back to sign in</a></p>
+<script>
+document.getElementById('signup-form').addEventListener('submit', function (event) {{
+  event.preventDefault();
+  var form = event.currentTarget;
+  fetch('/auth/register', {{ method: 'POST', credentials: 'same-origin',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ username: form.username.value,
+      display_name: form.display_name.value, password: form.password.value }})
+  }}).then(function (response) {{
+    if (response.ok) return response.json().then(function (data) {{ location.assign(data.next || '/'); }});
+    return response.json().then(function (data) {{ throw new Error(data.detail || 'Registration failed'); }});
+  }}).catch(function (error) {{ document.getElementById('error').textContent = error.message; }});
+}});
+</script></main></body></html>"""

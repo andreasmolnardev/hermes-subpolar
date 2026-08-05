@@ -14,6 +14,7 @@ The middleware is a no-op when ``auth_required`` is False (loopback
 mode); the legacy ``_SESSION_TOKEN`` ``auth_middleware`` handles those
 binds.
 """
+
 from __future__ import annotations
 
 import logging
@@ -53,9 +54,16 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/auth/native/token",
     "/auth/native/refresh",
     "/auth/password-login",
+    "/auth/bootstrap",
+    "/auth/register",
+    "/auth/password-reset",
+    "/auth/password/reset",
     "/auth/logout",
     "/login",
+    "/signup",
+    "/register",
     "/api/auth/providers",
+    "/api/auth/bootstrap",
     "/api/mcp/oauth/callback/",
     "/assets/",
     "/favicon.ico",
@@ -81,8 +89,7 @@ def _path_is_public(path: str) -> bool:
     if path in PUBLIC_API_PATHS:
         return True
     return any(
-        path == prefix or path.startswith(prefix)
-        for prefix in _GATE_PUBLIC_PREFIXES
+        path == prefix or path.startswith(prefix) for prefix in _GATE_PUBLIC_PREFIXES
     )
 
 
@@ -136,10 +143,7 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
     path = request.url.path
     next_param = _safe_next_target(request)
     prefix = prefix_from_request(request)
-    login_url = (
-        f"{prefix}/login?next={next_param}" if next_param
-        else f"{prefix}/login"
-    )
+    login_url = f"{prefix}/login?next={next_param}" if next_param else f"{prefix}/login"
 
     if path.startswith("/api/"):
         # API routes never get redirects: the browser fetch() API would
@@ -199,6 +203,7 @@ def _auto_sso_response(request: Request) -> Response | None:
     # this user. Stop here, clear the marker, let /login render.
     if read_sso_attempt_cookie(request):
         from hermes_cli.dashboard_auth.prefix import prefix_from_request
+
         resp = _unauth_response(request, reason="no_cookie")
         clear_sso_attempt_cookie(resp, prefix=prefix_from_request(request))
         return resp
@@ -219,6 +224,7 @@ def _auto_sso_response(request: Request) -> Response | None:
     prefix = prefix_from_request(request)
     next_param = _safe_next_target(request)
     from urllib.parse import quote
+
     auth_login = f"{prefix}/auth/login?provider={quote(provider.name, safe='')}"
     if next_param:
         auth_login = f"{auth_login}&next={next_param}"
@@ -229,8 +235,11 @@ def _auto_sso_response(request: Request) -> Response | None:
     # looping. Detect HTTPS for the Secure flag the same way the auth routes
     # do; bind Path via the active prefix.
     from hermes_cli.dashboard_auth.cookies import detect_https
+
     set_sso_attempt_cookie(
-        resp, use_https=detect_https(request), prefix=prefix,
+        resp,
+        use_https=detect_https(request),
+        prefix=prefix,
     )
     audit_log(
         AuditEvent.LOGIN_START,
@@ -255,10 +264,7 @@ def _safe_next_target(request: Request) -> str:
     if not path or not path.startswith("/") or path.startswith("//"):
         return ""
     # Don't redirect back to the auth routes themselves — that loops.
-    if any(
-        path == p or path.startswith(p)
-        for p in ("/login", "/auth/", "/api/auth/")
-    ):
+    if any(path == p or path.startswith(p) for p in ("/login", "/auth/", "/api/auth/")):
         return ""
     # Reject ALL ``/api/*`` paths. The 401-envelope code path fires for
     # any unauthenticated SPA fetch (e.g. ``GET /api/analytics/models``
@@ -275,6 +281,7 @@ def _safe_next_target(request: Request) -> str:
     target = f"{path}?{query}" if query else path
     # urlencode the whole thing as a single value.
     from urllib.parse import quote
+
     return quote(target, safe="")
 
 
@@ -305,7 +312,8 @@ def _verify_bearer(request: Request, *, access_token: str):
         except ProviderError as e:
             _log.warning(
                 "dashboard-auth: provider %r unreachable during bearer verify: %s",
-                provider.name, e,
+                provider.name,
+                e,
             )
             if unreachable_provider is None:
                 unreachable_provider = provider.name
@@ -425,7 +433,8 @@ async def gated_auth_middleware(
             except ProviderError as e:
                 _log.warning(
                     "dashboard-auth: provider %r unreachable during verify: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
                 audit_log(
                     AuditEvent.SESSION_VERIFY_FAILURE,
@@ -513,6 +522,7 @@ async def gated_auth_middleware(
         # the browser ignores it).
         from hermes_cli.dashboard_auth.cookies import clear_session_cookies
         from hermes_cli.dashboard_auth.prefix import prefix_from_request
+
         clear_session_cookies(response, prefix=prefix_from_request(request))
         return response
 
@@ -544,7 +554,9 @@ def _expires_in_seconds(session) -> int:
     return max(60, int(session.expires_at) - int(time.time()))
 
 
-def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | None = None):
+def _attempt_refresh(
+    request: Request, *, refresh_token, provider_hint: str | None = None
+):
     """Try to rotate an expired session via the refresh token.
 
     The provider hint only changes candidate order. ``RefreshExpiredError``
@@ -573,7 +585,8 @@ def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | No
         except ProviderError as e:
             _log.warning(
                 "dashboard-auth: provider %r unreachable during refresh: %s",
-                provider.name, e,
+                provider.name,
+                e,
             )
             audit_log(
                 AuditEvent.REFRESH_FAILURE,

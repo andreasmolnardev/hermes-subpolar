@@ -98,7 +98,7 @@ export default defineConfig(({ command }) => ({
     //     cold start even though nothing rendered them. By the time the
     //     bundle hit ~28 MB that eval was ~1s of launch on an M-series.
     //   · Default splitting emits a chunk per shiki grammar/theme — thousands
-    //     of files, which electron-builder OOMs scanning (#38888).
+    //     of files, which makes browser asset delivery unnecessarily costly.
     // `advancedChunks` is the middle ground: heavyweight libraries merge into
     // a handful of named vendor chunks loaded on first use, app-level dynamic
     // imports stay lazy, and the file count stays in the tens.

@@ -10,7 +10,7 @@ Three different surfaces can start an update of the same install tree:
   bootstrap (``install.ps1`` / ``install.sh``).
 
 Until now only the Tauri updater published an "update in progress" marker
-(``UpdateMarkerGuard`` in ``apps/bootstrap-installer/src-tauri/src/update.rs``),
+(``UpdateMarkerGuard`` in historical installer code),
 and only the Electron desktop consumed it (``electron/update-marker.ts``, to
 gate local backend startup). Nothing stopped two *updaters* from running at
 once — so a dashboard-spawned ``hermes update`` and an installer-driven
@@ -59,7 +59,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Keep in sync with UPDATE_MARKER_MAX_AGE_MS in
-# apps/desktop/electron/update-marker.ts — the same marker is read by both, and
+# The same marker is read by update paths, and
 # a shorter ceiling here would let Python steal a lock Electron still considers
 # live. A full update (git pull + uv sync + desktop rebuild) is minutes.
 UPDATE_MARKER_MAX_AGE_SECONDS = 20 * 60
@@ -70,13 +70,13 @@ MARKER_NAME = ".hermes-update-in-progress"
 # its own pid before spawning `hermes update` as a child stage. The parent
 # holds the marker for its whole run, so without this the child refuses its
 # own parent's lock and the GUI update can never complete. See update_child_env
-# in apps/bootstrap-installer/src-tauri/src/update.rs — keep the name in sync.
+# Keep update exit codes stable for callers.
 HANDOFF_PID_ENV = "HERMES_UPDATE_HANDOFF_PID"
 
 # Exit code meaning "another updater/instance owns this install right now".
 # Already the de-facto contract: the Windows shim + venv-holder guards in
 # _cmd_update_impl exit 2, and the Tauri updater matches on it
-# (UPDATE_EXIT_CONCURRENT in apps/bootstrap-installer/src-tauri/src/update.rs)
+# (UPDATE_EXIT_CONCURRENT in historical installer code)
 # to show "Hermes is still running" instead of a generic failure. Naming it
 # here keeps the concurrent-update refusal on that same understood contract.
 UPDATE_EXIT_CONCURRENT = 2

@@ -69,6 +69,10 @@ def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
 
     sid = params.get("session_id", "")
+    live_session = _sessions.get(sid or "")
+    if live_session is not None:
+        if err := _session_owner_error(rid, live_session):
+            return err
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
     # Typed bare stop phrase while backend voice mode is active ends the

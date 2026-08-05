@@ -66,9 +66,8 @@ runtime/
 
 # ---------- Not needed inside the Docker image ----------
 
-# Desktop app source (Tauri/Electron); never installed in the container.
-# apps/shared is the dashboard↔desktop websocket helper and is linked from
-# web/package.json as a file: workspace dep — keep it in the build context.
+# Client source is not installed in the container. apps/shared is linked from
+# web/package.json as a file: workspace dependency — keep it in build context.
 apps/
 !apps/shared/
 !apps/shared/**
@@ -87,10 +86,6 @@ infographic/
 # Plugin-level docs (hermes-achievements ships docs/ but the runtime doesn't read them)
 plugins/hermes-achievements/docs/
 
-# Nix / Homebrew / AUR packaging metadata — irrelevant to Docker
-nix/
-flake.nix
-flake.lock
 packaging/
 
 # Design and planning documents

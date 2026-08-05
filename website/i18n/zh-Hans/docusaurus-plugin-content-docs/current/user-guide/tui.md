@@ -72,7 +72,7 @@ TUI 启动 banner 将运行时信息分为四个可折叠区块，每个区块�
 
 ### 外部预构建
 
-发行版若附带预构建 bundle（如 Nix、系统包），可将 Hermes 指向该 bundle：
+发行版若附带预构建 bundle，可将 Hermes 指向该 bundle：
 
 ```bash
 export HERMES_TUI_DIR=/path/to/prebuilt/ui-tui

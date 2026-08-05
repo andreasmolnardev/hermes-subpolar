@@ -9,10 +9,16 @@ The routes:
   GET  /login              → server-rendered login page
   GET  /auth/login?provider=N → 302 to IDP, sets PKCE cookie
   GET  /auth/callback?code,state → completes login, sets session cookies
+  POST /auth/bootstrap      → creates first self-hosted user
+  POST /auth/password-login → authenticates local credentials
+  POST /auth/password-change/reset → changes or resets local credentials
   POST /auth/logout        → clears cookies, best-effort revoke
   GET  /api/auth/providers → list registered providers (login bootstrap)
   GET  /api/auth/me        → current Session as JSON (auth-required)
+  GET/DELETE /api/auth/sessions → active session lifecycle
+  GET/POST/DELETE /api/auth/tokens → scoped client token lifecycle
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,7 +29,7 @@ from typing import Any, Deque, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from hermes_cli.dashboard_auth import (
     get_provider,
@@ -46,7 +52,7 @@ from hermes_cli.dashboard_auth.cookies import (
     set_pkce_cookie,
     set_session_cookies,
 )
-from hermes_cli.dashboard_auth.login_page import render_login_html
+from hermes_cli.dashboard_auth.login_page import render_login_html, render_signup_html
 
 _log = logging.getLogger(__name__)
 
@@ -121,6 +127,7 @@ def _prefix(request: Request) -> str:
     ``hermes_cli.dashboard_auth.prefix`` for the normalisation rules.
     """
     from hermes_cli.dashboard_auth.prefix import prefix_from_request
+
     return prefix_from_request(request)
 
 
@@ -135,11 +142,21 @@ async def login_page(request: Request) -> HTMLResponse:
     # the redirect URL. Validate against the same same-origin rules the
     # callback applies (defence in depth — the gate already filters,
     # but /login is reachable directly too).
-    next_path = _validate_post_login_target(
-        request.query_params.get("next", "")
-    )
+    next_path = _validate_post_login_target(request.query_params.get("next", ""))
     return HTMLResponse(
         render_login_html(next_path=next_path),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@router.get("/signup", name="signup_page")
+@router.get("/register", name="register_page", include_in_schema=False)
+async def signup_page(request: Request) -> HTMLResponse:
+    provider = _self_hosted_provider()
+    if provider is None or not getattr(provider, "supports_registration", False):
+        raise HTTPException(status_code=404, detail="Registration unavailable")
+    return HTMLResponse(
+        render_signup_html(login_path=f"{_prefix(request)}/login"),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
@@ -165,8 +182,9 @@ async def api_auth_providers() -> Any:
             {
                 "name": p.name,
                 "display_name": p.display_name,
-                "supports_password": bool(
-                    getattr(p, "supports_password", False)
+                "supports_password": bool(getattr(p, "supports_password", False)),
+                "supports_registration": bool(
+                    getattr(p, "supports_registration", False)
                 ),
             }
             for p in providers
@@ -237,9 +255,12 @@ async def auth_login(request: Request, provider: str, next: str = ""):
     safe_next = _validate_post_login_target(next)
     if safe_next:
         from urllib.parse import quote
+
         pkce = f"{pkce};next={quote(safe_next, safe='')}"
     set_pkce_cookie(
-        resp, payload=pkce, use_https=detect_https(request),
+        resp,
+        payload=pkce,
+        use_https=detect_https(request),
         prefix=_prefix(request),
     )
     return resp
@@ -324,9 +345,7 @@ async def auth_native_authorize(
         if len(sess_providers) == 1:
             p = sess_providers[0]
     if p is None:
-        raise HTTPException(
-            status_code=404, detail=f"Unknown provider: {provider!r}"
-        )
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider!r}")
     if not getattr(p, "supports_session", True) or getattr(
         p, "supports_password", False
     ):
@@ -370,7 +389,9 @@ async def auth_native_authorize(
         pkce = f"provider={p.name};{pkce}" if pkce else f"provider={p.name}"
     pkce = f"{pkce};broker={broker_state}"
     set_pkce_cookie(
-        resp, payload=pkce, use_https=detect_https(request),
+        resp,
+        payload=pkce,
+        use_https=detect_https(request),
         prefix=_prefix(request),
     )
     return resp
@@ -400,9 +421,7 @@ async def auth_callback(
     # ``next`` segment is optional (only present when /auth/login was
     # given a next= query). All keys live in the same flat namespace;
     # ``next`` carries a URL-encoded path so it never contains ``;``.
-    parts = dict(
-        seg.split("=", 1) for seg in pkce_raw.split(";") if "=" in seg
-    )
+    parts = dict(seg.split("=", 1) for seg in pkce_raw.split(";") if "=" in seg)
     provider_name = parts.get("provider", "")
     expected_state = parts.get("state", "")
     verifier = parts.get("verifier", "")
@@ -499,9 +518,7 @@ async def auth_callback(
 
         try:
             pending = native_flow.get_pending(broker_state)
-            gw_code = native_flow.complete_pending(
-                broker_state, session=session
-            )
+            gw_code = native_flow.complete_pending(broker_state, session=session)
         except native_flow.NativeFlowError:
             audit_log(
                 AuditEvent.NATIVE_TOKEN_FAILURE,
@@ -571,6 +588,7 @@ def _validate_post_login_target(raw: str) -> str:
     if not raw:
         return ""
     from urllib.parse import unquote
+
     decoded = unquote(raw)
     if not decoded.startswith("/") or decoded.startswith("//"):
         return ""
@@ -645,6 +663,116 @@ class _PasswordLoginBody(BaseModel):
     username: str
     password: str
     next: str = ""
+
+
+class _BootstrapBody(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+
+
+class _RegisterBody(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+
+
+class _PasswordChangeBody(BaseModel):
+    current_password: str = ""
+    old_password: str = ""
+    new_password: str
+
+
+class _PasswordResetBody(BaseModel):
+    username: str
+    reset_token: str = ""
+    token: str = ""
+    new_password: str
+
+
+class _ClientTokenBody(BaseModel):
+    scopes: list[str] = Field(default_factory=list)
+    expires_in: int | None = None
+
+
+def _self_hosted_provider():
+    """Return provider implementing persistent local-auth lifecycle, if any."""
+    for provider in list_session_providers():
+        if any(
+            callable(getattr(provider, name, None))
+            for name in ("bootstrap_user", "change_password", "reset_password")
+        ):
+            return provider
+    return None
+
+
+def _session_json(session) -> dict[str, Any]:
+    return {
+        "user_id": session.user_id,
+        "email": session.email,
+        "display_name": session.display_name,
+        "org_id": session.org_id,
+        "provider": session.provider,
+        "expires_at": session.expires_at,
+        "session_id": session.session_id,
+    }
+
+
+def _session_response(
+    request: Request, session, *, next_path: str = "/"
+) -> JSONResponse:
+    response = JSONResponse({
+        "ok": True,
+        "next": next_path,
+        "session": _session_json(session),
+    })
+    set_session_cookies(
+        response,
+        access_token=session.access_token,
+        refresh_token=session.refresh_token,
+        access_token_expires_in=max(60, session.expires_at - int(time.time())),
+        use_https=detect_https(request),
+        prefix=_prefix(request),
+        provider=session.provider,
+    )
+    return response
+
+
+@router.get("/api/auth/bootstrap", name="auth_bootstrap_status")
+async def api_auth_bootstrap_status() -> Any:
+    provider = _self_hosted_provider()
+    if provider is None:
+        return {"required": False}
+    return {
+        "required": bool(getattr(provider, "supports_bootstrap", False)),
+        "registration": bool(getattr(provider, "supports_registration", False)),
+        "provider": provider.name,
+    }
+
+
+@router.post("/auth/bootstrap", name="auth_bootstrap")
+async def auth_bootstrap(request: Request, body: _BootstrapBody):
+    provider = _self_hosted_provider()
+    if provider is None or not getattr(provider, "supports_bootstrap", False):
+        raise HTTPException(status_code=409, detail="Bootstrap is not available")
+    try:
+        session = provider.bootstrap_user(
+            username=body.username,
+            password=body.password,
+            display_name=body.display_name,
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(status_code=409, detail="Bootstrap already completed")
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail=f"Auth state unavailable: {exc}")
+    audit_log(
+        AuditEvent.LOGIN_SUCCESS,
+        provider=session.provider,
+        user_id=session.user_id,
+        ip=_client_ip(request),
+        reason="bootstrap",
+    )
+    return _session_response(request, session)
 
 
 @router.post("/auth/password-login", name="auth_password_login")
@@ -739,6 +867,191 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     return resp
 
 
+@router.post("/auth/register", name="auth_register")
+async def auth_register(request: Request, body: _RegisterBody):
+    provider = _self_hosted_provider()
+    if provider is None or not getattr(provider, "supports_registration", False):
+        raise HTTPException(status_code=403, detail="Registration is disabled")
+    try:
+        session = provider.register_user(
+            username=body.username,
+            password=body.password,
+            display_name=body.display_name,
+        )
+    except InvalidCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail=f"Auth state unavailable: {exc}")
+    audit_log(
+        AuditEvent.LOGIN_SUCCESS,
+        provider=session.provider,
+        user_id=session.user_id,
+        ip=_client_ip(request),
+        reason="registration",
+    )
+    return _session_response(request, session)
+
+
+@router.post("/auth/password-change", name="auth_password_change")
+@router.post("/auth/password/change", include_in_schema=False)
+async def auth_password_change(request: Request, body: _PasswordChangeBody):
+    session = getattr(request.state, "session", None)
+    provider = get_provider(session.provider) if session else None
+    if (
+        session is None
+        or provider is None
+        or not callable(getattr(provider, "change_password", None))
+    ):
+        raise HTTPException(status_code=404, detail="Password change unavailable")
+    try:
+        refreshed = provider.change_password(
+            user_id=session.user_id,
+            current_password=body.current_password or body.old_password,
+            new_password=body.new_password,
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail=f"Auth state unavailable: {exc}")
+    audit_log(
+        AuditEvent.LOGIN_SUCCESS,
+        provider=refreshed.provider,
+        user_id=refreshed.user_id,
+        ip=_client_ip(request),
+        reason="password_changed",
+    )
+    return _session_response(request, refreshed)
+
+
+@router.post("/auth/password-reset", name="auth_password_reset")
+@router.post("/auth/password/reset", include_in_schema=False)
+async def auth_password_reset(request: Request, body: _PasswordResetBody):
+    ip = _client_ip(request)
+    if _password_rate_limited(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many reset attempts. Try again shortly.",
+        )
+    provider = _self_hosted_provider()
+    if provider is None or not callable(getattr(provider, "reset_password", None)):
+        raise HTTPException(status_code=404, detail="Password reset unavailable")
+    try:
+        session = provider.reset_password(
+            username=body.username,
+            new_password=body.new_password,
+            reset_token=body.reset_token or body.token,
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(status_code=401, detail="Invalid reset credentials")
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail=f"Auth state unavailable: {exc}")
+    audit_log(
+        AuditEvent.LOGIN_SUCCESS,
+        provider=session.provider,
+        user_id=session.user_id,
+        ip=_client_ip(request),
+        reason="password_reset",
+    )
+    return _session_response(request, session)
+
+
+@router.get("/api/auth/sessions", name="auth_sessions")
+async def api_auth_sessions(request: Request):
+    session = getattr(request.state, "session", None)
+    provider = get_provider(session.provider) if session else None
+    if (
+        session is None
+        or provider is None
+        or not callable(getattr(provider, "list_sessions", None))
+    ):
+        raise HTTPException(status_code=404, detail="Session management unavailable")
+    records = provider.list_sessions(user_id=session.user_id)
+    return {
+        "sessions": [
+            {
+                "session_id": record["session_id"],
+                "created_at": record["created_at"],
+                "last_seen_at": record["last_seen_at"],
+                "expires_at": record["expires_at"],
+                "current": record["session_id"] == session.session_id,
+            }
+            for record in records
+        ]
+    }
+
+
+@router.delete("/api/auth/sessions/{session_id}", name="auth_session_revoke")
+async def api_auth_session_revoke(request: Request, session_id: str):
+    session = getattr(request.state, "session", None)
+    provider = get_provider(session.provider) if session else None
+    if (
+        session is None
+        or provider is None
+        or not callable(getattr(provider, "revoke_session_id", None))
+    ):
+        raise HTTPException(status_code=404, detail="Session management unavailable")
+    if not provider.revoke_session_id(user_id=session.user_id, session_id=session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    response = JSONResponse({"ok": True, "revoked": session_id})
+    if session_id == session.session_id:
+        clear_session_cookies(response, prefix=_prefix(request))
+    return response
+
+
+@router.get("/api/auth/tokens", name="auth_tokens")
+async def api_auth_tokens(request: Request):
+    session = getattr(request.state, "session", None)
+    provider = get_provider(session.provider) if session else None
+    if (
+        session is None
+        or provider is None
+        or not callable(getattr(provider, "list_client_tokens", None))
+    ):
+        raise HTTPException(status_code=404, detail="Client tokens unavailable")
+    return {"tokens": provider.list_client_tokens(user_id=session.user_id)}
+
+
+@router.post("/api/auth/tokens", name="auth_token_create")
+async def api_auth_token_create(request: Request, body: _ClientTokenBody):
+    session = getattr(request.state, "session", None)
+    provider = get_provider(session.provider) if session else None
+    if (
+        session is None
+        or provider is None
+        or not callable(getattr(provider, "issue_client_token", None))
+    ):
+        raise HTTPException(status_code=404, detail="Client tokens unavailable")
+    scopes = sorted({scope.strip() for scope in body.scopes if scope.strip()})
+    if len(scopes) > 32 or any(len(scope) > 80 for scope in scopes):
+        raise HTTPException(status_code=422, detail="Invalid token scopes")
+    expires_at = None
+    if body.expires_in is not None:
+        if body.expires_in < 60 or body.expires_in > 365 * 86400:
+            raise HTTPException(
+                status_code=422, detail="expires_in must be 60..31536000"
+            )
+        expires_at = int(time.time()) + body.expires_in
+    token, metadata = provider.issue_client_token(
+        user_id=session.user_id, scopes=scopes, expires_at=expires_at
+    )
+    return {"token": token, **metadata}
+
+
+@router.delete("/api/auth/tokens/{token_id}", name="auth_token_revoke")
+async def api_auth_token_revoke(request: Request, token_id: str):
+    session = getattr(request.state, "session", None)
+    provider = get_provider(session.provider) if session else None
+    if (
+        session is None
+        or provider is None
+        or not callable(getattr(provider, "revoke_client_token", None))
+    ):
+        raise HTTPException(status_code=404, detail="Client tokens unavailable")
+    if not provider.revoke_client_token(user_id=session.user_id, token_id=token_id):
+        raise HTTPException(status_code=404, detail="Client token not found")
+    return {"ok": True}
+
+
 @router.post("/auth/logout", name="auth_logout")
 async def auth_logout(request: Request):
     _at, rt = read_session_cookies(request)
@@ -752,7 +1065,8 @@ async def auth_logout(request: Request):
             except Exception as e:  # noqa: BLE001 — best-effort
                 _log.warning(
                     "dashboard-auth: revoke on %r failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     sess = getattr(request.state, "session", None)
@@ -788,6 +1102,7 @@ async def api_auth_me(request: Request):
         "org_id": sess.org_id,
         "provider": sess.provider,
         "expires_at": sess.expires_at,
+        "session_id": sess.session_id,
     }
 
 
@@ -927,7 +1242,8 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
                 unreachable = provider.name
             _log.warning(
                 "dashboard-auth: provider %r unreachable during native refresh: %s",
-                provider.name, e,
+                provider.name,
+                e,
             )
             continue
         audit_log(

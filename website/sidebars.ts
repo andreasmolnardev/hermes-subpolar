@@ -12,7 +12,6 @@ const sidebars: SidebarsConfig = {
         'getting-started/installation',
         'getting-started/platform-support',
         'getting-started/termux',
-        'getting-started/nix-setup',
         'getting-started/updating',
         'getting-started/learning-path',
       ],
@@ -24,7 +23,6 @@ const sidebars: SidebarsConfig = {
       items: [
         'user-guide/cli',
         'user-guide/tui',
-        'user-guide/desktop',
         'user-guide/windows-native',
         'user-guide/windows-wsl-quickstart',
         'user-guide/configuration',
@@ -308,7 +306,6 @@ const sidebars: SidebarsConfig = {
                   items: [
                     'user-guide/skills/bundled/software-development/software-development-dogfood',
                     'user-guide/skills/bundled/software-development/software-development-hermes-agent-skill-authoring',
-                    'user-guide/skills/bundled/software-development/software-development-inspecting-hermes-desktop-dom',
                     'user-guide/skills/bundled/software-development/software-development-node-inspect-debugger',
                     'user-guide/skills/bundled/software-development/software-development-plan',
                     'user-guide/skills/bundled/software-development/software-development-python-debugpy',
@@ -731,7 +728,6 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         'developer-guide/contributing',
-        'developer-guide/worktree-ui-dev',
         {
           type: 'category',
           label: 'Architecture',
@@ -760,7 +756,6 @@ const sidebars: SidebarsConfig = {
               items: [
                 'developer-guide/plugin-llm-access',
                 'developer-guide/subagent-lifecycle-api',
-                'developer-guide/desktop-plugin-sdk',
                 'developer-guide/memory-provider-plugin',
                 'developer-guide/context-engine-plugin',
                 'developer-guide/secret-source-plugin',

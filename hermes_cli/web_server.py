@@ -316,6 +316,45 @@ app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
 from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
+from hermes_cli.web_routers import subpolar as _subpolar_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_agents as _subpolar_agent_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_schedules as _subpolar_schedule_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_activity as _subpolar_activity_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_integrations as _subpolar_integration_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_source_control as _subpolar_source_control_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_sessions as _subpolar_session_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_terminals as _subpolar_terminal_routes  # noqa: E402
+from hermes_cli.web_routers import subpolar_clones as _subpolar_clone_routes  # noqa: E402
+
+app.include_router(_subpolar_routes.router)
+app.include_router(_subpolar_agent_routes.router)
+app.include_router(_subpolar_schedule_routes.router)
+app.include_router(_subpolar_activity_routes.router)
+app.include_router(_subpolar_integration_routes.router)
+app.include_router(_subpolar_source_control_routes.router)
+app.include_router(_subpolar_session_routes.router)
+app.include_router(_subpolar_terminal_routes.router)
+app.include_router(_subpolar_clone_routes.router)
+
+
+@app.middleware("http")
+async def _subpolar_legacy_surface_gate(request: Request, call_next):
+    """Remove arbitrary-path legacy surfaces in production Subpolar mode."""
+    if os.environ.get("HERMES_SUBPOLAR_ONLY", "").lower() in {"1", "true", "yes"}:
+        path = request.url.path
+        disabled = (
+            path.startswith("/api/fs/")
+            or path.startswith("/api/git/")
+            or path.startswith("/api/pty")
+            or path.startswith("/api/events")
+            or path.startswith("/api/pub")
+            or path.startswith("/api/console")
+            or path.startswith("/api/profiles")
+            or path.startswith("/api/env")
+        )
+        if disabled:
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+    return await call_next(request)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -14592,6 +14631,8 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
 
     origin = ws.headers.get("origin", "")
     if not origin:
+        if getattr(app.state, "auth_required", False) and not ws.query_params.get("internal"):
+            return "origin_missing"
         return None
 
     parsed = urllib.parse.urlparse(origin)
@@ -14689,8 +14730,13 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
         # they survive reconnects and slow cold boots.
         internal = ws.query_params.get("internal", "")
         if internal:
+            if ws.url.path not in {"/api/ws", "/api/pub"}:
+                return "internal_endpoint_forbidden", "internal"
             try:
-                consume_internal_credential(internal)
+                principal = consume_internal_credential(internal)
+                scope = getattr(ws, "scope", None)
+                if isinstance(scope, dict):
+                    scope["subpolar_principal"] = principal
                 return None, "internal"
             except TicketInvalid as exc:
                 audit_log(
@@ -14706,7 +14752,15 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
             return "no_credential", "none"
 
         try:
-            consume_ticket(ticket)
+            principal = consume_ticket(ticket)
+            if (
+                os.environ.get("HERMES_SUBPOLAR_ONLY", "").lower() in {"1", "true", "yes"}
+                and ws.url.path not in {"/api/ws", "/api/subpolar/terminals/ws"}
+            ):
+                return "ticket_endpoint_forbidden", "ticket"
+            scope = getattr(ws, "scope", None)
+            if isinstance(scope, dict):
+                scope["subpolar_principal"] = principal
             return None, "ticket"
         except TicketInvalid as exc:
             audit_log(
@@ -14721,6 +14775,12 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
     if not token:
         return "no_credential", "none"
     if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        scope = getattr(ws, "scope", None)
+        if isinstance(scope, dict):
+            scope["subpolar_principal"] = {
+                "user_id": "local-single-user",
+                "provider": "loopback",
+            }
         return None, "token"
     return "token_mismatch", "token"
 

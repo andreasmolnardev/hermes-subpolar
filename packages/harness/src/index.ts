@@ -11,10 +11,13 @@ import type {
   ProviderModelOptions,
   ProviderRequest,
   ProviderResult,
+  ProviderStreamEvent,
   ProviderTool,
   ProviderToolCall,
-  ProviderUsage
+  ProviderUsage,
+  ProviderUsageInput
 } from "chat-provider-interface";
+import { normalizeProviderUsage } from "chat-provider-interface";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -39,6 +42,7 @@ export type HarnessProviderMetadata = ProviderMetadata;
 
 export type HarnessProvider = {
   complete(request: HarnessProviderRequest): Promise<ProviderResult>;
+  stream?(request: HarnessProviderRequest): AsyncIterable<ProviderStreamEvent> | Promise<AsyncIterable<ProviderStreamEvent>>;
 };
 
 export type HarnessClock = {
@@ -60,6 +64,7 @@ export type HarnessToolExecution = {
 export type HarnessToolResult = {
   readonly content: ProviderContent;
   readonly isError?: boolean;
+  readonly truncated?: boolean;
 };
 
 export type HarnessToolExecutor = (
@@ -136,8 +141,63 @@ type HarnessEventInput =
 export type HarnessEventSink = (event: HarnessEvent) => void | Promise<void>;
 
 export type HarnessPersistencePort = {
-  append(event: HarnessEvent): Promise<void>;
+  append?(event: HarnessEvent): Promise<void>;
   load?(sessionId: string): Promise<readonly HarnessMessage[]>;
+  listMessages?(sessionId: string): Promise<readonly unknown[]>;
+  commitTurn?(write: HarnessAtomicTurnWrite): Promise<unknown>;
+  transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
+};
+
+// Structural subset of data-layer's SessionRepository. Keeping this shape here
+// avoids making the core loop depend on a concrete persistence package.
+export type HarnessPersistedMessageDraft = {
+  readonly id?: string;
+  readonly role: "system" | "user" | "assistant" | "tool";
+  readonly content: string | readonly { readonly type: "text"; readonly text: string }[];
+  readonly createdAt: string;
+  readonly name?: string;
+  readonly toolCalls?: readonly HarnessToolCall[];
+  readonly toolCallId?: string;
+  readonly toolResult?: {
+    readonly toolCallId: string;
+    readonly content: string | readonly { readonly type: "text"; readonly text: string }[];
+    readonly isError: boolean;
+    readonly toolName?: string;
+  };
+  readonly finishReason?: "stop" | "length" | "tool_calls" | "content_filter" | "error";
+  readonly usage?: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly totalTokens?: number;
+    readonly cachedInputTokens?: number;
+    readonly reasoningTokens?: number;
+  };
+};
+
+export type HarnessPersistedUsage = {
+  readonly schemaVersion: 1;
+  readonly sessionId: string;
+  readonly recordedAt: string;
+  readonly usage: NonNullable<HarnessPersistedMessageDraft["usage"]>;
+  readonly messageId?: string;
+};
+
+export type HarnessAtomicTurnWrite = {
+  readonly sessionId: string;
+  readonly messages: readonly HarnessPersistedMessageDraft[];
+  readonly expectedNextSequence?: number;
+  readonly usage?: HarnessPersistedUsage | readonly HarnessPersistedUsage[];
+};
+
+export type HarnessSessionRepository = {
+  commitTurn(write: HarnessAtomicTurnWrite): Promise<unknown>;
+  listMessages?(sessionId: string): Promise<readonly unknown[]>;
+  transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
+};
+
+export type HarnessToolOutputLimits = {
+  /** Maximum UTF-8 bytes retained for one tool result. */
+  readonly maxBytes?: number;
 };
 
 export type HarnessMessageLoader = (
@@ -176,8 +236,12 @@ export type HarnessRequest = {
   readonly clock: HarnessClock;
   readonly sleeper: HarnessSleeper;
   readonly toolExecutor?: HarnessToolExecutor;
+  readonly toolTimeoutMs?: number;
+  readonly toolConcurrency?: number;
+  readonly toolOutputLimits?: HarnessToolOutputLimits;
   readonly approvalPolicy?: HarnessApprovalPolicy;
   readonly persistence?: HarnessPersistencePort;
+  readonly sessionRepository?: HarnessSessionRepository;
   readonly eventSink?: HarnessEventSink;
   readonly contextAssembler?: HarnessContextAssembler;
   readonly idGenerator: HarnessIdGenerator;
@@ -328,6 +392,275 @@ function parseArguments(value: string): HarnessJsonObject | undefined {
   }
 }
 
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
+  if (utf8Bytes(value) <= maxBytes) return { value, truncated: false };
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = utf8Bytes(character);
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return { value: result, truncated: true };
+}
+
+function isProviderContent(value: unknown): value is ProviderContent {
+  if (typeof value === "string") return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((part: unknown) => {
+    if (typeof part !== "object" || part === null || Array.isArray(part)) return false;
+    const candidate = part as Record<string, unknown>;
+    if (candidate.type === "text" || candidate.type === "reasoning") {
+      return typeof candidate.text === "string";
+    }
+    if (candidate.type === "tool-call") {
+      return typeof candidate.id === "string" && typeof candidate.name === "string" &&
+        typeof candidate.arguments === "string";
+    }
+    if (candidate.type === "tool-result") {
+      return typeof candidate.toolCallId === "string" &&
+        isProviderContent(candidate.content) &&
+        (candidate.isError === undefined || typeof candidate.isError === "boolean");
+    }
+    return false;
+  });
+}
+
+function validateHarnessStreamUsage(usage: ProviderUsageInput): void {
+  if ((usage.inputTokens !== undefined && !Number.isFinite(usage.inputTokens)) ||
+      (usage.outputTokens !== undefined && !Number.isFinite(usage.outputTokens)) ||
+      (usage.totalTokens !== undefined && !Number.isFinite(usage.totalTokens))) {
+    throw new TypeError("Stream usage must contain finite token counts");
+  }
+}
+
+function validateHarnessStreamEvent(event: ProviderStreamEvent): void {
+  if (event.type === "usage") {
+    validateHarnessStreamUsage(event.usage);
+  } else if (event.type === "finish" && event.usage !== undefined) {
+    validateHarnessStreamUsage(event.usage);
+  }
+}
+
+function contentText(content: ProviderContent): string {
+  if (typeof content === "string") return content;
+  return content.map((part: ProviderContentPart) => {
+    if (part.type === "text" || part.type === "reasoning") return part.text;
+    if (part.type === "tool-call") return `${part.name}(${part.arguments})`;
+    return contentText(part.content);
+  }).join("");
+}
+
+function boundedToolResult(value: unknown, maxBytes: number): HarnessToolResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Tool returned an invalid result");
+  }
+  const candidate = value as { readonly content?: unknown; readonly isError?: unknown };
+  if (!isProviderContent(candidate.content) ||
+      (candidate.isError !== undefined && typeof candidate.isError !== "boolean")) {
+    throw new TypeError("Tool returned an invalid result");
+  }
+
+  if (typeof candidate.content === "string") {
+    const bounded = truncateUtf8(candidate.content, maxBytes);
+    return {
+      content: bounded.value,
+      ...(candidate.isError === undefined ? {} : { isError: candidate.isError }),
+      ...(bounded.truncated ? { truncated: true } : {})
+    };
+  }
+
+  const serialized = JSON.stringify(candidate.content);
+  if (serialized !== undefined && utf8Bytes(serialized) <= maxBytes) {
+    return {
+      content: candidate.content,
+      ...(candidate.isError === undefined ? {} : { isError: candidate.isError })
+    };
+  }
+
+  const bounded = truncateUtf8(contentText(candidate.content), maxBytes);
+  return {
+    content: bounded.value,
+    ...(candidate.isError === undefined ? {} : { isError: candidate.isError }),
+    truncated: true
+  };
+}
+
+function timeoutError(): Error {
+  const error = new Error("Tool execution timed out");
+  error.name = "TimeoutError";
+  return error;
+}
+
+function withToolDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  parentSignal: AbortSignal,
+  timeoutMs: number | undefined
+): Promise<T> {
+  const child = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      parentSignal.removeEventListener("abort", onParentAbort);
+      callback();
+    };
+    const onParentAbort = () => {
+      child.abort();
+      finish(() => reject(abortError()));
+    };
+    parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    if (parentSignal.aborted) {
+      onParentAbort();
+      return;
+    }
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        child.abort();
+        finish(() => reject(timeoutError()));
+      }, Math.max(0, timeoutMs));
+    }
+    try {
+      operation(child.signal).then(
+        value => finish(() => resolve(value)),
+        error => finish(() => reject(error))
+      );
+    } catch (error) {
+      finish(() => reject(error));
+    }
+  });
+}
+
+async function collectProviderStream(
+  provider: HarnessProvider,
+  request: HarnessProviderRequest
+): Promise<ProviderResult> {
+  if (provider.stream === undefined) return provider.complete(request);
+  const events = await provider.stream(request);
+  let text = "";
+  let reasoning = "";
+  let usage: ProviderUsageInput = {};
+  let finishReason: ProviderFinishReason | undefined;
+  let metadata: ProviderMetadata | undefined;
+  const toolCalls: ProviderToolCall[] = [];
+  const toolCallIds = new Set<string>();
+  const contentParts: ProviderContentPart[] = [];
+
+  for await (const event of events) {
+    validateHarnessStreamEvent(event);
+    switch (event.type) {
+      case "start":
+        break;
+      case "text-delta":
+        text += event.text;
+        break;
+      case "reasoning-delta":
+        reasoning += event.text;
+        break;
+      case "tool-call":
+        if (!toolCallIds.has(event.id)) {
+          toolCallIds.add(event.id);
+          toolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
+        }
+        break;
+      case "tool-result":
+        contentParts.push(event);
+        break;
+      case "usage":
+        usage = event.usage;
+        break;
+      case "finish":
+        finishReason = event.finishReason;
+        if (event.usage !== undefined) usage = event.usage;
+        metadata = event.metadata ?? metadata;
+        break;
+      case "error":
+        throw new HarnessProviderError(event.error.message, {
+          category: event.error.category,
+          retryable: event.error.retryable
+        });
+    }
+  }
+
+  const messageContent: ProviderContent = contentParts.length > 0
+    ? [...(text.length === 0 ? [] : [{ type: "text" as const, text }]), ...contentParts]
+    : text;
+  return {
+    message: {
+      role: "assistant",
+      content: messageContent,
+      ...(reasoning.length === 0 ? {} : { reasoning }),
+      ...(toolCalls.length === 0 ? {} : { toolCalls })
+    },
+    usage: normalizeProviderUsage(usage),
+    ...(finishReason === undefined ? {} : { finishReason }),
+    ...(reasoning.length === 0 ? {} : { reasoning }),
+    ...(metadata === undefined ? {} : { metadata })
+  };
+}
+
+function persistedContent(content: ProviderContent): string {
+  return contentText(content);
+}
+
+function persistedFinishReason(
+  reason: ProviderFinishReason
+): NonNullable<HarnessPersistedMessageDraft["finishReason"]> {
+  if (reason === "stop" || reason === "length" || reason === "content_filter" || reason === "error") {
+    return reason;
+  }
+  if (reason === "tool_call") return "tool_calls";
+  return "error";
+}
+
+function persistedAssistant(
+  result: HarnessProviderResult,
+  id: string,
+  createdAt: string
+): HarnessPersistedMessageDraft {
+  return {
+    id,
+    role: "assistant",
+    content: persistedContent(result.message.content),
+    createdAt,
+    ...(result.message.name === undefined ? {} : { name: result.message.name }),
+    ...(result.message.toolCalls === undefined ? {} : { toolCalls: result.message.toolCalls }),
+    ...(result.finishReason === undefined ? {} : { finishReason: persistedFinishReason(result.finishReason) }),
+    usage: result.usage
+  };
+}
+
+function persistedToolResult(
+  call: HarnessToolCall,
+  result: HarnessToolResult,
+  id: string,
+  createdAt: string
+): HarnessPersistedMessageDraft {
+  const content = persistedContent(result.content);
+  return {
+    id,
+    role: "tool",
+    content,
+    createdAt,
+    name: call.name,
+    toolCallId: call.id,
+    toolResult: {
+      toolCallId: call.id,
+      content,
+      isError: result.isError === true,
+      toolName: call.name
+    }
+  };
+}
+
 function errorMessage(value: object): string {
   return value instanceof Error ? value.message : "Operation failed";
 }
@@ -348,6 +681,18 @@ function cancellationError(): HarnessOutcome {
 
 function failureOutcome(outcome: "provider_failure" | "tool_failure" | "approval_rejected", error: object, category?: string): HarnessOutcome {
   return { outcome, error: { message: errorMessage(error), ...(category === undefined ? {} : { category }) } };
+}
+
+function persistenceFailureOutcome(error: Error): HarnessOutcome {
+  return failureOutcome("provider_failure", error, "persistence");
+}
+
+function atomicRepository(
+  persistence: HarnessPersistencePort | undefined
+): HarnessSessionRepository | undefined {
+  return persistence !== undefined && typeof persistence.commitTurn === "function"
+    ? persistence as HarnessSessionRepository
+    : undefined;
 }
 
 function defaultDelay(policy: HarnessRetryPolicy, attempt: number): number {
@@ -413,6 +758,37 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   }
 
   let terminalEmitted = false;
+  let persistenceFailure: Error | undefined;
+  let pendingMessages: HarnessPersistedMessageDraft[] = [];
+  let pendingUsage: HarnessPersistedUsage[] = [];
+  let nextSequence = 0;
+  const commitPending = async (): Promise<boolean> => {
+    const repository = request.sessionRepository ?? atomicRepository(request.persistence);
+    if (repository === undefined || pendingMessages.length === 0) return true;
+    const write: HarnessAtomicTurnWrite = {
+      sessionId: request.sessionId,
+      messages: pendingMessages,
+      expectedNextSequence: nextSequence,
+      ...(pendingUsage.length === 0 ? {} : { usage: pendingUsage })
+    };
+    try {
+      if (repository.transaction !== undefined) {
+        await repository.transaction(transaction => transaction.commitTurn(write));
+      } else {
+        await repository.commitTurn(write);
+      }
+      nextSequence += pendingMessages.length;
+      pendingMessages = [];
+      pendingUsage = [];
+      return true;
+    } catch (error) {
+      persistenceFailure = typeof error === "object" && error !== null
+        ? error instanceof Error ? error : new Error("Atomic turn persistence failed")
+        : new Error(String(error));
+      request.logger?.warn?.(`Atomic turn persistence failed: ${persistenceFailure.message}`);
+      return false;
+    }
+  };
   const emit = async (event: HarnessEventInput): Promise<void> => {
     const full = {
       ...event,
@@ -429,13 +805,20 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       request.logger?.warn?.(`Harness event sink failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
     try {
-      await request.persistence?.append(full);
+      await request.persistence?.append?.(full);
     } catch (error) {
       request.logger?.warn?.(`Harness persistence failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
   };
   const terminal = async (outcome: HarnessOutcome): Promise<HarnessOutcome> => {
-    if (outcome.outcome === "completed") {
+    let finalOutcome = outcome;
+    if (persistenceFailure !== undefined) {
+      finalOutcome = persistenceFailureOutcome(persistenceFailure);
+    } else if (!(await commitPending())) {
+      finalOutcome = persistenceFailureOutcome(persistenceFailure ?? new Error("Atomic turn persistence failed"));
+    }
+    if (finalOutcome.outcome !== "completed") controller.abort();
+    if (finalOutcome.outcome === "completed") {
       await emit({
         type: "terminal",
         requestId: request.requestId,
@@ -447,11 +830,11 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         type: "terminal",
         requestId: request.requestId,
         sessionId: request.sessionId,
-        outcome: outcome.outcome,
-        message: outcome.error.message
+        outcome: finalOutcome.outcome,
+        message: finalOutcome.error.message
       });
     }
-    return outcome;
+    return finalOutcome;
   };
   const stopped = (): HarnessOutcome | undefined => {
     if (request.signal?.aborted || (controller.signal.aborted && !timedOut)) return cancellationError();
@@ -468,7 +851,14 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   }
 
   let messages = request.messages;
-  const messageLoader = request.loadMessages ?? request.persistence?.load;
+  const repositoryLoader = request.sessionRepository?.listMessages !== undefined
+    ? (sessionId: string) => request.sessionRepository!.listMessages!(sessionId)
+    : request.persistence?.listMessages !== undefined
+      ? (sessionId: string) => request.persistence!.listMessages!(sessionId)
+      : undefined;
+  const messageLoader = request.loadMessages ?? request.persistence?.load ??
+    (repositoryLoader === undefined ? undefined : async (sessionId: string) =>
+      await repositoryLoader(sessionId) as readonly HarnessMessage[]);
   if (messageLoader) {
     try {
       const recovered = await messageLoader(request.sessionId);
@@ -477,6 +867,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       request.logger?.warn?.(`Harness message recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
   }
+  nextSequence = messages.length;
   const toolsByName = new Map(request.tools.map(tool => [tool.name, tool]));
   const toolResults = new Map<string, HarnessToolResult>();
   const toolResultsByCall = new Map<string, HarnessToolResult>();
@@ -533,7 +924,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         await emit({ type: "provider.requested", requestId: request.requestId, sessionId: request.sessionId, providerIndex });
         providerCalls += 1;
         try {
-          providerResult = await abortable(currentProvider.complete({
+          providerResult = await abortable(collectProviderStream(currentProvider, {
             model: request.model,
             messages: assembled,
             tools: providerTools(request.tools),
@@ -547,6 +938,19 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             requestId: request.requestId
           }), controller.signal);
           totalTokens += providerResult.usage.totalTokens ?? providerResult.usage.inputTokens + providerResult.usage.outputTokens;
+          const assistantId = request.idGenerator("message");
+          pendingMessages.push(persistedAssistant(
+            providerResult,
+            assistantId,
+            new Date(request.clock.now()).toISOString()
+          ));
+          pendingUsage.push({
+            schemaVersion: 1,
+            sessionId: request.sessionId,
+            recordedAt: new Date(request.clock.now()).toISOString(),
+            usage: providerResult.usage,
+            messageId: assistantId
+          });
           await emit({ type: "provider.completed", requestId: request.requestId, sessionId: request.sessionId, providerIndex, usage: providerResult.usage });
         } catch (error) {
           const failure = thrownAsFailure(typeof error === "object" && error !== null ? error : new Error(String(error)));
@@ -577,6 +981,13 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       if (providerResult.message.toolCalls === undefined || providerResult.message.toolCalls.length === 0) {
         return terminal({ outcome: "completed", result: providerResult });
       }
+      type PendingTool = {
+        readonly call: HarnessToolCall;
+        readonly callKey: string;
+        readonly tool: HarnessTool;
+        readonly arguments: HarnessJsonObject;
+      };
+      const pendingTools: PendingTool[] = [];
       for (const call of providerResult.message.toolCalls) {
         const callKey = `${call.name}\u0000${call.arguments}`;
         const existing = toolResults.get(call.id) ?? toolResultsByCall.get(callKey);
@@ -628,17 +1039,86 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         }
         toolCalls += 1;
         await emit({ type: "tool.called", requestId: request.requestId, sessionId: request.sessionId, call });
-        try {
-          const result = await abortable(request.toolExecutor({ requestId: request.requestId, sessionId: request.sessionId, call, arguments: parsed, signal: controller.signal }), controller.signal);
-          toolResults.set(call.id, result);
-          toolResultsByCall.set(callKey, result);
-          toolMessages.add(call.id);
-          messages = [...messages, { role: "tool", toolCallId: call.id, name: call.name, content: result.content }];
-          await emit({ type: "tool.completed", requestId: request.requestId, sessionId: request.sessionId, callId: call.id, result });
-        } catch (error) {
-          if (isAborted(controller.signal)) return terminal(timedOut ? budgetError("Harness deadline exceeded") : cancellationError());
-          return terminal(failureOutcome("tool_failure", typeof error === "object" && error !== null ? error : new Error(String(error)), "tool"));
+        pendingTools.push({ call, callKey, tool, arguments: parsed });
+      }
+
+      const maxBytesCandidate = request.toolOutputLimits?.maxBytes ?? 64 * 1024;
+      const maxBytes = Number.isFinite(maxBytesCandidate) && maxBytesCandidate >= 0
+        ? Math.floor(maxBytesCandidate)
+        : 64 * 1024;
+      const concurrencyCandidate = request.toolConcurrency ?? 1;
+      const concurrency = Number.isFinite(concurrencyCandidate) && concurrencyCandidate > 0
+        ? Math.max(1, Math.floor(concurrencyCandidate))
+        : 1;
+      const toolResultsForRound: Array<
+        | { readonly task: PendingTool; readonly result: HarnessToolResult }
+        | { readonly task: PendingTool; readonly error: object }
+      > = [];
+      let nextTool = 0;
+      let stopStarting = false;
+      const executeTool = async (task: PendingTool) => {
+        if (stopStarting || controller.signal.aborted) {
+          return { task, error: abortError() } as const;
         }
+        try {
+          const raw = await withToolDeadline(
+            signal => request.toolExecutor!({
+              requestId: request.requestId,
+              sessionId: request.sessionId,
+              call: task.call,
+              arguments: task.arguments,
+              signal
+            }),
+            controller.signal,
+            request.toolTimeoutMs
+          );
+          return { task, result: boundedToolResult(raw, maxBytes) } as const;
+        } catch (error) {
+          stopStarting = true;
+          return {
+            task,
+            error: typeof error === "object" && error !== null ? error : new Error(String(error))
+          } as const;
+        }
+      };
+      const worker = async (): Promise<void> => {
+        while (true) {
+          const index = nextTool++;
+          const task = pendingTools[index];
+          if (task === undefined) return;
+          toolResultsForRound[index] = await executeTool(task);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, pendingTools.length) }, () => worker())
+      );
+      const roundFailure = toolResultsForRound.find(entry => "error" in entry);
+      for (const entry of toolResultsForRound) {
+        if (entry === undefined || "error" in entry) continue;
+        const { task, result } = entry;
+        toolResults.set(task.call.id, result);
+        toolResultsByCall.set(task.callKey, result);
+        toolMessages.add(task.call.id);
+        messages = [...messages, {
+          role: "tool",
+          toolCallId: task.call.id,
+          name: task.call.name,
+          content: result.content
+        }];
+        pendingMessages.push(persistedToolResult(
+          task.call,
+          result,
+          request.idGenerator("message"),
+          new Date(request.clock.now()).toISOString()
+        ));
+        await emit({ type: "tool.completed", requestId: request.requestId, sessionId: request.sessionId, callId: task.call.id, result });
+      }
+      if (!(await commitPending())) {
+        return terminal(persistenceFailureOutcome(persistenceFailure ?? new Error("Atomic turn persistence failed")));
+      }
+      if (roundFailure !== undefined) {
+        if (stopped() !== undefined) return terminal(stopped() ?? cancellationError());
+        return terminal(failureOutcome("tool_failure", new Error(errorMessage(roundFailure.error)), "tool"));
       }
       if (finalResult === undefined) {
         return terminal(failureOutcome("provider_failure", new Error("Provider returned no result"), "provider"));

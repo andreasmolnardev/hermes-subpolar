@@ -5,6 +5,7 @@ import {
   HarnessProviderError,
   execute,
   executeHarness,
+  type HarnessAtomicTurnWrite,
   type HarnessEvent,
   type HarnessMessage,
   type HarnessProvider,
@@ -478,4 +479,245 @@ test("fallback recovery does not duplicate completed tool effect", async () => {
   assert.equal(effects, 1);
   assert.equal(primaryCalls, 2);
   assert.equal(fallbackCalls, 2);
+});
+
+test("atomic repository write records a completed tool round before interruption", async () => {
+  const writes: HarnessAtomicTurnWrite[] = [];
+  const abort = new AbortController();
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return response({
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "atomic-call", name: "once", arguments: "{}" }]
+        });
+      }
+      abort.abort();
+      return new Promise((_resolve, reject) => {
+        const error = new Error("interrupted");
+        error.name = "AbortError";
+        providerRequest.signal.addEventListener("abort", () => reject(error), { once: true });
+      });
+    }
+  }, {
+    signal: abort.signal,
+    tools: [{ name: "once", policy: "allow" }],
+    toolExecutor: async () => ({ content: "done" }),
+    persistence: {
+      async commitTurn(write) {
+        writes.push(write);
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(providerCalls, 2);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0]?.messages.map(message => message.role), ["assistant", "tool"]);
+  assert.equal(writes[0]?.messages[1]?.toolResult?.toolCallId, "atomic-call");
+});
+
+test("atomic persistence failure stops continuation and emits one terminal", async () => {
+  const events: HarnessEvent[] = [];
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "persist-call", name: "write", arguments: "{}" }]
+      });
+    }
+  }, {
+    tools: [{ name: "write", policy: "allow" }],
+    toolExecutor: async () => ({ content: "result" }),
+    eventSink: event => events.push(event),
+    sessionRepository: {
+      async commitTurn() {
+        throw new Error("interrupted persistence");
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "provider_failure");
+  assert.equal(result.error.category, "persistence");
+  assert.equal(providerCalls, 1);
+  assert.equal(events.filter(event => event.type === "terminal").length, 1);
+});
+
+test("oversized tool output is safely truncated before provider continuation", async () => {
+  let providerCalls = 0;
+  let observed: string | undefined;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return response({
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "large", name: "large", arguments: "{}" }]
+        });
+      }
+      observed = String(providerRequest.messages.at(-1)?.content);
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    tools: [{ name: "large", policy: "allow" }],
+    toolOutputLimits: { maxBytes: 5 },
+    toolExecutor: async () => ({ content: "😀😀😀" })
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(observed, "😀");
+});
+
+test("malformed tool result fails closed without continuation", async () => {
+  let providerCalls = 0;
+  let executed = false;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "bad-result", name: "bad", arguments: "{}" }]
+      });
+    }
+  }, {
+    tools: [{ name: "bad", policy: "allow" }],
+    toolExecutor: async () => {
+      executed = true;
+      return { content: { malformed: true } } as never;
+    }
+  }));
+
+  assert.equal(result.outcome, "tool_failure");
+  assert.equal(providerCalls, 1);
+  assert.equal(executed, true);
+});
+
+test("tool concurrency is bounded and tool timeout cancels the timed call", async () => {
+  let active = 0;
+  let maximumActive = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      return response({
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "slow", name: "slow", arguments: "{}" },
+          { id: "fast", name: "fast", arguments: "{}" }
+        ]
+      });
+    }
+  }, {
+    tools: [{ name: "slow", policy: "allow" }, { name: "fast", policy: "allow" }],
+    toolConcurrency: 1,
+    toolTimeoutMs: 5,
+    toolExecutor: async execution => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      try {
+        if (execution.call.name === "slow") {
+          return await new Promise(() => undefined);
+        }
+        return { content: "fast" };
+      } finally {
+        active -= 1;
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "tool_failure");
+  assert.equal(maximumActive, 1);
+});
+
+test("cancellation racing concurrent tools emits one terminal and no continuation", async () => {
+  const abort = new AbortController();
+  const events: HarnessEvent[] = [];
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "cancel-a", name: "cancel", arguments: "{}" },
+          { id: "cancel-b", name: "cancel", arguments: "{}" }
+        ]
+      });
+    }
+  }, {
+    signal: abort.signal,
+    tools: [{ name: "cancel", policy: "allow" }],
+    toolConcurrency: 2,
+    eventSink: event => events.push(event),
+    toolExecutor: async execution => {
+      abort.abort();
+      return await new Promise((_resolve, reject) => {
+        if (execution.signal.aborted) {
+          reject(new Error("cancelled"));
+          return;
+        }
+        execution.signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+      });
+    }
+  }));
+
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(providerCalls, 1);
+  assert.equal(events.filter(event => event.type === "terminal").length, 1);
+});
+
+test("stream deltas reconcile into the normal provider result", async () => {
+  let completeCalled = false;
+  const result = await executeHarness(request({
+    async complete() {
+      completeCalled = true;
+      return response({ role: "assistant", content: "wrong" });
+    },
+    async *stream() {
+      yield { type: "start", requestId: "stream-1" };
+      yield { type: "text-delta", text: "hello" };
+      yield { type: "reasoning-delta", text: "because" };
+      yield { type: "text-delta", text: " world" };
+      yield {
+        type: "finish",
+        finishReason: "stop" as const,
+        usage: { inputTokens: 2, outputTokens: 2, totalTokens: 4 }
+      };
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(completeCalled, false);
+  if (result.outcome !== "completed") throw new Error("Expected completion");
+  assert.equal(result.result.message.content, "hello world");
+  assert.equal(result.result.message.reasoning, "because");
+  assert.equal(result.result.usage.totalTokens, 4);
+});
+
+test("partial stream usage is normalized without requiring finish usage", async () => {
+  const result = await executeHarness(request({
+    async complete() {
+      throw new Error("complete should not be called");
+    },
+    async *stream() {
+      yield { type: "usage", usage: { outputTokens: 3 } };
+      yield { type: "finish", finishReason: "stop" as const };
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  if (result.outcome !== "completed") throw new Error("Expected completion");
+  assert.deepEqual(result.result.usage, {
+    inputTokens: 0,
+    outputTokens: 3,
+    totalTokens: 3
+  });
 });

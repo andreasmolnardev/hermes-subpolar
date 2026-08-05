@@ -36,11 +36,15 @@ import {
 } from "./retry-policy";
 import {
   boundToolResult,
-  contentText,
   enforceToolTurnBudget,
   DEFAULT_TOOL_PREVIEW_BYTES,
   type ToolOutputResult
 } from "./tool-output";
+import {
+  IterationBudget,
+  type IterationBudgetDecision,
+  type IterationBudgetExhaustionReason
+} from "./iteration-budget";
 
 export {
   MAX_RETRY_ATTEMPTS,
@@ -68,6 +72,17 @@ export {
   utf8Bytes
 } from "./tool-output";
 export type { ToolOutputResult, Utf8Truncation } from "./tool-output";
+export {
+  IterationBudget
+} from "./iteration-budget";
+export type {
+  IterationBudgetDecision,
+  IterationBudgetExhaustionReason,
+  IterationBudgetLimits,
+  IterationBudgetResource,
+  IterationBudgetResourceAlias,
+  IterationBudgetSnapshot
+} from "./iteration-budget";
 export {
   assembleHarnessContext,
   createHarnessContextAssembler,
@@ -216,9 +231,41 @@ export type HarnessRecoveredToolCall = {
 export type HarnessRecoveryMetadata = {
   readonly turnId: string;
   readonly status: "running" | "interrupted" | "recoverable";
+  readonly startedAt?: string;
+  readonly updatedAt?: string;
+  readonly checkpointId?: string;
   readonly pendingToolCallIds?: readonly string[];
   readonly completedToolCallIds?: readonly string[];
   readonly completedToolCalls?: readonly HarnessRecoveredToolCall[];
+};
+
+export type HarnessRuntimeMetadata = {
+  readonly runtimeVersion: string;
+  readonly schemaVersion: 1;
+  readonly migratedFromSchemaVersion?: number;
+  readonly migrationId?: string;
+  readonly migratedAt?: string;
+};
+
+export type HarnessCheckpointMetadata = {
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly sessionId: string;
+  readonly messageSequence: number;
+  readonly createdAt: string;
+  readonly reason: "manual" | "turn" | "before-tool" | "migration";
+  readonly runtime: HarnessRuntimeMetadata;
+  readonly snapshot: HarnessJsonObject;
+  readonly formatVersion?: number;
+  readonly label?: string;
+};
+
+export type HarnessMigrationStateMetadata = {
+  readonly schemaVersion: 1;
+  readonly sessionId: string;
+  readonly updatedAt: string;
+  readonly runtime: HarnessRuntimeMetadata;
+  readonly recovery?: HarnessRecoveryMetadata;
 };
 
 export type HarnessToolCheckpoint = {
@@ -237,6 +284,7 @@ export type HarnessPersistencePort = {
   append?(event: HarnessEvent): Promise<void>;
   load?(sessionId: string): Promise<readonly HarnessMessage[]>;
   listMessages?(sessionId: string): Promise<readonly unknown[]>;
+  ensureSession?(sessionId: string): Promise<void>;
   commitTurn?(write: HarnessAtomicTurnWrite): Promise<unknown>;
   transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
   checkpoint?(checkpoint: HarnessToolCheckpoint): Promise<void>;
@@ -248,18 +296,21 @@ export type HarnessPersistencePort = {
 export type HarnessPersistedMessageDraft = {
   readonly id?: string;
   readonly role: "system" | "user" | "assistant" | "tool";
-  readonly content: string | readonly { readonly type: "text"; readonly text: string }[];
+  readonly content: HarnessContent;
   readonly createdAt: string;
   readonly name?: string;
   readonly toolCalls?: readonly HarnessToolCall[];
   readonly toolCallId?: string;
   readonly toolResult?: {
     readonly toolCallId: string;
-    readonly content: string | readonly { readonly type: "text"; readonly text: string }[];
+    readonly content: HarnessContent;
     readonly isError: boolean;
     readonly toolName?: string;
+    readonly truncated?: boolean;
   };
   readonly finishReason?: "stop" | "length" | "tool_calls" | "content_filter" | "error";
+  readonly reasoning?: string;
+  readonly metadata?: HarnessProviderMetadata;
   readonly usage?: {
     readonly inputTokens: number;
     readonly outputTokens: number;
@@ -282,10 +333,13 @@ export type HarnessAtomicTurnWrite = {
   readonly messages: readonly HarnessPersistedMessageDraft[];
   readonly expectedNextSequence?: number;
   readonly usage?: HarnessPersistedUsage | readonly HarnessPersistedUsage[];
+  readonly checkpoint?: HarnessCheckpointMetadata;
+  readonly migrationState?: HarnessMigrationStateMetadata;
 };
 
 export type HarnessSessionRepository = {
   commitTurn(write: HarnessAtomicTurnWrite): Promise<unknown>;
+  ensureSession?(sessionId: string): Promise<void>;
   listMessages?(sessionId: string): Promise<readonly unknown[]>;
   transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
 };
@@ -336,6 +390,7 @@ export type HarnessRequest = {
   readonly toolConcurrency?: number;
   readonly toolOutputLimits?: HarnessToolOutputLimits;
   readonly approvalPolicy?: HarnessApprovalPolicy;
+  readonly runtime?: HarnessRuntimeMetadata;
   readonly persistence?: HarnessPersistencePort;
   readonly sessionRepository?: HarnessSessionRepository;
   readonly eventSink?: HarnessEventSink;
@@ -357,6 +412,7 @@ export type HarnessTerminalOutcome = HarnessTerminalOutcomeType;
 export type HarnessError = {
   readonly message: string;
   readonly category?: string;
+  readonly reason?: IterationBudgetExhaustionReason;
 };
 
 export type HarnessOutcome =
@@ -544,8 +600,22 @@ async function collectProviderStream(
   };
 }
 
-function persistedContent(content: ProviderContent): string {
-  return contentText(content);
+function persistedMessage(
+  message: HarnessMessage,
+  id: string,
+  createdAt: string
+): HarnessPersistedMessageDraft {
+  return {
+    id,
+    role: message.role,
+    content: message.content,
+    createdAt,
+    ...(message.name === undefined ? {} : { name: message.name }),
+    ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
+    ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
+    ...(message.reasoning === undefined ? {} : { reasoning: message.reasoning }),
+    ...(message.metadata === undefined ? {} : { metadata: message.metadata })
+  };
 }
 
 function persistedFinishReason(
@@ -566,11 +636,15 @@ function persistedAssistant(
   return {
     id,
     role: "assistant",
-    content: persistedContent(result.message.content),
+    content: result.message.content,
     createdAt,
     ...(result.message.name === undefined ? {} : { name: result.message.name }),
     ...(result.message.toolCalls === undefined ? {} : { toolCalls: result.message.toolCalls }),
     ...(result.finishReason === undefined ? {} : { finishReason: persistedFinishReason(result.finishReason) }),
+    ...(result.reasoning ?? result.message.reasoning) === undefined
+      ? {}
+      : { reasoning: result.reasoning ?? result.message.reasoning },
+    ...(result.message.metadata === undefined ? {} : { metadata: result.message.metadata }),
     usage: result.usage
   };
 }
@@ -581,20 +655,26 @@ function persistedToolResult(
   id: string,
   createdAt: string
 ): HarnessPersistedMessageDraft {
-  const content = persistedContent(result.content);
   return {
     id,
     role: "tool",
-    content,
+    content: result.content,
     createdAt,
     name: call.name,
     toolCallId: call.id,
     toolResult: {
       toolCallId: call.id,
-      content,
+      content: result.content,
       isError: result.isError === true,
-      toolName: call.name
-    }
+      toolName: call.name,
+      ...(result.truncated === undefined ? {} : { truncated: result.truncated })
+    },
+    ...(result.isError === undefined && result.truncated === undefined ? {} : {
+      metadata: {
+        ...(result.isError === undefined ? {} : { isError: result.isError }),
+        ...(result.truncated === undefined ? {} : { truncated: result.truncated })
+      }
+    })
   };
 }
 
@@ -608,8 +688,23 @@ function abortError(): Error {
   return error;
 }
 
-function budgetError(message: string): HarnessOutcome {
-  return { outcome: "budget_exhausted", error: { message, category: "budget" } };
+function budgetError(message: string, reason?: IterationBudgetExhaustionReason): HarnessOutcome {
+  return {
+    outcome: "budget_exhausted",
+    error: { message, category: "budget", ...(reason === undefined ? {} : { reason }) }
+  };
+}
+
+function iterationBudgetError(decision: IterationBudgetDecision): HarnessOutcome {
+  const reason = decision.reason;
+  if (reason === undefined) throw new Error("Budget exhaustion decision is missing a reason");
+  const messages: Record<IterationBudgetExhaustionReason, string> = {
+    max_turns: "Harness turn budget exhausted",
+    max_provider_calls: "Harness provider-call budget exhausted",
+    max_tool_calls: "Harness tool-call budget exhausted",
+    max_tokens: "Harness token budget exhausted"
+  };
+  return budgetError(messages[reason], reason);
 }
 
 function cancellationError(): HarnessOutcome {
@@ -695,14 +790,51 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   let pendingUsage: HarnessPersistedUsage[] = [];
   let messages: readonly HarnessMessage[] = request.messages;
   let nextSequence = 0;
-  const commitPending = async (): Promise<boolean> => {
+  let pendingToolCallIds: readonly string[] = [];
+  let committedTurn = false;
+  const runtime = request.runtime ?? { runtimeVersion: "harness", schemaVersion: 1 as const };
+  const commitPending = async (
+    finalize = false,
+    finalStatus: HarnessRecoveryMetadata["status"] = "recoverable"
+  ): Promise<boolean> => {
     const repository = request.sessionRepository ?? atomicRepository(request.persistence);
-    if (repository === undefined || pendingMessages.length === 0) return true;
+    if (repository === undefined || (pendingMessages.length === 0 && !finalize)) return true;
+    const recordedAt = new Date(request.clock.now()).toISOString();
+    const recoveryStatus: HarnessRecoveryMetadata["status"] = finalize ? finalStatus : "running";
+    const checkpoint: HarnessCheckpointMetadata = {
+      schemaVersion: 1,
+      id: `${request.requestId}:checkpoint`,
+      sessionId: request.sessionId,
+      messageSequence: nextSequence + pendingMessages.length,
+      createdAt: recordedAt,
+      reason: "turn",
+      runtime,
+      snapshot: {
+        turnId: request.requestId,
+        pendingToolCallIds: [...pendingToolCallIds]
+      }
+    };
+    const migrationState: HarnessMigrationStateMetadata = {
+      schemaVersion: 1,
+      sessionId: request.sessionId,
+      updatedAt: recordedAt,
+      runtime,
+      recovery: {
+        turnId: request.requestId,
+        status: recoveryStatus,
+        startedAt: recordedAt,
+        updatedAt: recordedAt,
+        checkpointId: checkpoint.id,
+        pendingToolCallIds: [...pendingToolCallIds]
+      }
+    };
     const write: HarnessAtomicTurnWrite = {
       sessionId: request.sessionId,
       messages: pendingMessages,
       expectedNextSequence: nextSequence,
-      ...(pendingUsage.length === 0 ? {} : { usage: pendingUsage })
+      ...(pendingUsage.length === 0 ? {} : { usage: pendingUsage }),
+      checkpoint,
+      migrationState
     };
     try {
       if (repository.transaction !== undefined) {
@@ -713,6 +845,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       nextSequence += pendingMessages.length;
       pendingMessages = [];
       pendingUsage = [];
+      committedTurn = true;
       return true;
     } catch (error) {
       persistenceFailure = typeof error === "object" && error !== null
@@ -747,7 +880,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   const checkpointTool = async (
     task: { readonly call: HarnessToolCall },
     phase: HarnessToolCheckpoint["phase"],
-    pendingToolCallIds: readonly string[],
+    pendingIds: readonly string[],
     result?: HarnessToolResult
   ): Promise<boolean> => {
     if (request.persistence?.checkpoint === undefined) return true;
@@ -761,7 +894,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         turnId: request.requestId,
         call: task.call,
         phase,
-        pendingToolCallIds,
+        pendingToolCallIds: pendingIds,
         completedToolCalls,
         ...(result === undefined ? {} : { result }),
         at: new Date(request.clock.now()).toISOString()
@@ -769,6 +902,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       if (phase === "tool-completed" && result !== undefined) {
         completedTurnTools.push({ call: task.call, result });
       }
+      pendingToolCallIds = [...pendingIds];
       return true;
     } catch (error) {
       persistenceFailure = typeof error === "object" && error !== null
@@ -785,7 +919,10 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     }
     if (persistenceFailure !== undefined) {
       finalOutcome = persistenceFailureOutcome(persistenceFailure);
-    } else if (!(await commitPending())) {
+    } else if (!(await commitPending(
+      pendingMessages.length > 0 || !committedTurn,
+      finalOutcome.outcome === "cancelled" ? "interrupted" : "recoverable"
+    ))) {
       finalOutcome = persistenceFailureOutcome(persistenceFailure ?? new Error("Atomic turn persistence failed"));
     }
     if (finalOutcome.outcome !== "completed") controller.abort();
@@ -821,7 +958,21 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     return terminal(stop ?? cancellationError());
   }
 
+  const ensureSession = request.sessionRepository?.ensureSession ?? request.persistence?.ensureSession;
+  if (ensureSession !== undefined) {
+    try {
+      await ensureSession(request.sessionId);
+    } catch (error) {
+      persistenceFailure = typeof error === "object" && error !== null
+        ? error instanceof Error ? error : new Error("Session setup failed")
+        : new Error(String(error));
+      return terminal(persistenceFailureOutcome(persistenceFailure));
+    }
+  }
+
   let recovery: HarnessRecoveryMetadata | undefined;
+  let loadedMessageCount = 0;
+  let usedStoredMessages = false;
   const repositoryLoader = request.sessionRepository?.listMessages !== undefined
     ? (sessionId: string) => request.sessionRepository!.listMessages!(sessionId)
     : request.persistence?.listMessages !== undefined
@@ -833,7 +984,11 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   if (messageLoader) {
     try {
       const recovered = await messageLoader(request.sessionId);
-      if (recovered.length > 0) messages = recovered;
+      loadedMessageCount = recovered.length;
+      if (recovered.length > 0) {
+        messages = recovered as readonly HarnessMessage[];
+        usedStoredMessages = true;
+      }
     } catch (error) {
       request.logger?.warn?.(`Harness message recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
@@ -867,10 +1022,46 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   try {
     messages = normalizeHarnessMessages(messages);
   } catch (error) {
-    const failure = error instanceof Error ? error : new Error(String(error));
-    return terminal(failureOutcome("provider_failure", failure, "history"));
+    let storageFallbackSucceeded = false;
+    // A read-only or newer store may expose records this runtime cannot decode.
+    // The caller's request is still a valid provider context, so fall back to it
+    // before any provider or tool side effect rather than replaying bad storage.
+    if (messageLoader !== undefined && usedStoredMessages) {
+      try {
+        messages = normalizeHarnessMessages(request.messages);
+        loadedMessageCount = 0;
+        usedStoredMessages = false;
+        storageFallbackSucceeded = true;
+      } catch {
+        // Preserve the original history failure when the request is invalid too.
+      }
+    }
+    if (usedStoredMessages || !storageFallbackSucceeded) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      return terminal(failureOutcome("provider_failure", failure, "history"));
+    }
+    // The fallback above normalized the request successfully.
   }
-  nextSequence = messages.length;
+  const inboundUser = [...request.messages].reverse().find(message => message.role === "user");
+  const inboundNormalized = inboundUser === undefined
+    ? undefined
+    : normalizeHarnessMessages([inboundUser])[0];
+  const inboundPresent = inboundNormalized !== undefined && messages.some(message => message.role === "user" &&
+    JSON.stringify(message.content) === JSON.stringify(inboundNormalized.content));
+  const inboundAlreadyLoaded = inboundPresent && loadedMessageCount > 0;
+  if (inboundNormalized !== undefined && !inboundPresent && !usedStoredMessages) {
+    messages = [...messages, inboundNormalized];
+  }
+  nextSequence = repositoryLoader === undefined && ensureSession === undefined
+    ? messages.length - (inboundAlreadyLoaded ? 0 : inboundNormalized === undefined ? 0 : 1)
+    : loadedMessageCount;
+  if (inboundNormalized !== undefined && !inboundAlreadyLoaded) {
+    pendingMessages.push(persistedMessage(
+      inboundNormalized,
+      request.idGenerator("message"),
+      new Date(request.clock.now()).toISOString()
+    ));
+  }
   const toolsByName = new Map(request.tools.map(tool => [tool.name, tool]));
   const toolResults = new Map<string, HarnessToolResult>();
   const toolResultsByCall = new Map<string, HarnessToolResult>();
@@ -896,10 +1087,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     completedToolCallIds.add(completed.call.id);
     completedTurnTools.push(completed);
   }
-  let providerCalls = 0;
-  let turns = 0;
-  let toolCalls = 0;
-  let totalTokens = 0;
+  const budget = new IterationBudget(request.budgets);
   let providerIndex = 0;
   let finalResult: HarnessProviderResult | undefined;
   const providers = [request.provider, ...(request.fallbackProviders ?? [])];
@@ -910,13 +1098,8 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     while (true) {
       const stop = stopped();
       if (stop !== undefined) return terminal(stop);
-      if (request.budgets?.maxTurns !== undefined && turns >= request.budgets.maxTurns) {
-        return terminal(budgetError("Harness turn budget exhausted"));
-      }
-      if (request.budgets?.maxProviderCalls !== undefined && providerCalls >= request.budgets.maxProviderCalls) {
-        return terminal(budgetError("Harness provider-call budget exhausted"));
-      }
-      turns += 1;
+      const turnDecision = budget.tryConsume("turns");
+      if (!turnDecision.allowed) return terminal(iterationBudgetError(turnDecision));
       let providerResult: HarnessProviderResult | undefined;
       let lastFailure: HarnessProviderFailure | undefined;
       let attempt = 0;
@@ -931,9 +1114,8 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           };
           return terminal(failureOutcome("provider_failure", new Error(failure.message), failure.category));
         }
-        if (request.budgets?.maxProviderCalls !== undefined && providerCalls + 1 > request.budgets.maxProviderCalls) {
-          return terminal(budgetError("Harness provider-call budget exhausted"));
-        }
+        const providerCheck = budget.check("providerCalls");
+        if (!providerCheck.allowed) return terminal(iterationBudgetError(providerCheck));
         const assembled = request.contextAssembler
           ? await abortable(request.contextAssembler({
             requestId: request.requestId,
@@ -947,8 +1129,9 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           : messages;
         const providerMessages = normalizeHarnessMessages(assembled);
         attempt += 1;
-        providerCalls += 1;
-        const providerAttempt = attemptIdentity(request.requestId, request.identity, providerCalls, providerIndex);
+        const providerDecision = budget.tryConsume("providerCalls");
+        if (!providerDecision.allowed) return terminal(iterationBudgetError(providerDecision));
+        const providerAttempt = attemptIdentity(request.requestId, request.identity, budget.used("providerCalls"), providerIndex);
         const { providerId, providerIndex: attemptProviderIndex, ...identity } = providerAttempt;
         await emit({
           type: "provider.requested",
@@ -986,7 +1169,10 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
               : [])
           );
           providerResult = normalizeProviderResult(rawProviderResult, messages.length, existingCallIds);
-          totalTokens += providerResult.usage.totalTokens ?? providerResult.usage.inputTokens + providerResult.usage.outputTokens;
+          const tokenDecision = budget.tryConsume(
+            "tokens",
+            providerResult.usage.totalTokens ?? providerResult.usage.inputTokens + providerResult.usage.outputTokens
+          );
           const assistantId = request.idGenerator("message");
           pendingMessages.push(persistedAssistant(
             providerResult,
@@ -1009,6 +1195,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             attempt: identity.attempt,
             usage: providerResult.usage
           });
+          if (!tokenDecision.allowed) return terminal(iterationBudgetError(tokenDecision));
         } catch (error) {
           const failure = thrownAsFailure(typeof error === "object" && error !== null ? error : new Error(String(error)));
           lastFailure = failure;
@@ -1048,9 +1235,6 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         }
       }
 
-      if (request.budgets?.maxTokens !== undefined && totalTokens > request.budgets.maxTokens) {
-        return terminal(budgetError("Harness token budget exhausted"));
-      }
       finalResult = providerResult;
       messages = [...messages, providerResult.message];
       if (providerResult.message.toolCalls === undefined || providerResult.message.toolCalls.length === 0) {
@@ -1109,13 +1293,13 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         }
         const stopBeforeTool = stopped();
         if (stopBeforeTool !== undefined) return terminal(stopBeforeTool);
-        if (request.budgets?.maxToolCalls !== undefined && toolCalls >= request.budgets.maxToolCalls) {
-          return terminal(budgetError("Harness tool-call budget exhausted"));
-        }
+        const toolCheck = budget.check("toolCalls");
+        if (!toolCheck.allowed) return terminal(iterationBudgetError(toolCheck));
         if (request.toolExecutor === undefined) {
           return terminal(failureOutcome("tool_failure", new Error(`No executor for tool: ${call.name}`), "tool"));
         }
-        toolCalls += 1;
+        const toolDecision = budget.tryConsume("toolCalls");
+        if (!toolDecision.allowed) return terminal(iterationBudgetError(toolDecision));
         await emit({ type: "tool.called", requestId: request.requestId, sessionId: request.sessionId, call });
         pendingTools.push({ call, callKey, tool, arguments: parsed });
       }

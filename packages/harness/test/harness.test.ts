@@ -764,7 +764,22 @@ test("deadline and budget stop before provider or tool effects", async () => {
   assert.equal(deadlineResult.outcome, "budget_exhausted");
   assert.equal(providerCalls, 0);
   assert.equal(budgetResult.outcome, "budget_exhausted");
+  assert.equal(budgetResult.error.reason, "max_tool_calls");
   assert.equal(toolCalls, 0);
+});
+
+test("provider budget stops before the provider side effect", async () => {
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, { budgets: { maxProviderCalls: 0 } }));
+
+  assert.equal(result.outcome, "budget_exhausted");
+  assert.equal(result.error.reason, "max_provider_calls");
+  assert.equal(providerCalls, 0);
 });
 
 test("timeout aborts an uncooperative provider", async () => {
@@ -892,8 +907,8 @@ test("atomic repository write records a completed tool round before interruption
   assert.equal(result.outcome, "cancelled");
   assert.equal(providerCalls, 2);
   assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0]?.messages.map(message => message.role), ["assistant", "tool"]);
-  assert.equal(writes[0]?.messages[1]?.toolResult?.toolCallId, "atomic-call");
+  assert.deepEqual(writes[0]?.messages.map(message => message.role), ["user", "assistant", "tool"]);
+  assert.equal(writes[0]?.messages[2]?.toolResult?.toolCallId, "atomic-call");
 });
 
 test("atomic persistence failure stops continuation and emits one terminal", async () => {

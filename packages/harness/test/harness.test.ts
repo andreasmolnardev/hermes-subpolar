@@ -236,6 +236,115 @@ test("tool results accept provider content parts", async () => {
   assert.equal(result.outcome, "completed");
 });
 
+test("orphan tool results are rejected before the provider is called", async () => {
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, {
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "tool", toolCallId: "missing", content: "orphaned" }
+    ]
+  }));
+
+  assert.equal(result.outcome, "provider_failure");
+  assert.equal(result.error.category, "history");
+  assert.equal(providerCalls, 0);
+});
+
+test("tool results cannot cross unrelated messages", async () => {
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, {
+    messages: [
+      { role: "user", content: "find it" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-1", name: "find", arguments: "{}" }]
+      },
+      { role: "user", content: "actually, never mind" },
+      { role: "tool", toolCallId: "call-1", content: "found" }
+    ]
+  }));
+
+  assert.equal(result.outcome, "provider_failure");
+  assert.equal(result.error.category, "history");
+  assert.equal(providerCalls, 0);
+});
+
+test("mixed content parts retain order and tool correlation", async () => {
+  const messages: HarnessMessage[] = [
+    { role: "user", content: "weather" },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Checking" },
+        { type: "reasoning", text: " the forecast" },
+        { type: "tool-call", id: "call-1", name: "weather", arguments: "{}" }
+      ],
+      toolCalls: [{ id: "call-1", name: "weather", arguments: "{}" }]
+    },
+    {
+      role: "tool",
+      toolCallId: "call-1",
+      content: [
+        { type: "text", text: "sunny" },
+        { type: "tool-result", toolCallId: "call-1", content: "sunny" }
+      ]
+    }
+  ];
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      assert.deepEqual(providerRequest.messages, messages);
+      return response({ role: "assistant", content: "done" });
+    }
+  }, { messages }));
+
+  assert.equal(result.outcome, "completed");
+});
+
+test("valid resumed histories preserve order and strip persistence-only result data", async () => {
+  const resumed: readonly HarnessMessage[] = [
+    { role: "user", content: "resume" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "resume-call", name: "lookup", arguments: "{\"key\":\"value\"}" }]
+    },
+    {
+      role: "tool",
+      toolCallId: "resume-call",
+      content: "stored result",
+      toolResult: {
+        toolCallId: "resume-call",
+        content: "stored result",
+        isError: false,
+        toolName: "lookup"
+      }
+    } as HarnessMessage
+  ];
+  const seen: HarnessMessage[][] = [];
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      seen.push([...providerRequest.messages]);
+      return response({ role: "assistant", content: "continued" });
+    }
+  }, { loadMessages: async () => resumed }));
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(seen[0]?.map(message => message.role), ["user", "assistant", "tool"]);
+  assert.equal(seen[0]?.[2]?.toolCallId, "resume-call");
+  assert.equal("toolResult" in (seen[0]?.[2] ?? {}), false);
+});
+
 test("multiple tool calls execute sequentially in provider order", async () => {
   const calls: string[] = [];
   let providerCalls = 0;

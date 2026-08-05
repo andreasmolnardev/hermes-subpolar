@@ -1,0 +1,194 @@
+{
+  "requestId": "request-roundtrip-001",
+  "sessionId": "session-roundtrip-001",
+  "model": "synthetic-model",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Synthetic system prompt"
+    },
+    {
+      "role": "user",
+      "content": "Use both synthetic tools"
+    }
+  ],
+  "tools": [
+    {
+      "name": "first_tool",
+      "policy": "allow"
+    },
+    {
+      "name": "second_tool",
+      "policy": "allow"
+    }
+  ],
+  "providerResponses": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call-first-001",
+            "name": "first_tool",
+            "arguments": "{\"value\":\"first\"}"
+          },
+          {
+            "id": "call-second-001",
+            "name": "second_tool",
+            "arguments": "{\"value\":\"second\"}"
+          }
+        ]
+      },
+      "usage": {
+        "inputTokens": 7,
+        "outputTokens": 3,
+        "totalTokens": 10
+      }
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Synthetic tools completed"
+      },
+      "usage": {
+        "inputTokens": 9,
+        "outputTokens": 4,
+        "totalTokens": 13
+      }
+    }
+  ],
+  "expectedProviderMessages": [
+    [
+      {
+        "role": "system",
+        "content": "Synthetic system prompt"
+      },
+      {
+        "role": "user",
+        "content": "Use both synthetic tools"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "Synthetic system prompt"
+      },
+      {
+        "role": "user",
+        "content": "Use both synthetic tools"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call-first-001",
+            "name": "first_tool",
+            "arguments": "{\"value\":\"first\"}"
+          },
+          {
+            "id": "call-second-001",
+            "name": "second_tool",
+            "arguments": "{\"value\":\"second\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "toolCallId": "call-first-001",
+        "name": "first_tool",
+        "content": "first result"
+      },
+      {
+        "role": "tool",
+        "toolCallId": "call-second-001",
+        "name": "second_tool",
+        "content": "second result"
+      }
+    ]
+  ],
+  "expectedToolExecutions": [
+    {
+      "id": "call-first-001",
+      "name": "first_tool",
+      "arguments": {
+        "value": "first"
+      },
+      "result": "first result"
+    },
+    {
+      "id": "call-second-001",
+      "name": "second_tool",
+      "arguments": {
+        "value": "second"
+      },
+      "result": "second result"
+    }
+  ],
+  "expectedUsage": {
+    "providerTotals": [10, 13],
+    "inputTokens": 16,
+    "outputTokens": 7,
+    "totalTokens": 23
+  },
+  "persistedMessages": [
+    {
+      "schemaVersion": 1,
+      "id": "message-roundtrip-001",
+      "sessionId": "session-roundtrip-001",
+      "sequence": 0,
+      "role": "assistant",
+      "content": "",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "toolCalls": [
+        {
+          "id": "call-first-001",
+          "name": "first_tool",
+          "arguments": {
+            "value": "first"
+          }
+        },
+        {
+          "id": "call-second-001",
+          "name": "second_tool",
+          "arguments": {
+            "value": "second"
+          }
+        }
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "message-roundtrip-002",
+      "sessionId": "session-roundtrip-001",
+      "sequence": 1,
+      "role": "tool",
+      "content": "first result",
+      "createdAt": "2026-01-01T00:00:01.000Z",
+      "toolCallId": "call-first-001",
+      "toolResult": {
+        "toolCallId": "call-first-001",
+        "content": "first result",
+        "isError": false,
+        "toolName": "first_tool"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "message-roundtrip-003",
+      "sessionId": "session-roundtrip-001",
+      "sequence": 2,
+      "role": "tool",
+      "content": "second result",
+      "createdAt": "2026-01-01T00:00:02.000Z",
+      "toolCallId": "call-second-001",
+      "toolResult": {
+        "toolCallId": "call-second-001",
+        "content": "second result",
+        "isError": false,
+        "toolName": "second_tool"
+      }
+    }
+  ]
+}

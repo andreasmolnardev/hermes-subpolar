@@ -1,0 +1,83 @@
+{
+  "requestId": "request-failure-001",
+  "sessionId": "session-failure-001",
+  "model": "synthetic-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Synthetic failure case"
+    }
+  ],
+  "tools": [],
+  "retryFallback": {
+    "retryPolicy": {
+      "maxAttempts": 2,
+      "backoffMs": 17
+    },
+    "expectedSleepMs": [
+      17
+    ],
+    "expectedEvents": [
+      "request.started",
+      "provider.requested",
+      "retry.scheduled",
+      "provider.requested",
+      "fallback.selected",
+      "provider.requested",
+      "provider.completed",
+      "terminal"
+    ],
+    "expectedRetry": {
+      "providerIndex": 0,
+      "attempt": 1,
+      "delayMs": 17
+    },
+    "expectedFallback": {
+      "providerIndex": 1
+    },
+    "expectedTerminal": "completed",
+    "expectedProviderCalls": {
+      "primary": 2,
+      "fallback": 1
+    }
+  },
+  "cancellation": {
+    "expectedEvents": [
+      "request.started",
+      "provider.requested",
+      "terminal"
+    ],
+    "expectedTerminal": "cancelled",
+    "expectedTerminalCount": 1
+  },
+  "classification": [
+    {
+      "category": "rate_limit",
+      "message": "Synthetic rate limit",
+      "statusCode": 429,
+      "retryable": true
+    },
+    {
+      "category": "authentication",
+      "message": "Synthetic authentication failure",
+      "statusCode": 401,
+      "retryable": false
+    },
+    {
+      "category": "cancelled",
+      "message": "Synthetic cancellation",
+      "retryable": false
+    }
+  ],
+  "diagnostics": {
+    "syntheticSecret": "synthetic-secret-001",
+    "redactedMessage": "provider request failed: authorization=*** request_id=request-diagnostic-001",
+    "expected": {
+      "category": "authentication",
+      "retryable": false,
+      "message": "provider request failed: authorization=*** request_id=request-diagnostic-001",
+      "statusCode": 401,
+      "requestId": "request-diagnostic-001"
+    }
+  }
+}

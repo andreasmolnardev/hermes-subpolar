@@ -1,0 +1,98 @@
+{
+  "requestId": "request-stream-001",
+  "model": "recorded-model",
+  "events": [
+    {
+      "type": "start",
+      "requestId": "request-stream-001",
+      "identity": {
+        "requestId": "request-stream-001",
+        "attempt": 2
+      },
+      "metadata": {
+        "source": "migration-fixture"
+      }
+    },
+    {
+      "type": "text-delta",
+      "text": "before"
+    },
+    {
+      "type": "reasoning-delta",
+      "text": "checking"
+    },
+    {
+      "type": "tool-call-delta",
+      "index": 0,
+      "id": "call-stream-001",
+      "name": "search",
+      "arguments": "{\"q\""
+    },
+    {
+      "type": "reasoning-delta",
+      "text": " tools"
+    },
+    {
+      "type": "tool-call-delta",
+      "index": 0,
+      "arguments": ":\"hermes\"}"
+    },
+    {
+      "type": "text-delta",
+      "text": "after"
+    },
+    {
+      "type": "tool-result",
+      "toolCallId": "call-stream-001",
+      "content": "found"
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "inputTokens": 4,
+        "outputTokens": 3
+      },
+      "metadata": {
+        "phase": "usage"
+      }
+    },
+    {
+      "type": "finish",
+      "finishReason": "tool_call",
+      "metadata": {
+        "phase": "finish"
+      },
+      "requestId": "request-stream-001"
+    }
+  ],
+  "expectedContent": [
+    {
+      "type": "text",
+      "text": "before"
+    },
+    {
+      "type": "reasoning",
+      "text": "checking"
+    },
+    {
+      "type": "tool-call",
+      "id": "call-stream-001",
+      "name": "search",
+      "arguments": "{\"q\":\"hermes\"}"
+    },
+    {
+      "type": "reasoning",
+      "text": " tools"
+    },
+    {
+      "type": "text",
+      "text": "after"
+    }
+  ],
+  "expectedReasoning": "checking tools",
+  "expectedUsage": {
+    "inputTokens": 4,
+    "outputTokens": 3,
+    "totalTokens": 7
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "requestId": "request-python-001",
+  "sessionId": "session-python-001",
+  "toolName": "python_lookup",
+  "toolCallId": "call-python-001",
+  "reference": "tools.lookup:run",
+  "cwd": "/tmp/hermes-python-fixture",
+  "safeEnvironment": {
+    "HERMES_FIXTURE": "allowed"
+  },
+  "secretEnvironment": {
+    "HERMES_FIXTURE": "allowed",
+    "PYTHON_SECRET": "must-not-cross"
+  },
+  "deadlineMs": 1000,
+  "arguments": {
+    "query": "hermes"
+  },
+  "result": "python result"
+}

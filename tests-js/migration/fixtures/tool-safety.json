@@ -1,0 +1,13 @@
+{
+  "requestId": "request-tool-safety-001",
+  "sessionId": "session-tool-safety-001",
+  "model": "tool-safety-model",
+  "toolName": "bounded_tool",
+  "callId": "call-bounded-001",
+  "maxBytes": 5,
+  "oversizedOutput": "😀😀x",
+  "expectedBoundedOutput": "😀",
+  "timeoutMs": 10,
+  "timeoutToolName": "timeout_tool",
+  "timeoutCallId": "call-timeout-001"
+}

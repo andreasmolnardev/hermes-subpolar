@@ -1,0 +1,36 @@
+{
+  "requestId": "request-recorded-001",
+  "model": "recorded-normalization-model",
+  "events": [
+    {
+      "type": "start",
+      "requestId": "request-recorded-001",
+      "metadata": {
+        "source": "recorded-fixture"
+      }
+    },
+    {
+      "type": "text-delta",
+      "text": "normalized response"
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "outputTokens": 3
+      }
+    },
+    {
+      "type": "finish",
+      "finishReason": "stop",
+      "metadata": {
+        "recording": "stable"
+      },
+      "requestId": "request-recorded-001"
+    }
+  ],
+  "expectedUsage": {
+    "inputTokens": 0,
+    "outputTokens": 3,
+    "totalTokens": 3
+  }
+}

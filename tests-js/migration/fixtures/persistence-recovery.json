@@ -1,0 +1,22 @@
+{
+  "requestId": "request-recovery-001",
+  "sessionId": "session-recovery-001",
+  "model": "recovery-model",
+  "seedMessage": {
+    "id": "message-seed-001",
+    "content": "continue the interrupted turn",
+    "createdAt": "2026-01-01T00:00:00.000Z"
+  },
+  "tool": {
+    "name": "once_only",
+    "callId": "call-recovery-001",
+    "arguments": "{\"value\":\"durable\"}",
+    "result": "durable result"
+  },
+  "timestamps": {
+    "runtime": "2026-01-01T00:00:00.000Z",
+    "turn": "2026-01-01T00:00:01.000Z"
+  },
+  "expectedFirstRunRoles": ["user", "assistant", "tool"],
+  "expectedRecoveredRoles": ["user", "assistant", "tool", "assistant"]
+}

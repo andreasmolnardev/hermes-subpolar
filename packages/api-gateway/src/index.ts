@@ -525,3 +525,25 @@ export async function executeRequest(
 }
 
 export type { GatewayClientEvent, GatewayProtocolEvent };
+export {
+  PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
+  PythonToolBridge,
+  PythonToolBridgeError,
+  createAllowlistedEnvironment,
+  createPythonToolBridgeExecutor,
+  createPythonToolBridgeSubprocessTransport
+} from "./python-bridge";
+export type {
+  PythonToolBridgeCall,
+  PythonToolBridgeErrorCode,
+  PythonToolBridgeExecutorOptions,
+  PythonToolBridgeFailure,
+  PythonToolBridgeProcess,
+  PythonToolBridgeRequest,
+  PythonToolBridgeResponse,
+  PythonToolBridgeSpawner,
+  PythonToolBridgeSpawnOptions,
+  PythonToolBridgeSuccess,
+  PythonToolBridgeTool,
+  PythonToolBridgeTransport
+} from "./python-bridge";

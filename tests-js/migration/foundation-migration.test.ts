@@ -6,20 +6,20 @@ import path from 'node:path'
 import { test } from 'vitest'
 
 import {
+  createAllowlistedEnvironment,
+  createPythonToolBridgeExecutor,
+  PythonToolBridge,
+  PythonToolBridgeError,
+  type PythonToolBridgeRequest,
+} from '../../packages/api-gateway/src/python-bridge'
+import {
   createRecordedResponseProvider,
   type ProviderContentPart,
   type ProviderRequest,
   type ProviderStreamEvent,
 } from '../../packages/chat-provider-interface/src/index'
-import {
-  PythonToolBridge,
-  PythonToolBridgeError,
-  createAllowlistedEnvironment,
-  createPythonToolBridgeExecutor,
-  type PythonToolBridgeRequest,
-} from '../../packages/api-gateway/src/python-bridge'
-import { SQLiteSessionRepository } from '../../packages/data-layer/src/sqlite'
 import type { SessionRecord } from '../../packages/data-layer/src/contracts'
+import { SQLiteSessionRepository } from '../../packages/data-layer/src/sqlite'
 import {
   executeHarness,
   type HarnessEvent,
@@ -111,11 +111,13 @@ async function withTemporaryHermesHome<T>(operation: (home: string) => Promise<T
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-migration-'))
   const previous = process.env.HERMES_HOME
   process.env.HERMES_HOME = home
+
   try {
     return await operation(home)
   } finally {
-    if (previous === undefined) delete process.env.HERMES_HOME
-    else process.env.HERMES_HOME = previous
+    if (previous === undefined) {delete process.env.HERMES_HOME}
+    else {process.env.HERMES_HOME = previous}
+
     fs.rmSync(home, { recursive: true, force: true })
   }
 }
@@ -159,6 +161,7 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
   await withTemporaryHermesHome(async home => {
     const database = path.join(home, 'state', 'sessions.db')
     const firstRepository = new SQLiteSessionRepository({ path: database, runtimeVersion: 'migration-test' })
+
     const session: SessionRecord = {
       schemaVersion: 1,
       id: data.sessionId,
@@ -180,6 +183,7 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
 
       const interruption = new AbortController()
       let providerCalls = 0
+
       const firstRun = await executeHarness(harnessRequest({
         requestId: data.requestId,
         sessionId: data.sessionId,
@@ -189,6 +193,7 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
       }, {
         async complete(request) {
           providerCalls += 1
+
           if (providerCalls === 1) {
             return response({
               role: 'assistant',
@@ -196,9 +201,11 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
               toolCalls: [{ id: data.tool.callId, name: data.tool.name, arguments: data.tool.arguments }],
             })
           }
+
           interruption.abort()
           const error = new Error('deterministic interruption')
           error.name = 'AbortError'
+
           return new Promise((_resolve, reject) => {
             request.signal.addEventListener('abort', () => reject(error), { once: true })
           })
@@ -225,6 +232,7 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
     let recoveredRequest: HarnessMessage[] | undefined
     let replayedTool = false
     let restartId = 0
+
     try {
       const recovered = await executeHarness(harnessRequest({
         requestId: data.requestId,
@@ -235,6 +243,7 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
       }, {
         async complete(request) {
           recoveredRequest = [...request.messages]
+
           return response({ role: 'assistant', content: 'recovered response' })
         },
       }, {
@@ -242,6 +251,7 @@ test('atomic turn writes survive restart and recovered tool calls are not replay
         idGenerator: kind => `${kind}-migration-restart-${++restartId}`,
         toolExecutor: async () => {
           replayedTool = true
+
           return { content: 'must not replay' }
         },
       }))
@@ -275,6 +285,7 @@ test('tool output is UTF-8 bounded before continuation and marked truncated', as
   }, {
     async complete(request) {
       providerCalls += 1
+
       if (providerCalls === 1) {
         return response({
           role: 'assistant',
@@ -282,7 +293,9 @@ test('tool output is UTF-8 bounded before continuation and marked truncated', as
           toolCalls: [{ id: data.callId, name: data.toolName, arguments: '{}' }],
         })
       }
+
       providerContent = request.messages.at(-1)?.content
+
       return response({ role: 'assistant', content: 'bounded' })
     },
   }, {
@@ -313,6 +326,7 @@ test('tool timeout aborts the executor and prevents provider continuation', asyn
   }, {
     async complete() {
       providerCalls += 1
+
       return response({
         role: 'assistant',
         content: '',
@@ -340,9 +354,11 @@ test('Python bridge sends a versioned correlated call with only allowlisted envi
   const data = fixture<PythonFixture>('python-bridge.json')
   const requests: PythonToolBridgeRequest[] = []
   const deadline = Date.now() + data.deadlineMs
+
   const bridge = new PythonToolBridge({
     async send(request) {
       requests.push(request)
+
       return {
         protocolVersion: 1,
         type: 'tool.result',
@@ -352,6 +368,7 @@ test('Python bridge sends a versioned correlated call with only allowlisted envi
       }
     },
   })
+
   const executor = createPythonToolBridgeExecutor({
     bridge,
     tools: [{ name: data.toolName, reference: data.reference }],
@@ -360,6 +377,7 @@ test('Python bridge sends a versioned correlated call with only allowlisted envi
     environmentAllowlist: Object.keys(data.safeEnvironment),
     deadline: () => deadline,
   })
+
   const execution: HarnessToolExecution = {
     requestId: data.requestId,
     sessionId: data.sessionId,
@@ -389,6 +407,7 @@ test('Python bridge sends a versioned correlated call with only allowlisted envi
 test('Python bridge rejects unsafe calls and mismatched protocol responses', async () => {
   const data = fixture<PythonFixture>('python-bridge.json')
   const invalidCwd = new PythonToolBridge({ send: async () => undefined })
+
   const call = {
     requestId: data.requestId,
     toolCallId: data.toolCallId,
@@ -410,6 +429,7 @@ test('Python bridge rejects unsafe calls and mismatched protocol responses', asy
       content: 'not accepted',
     }),
   })
+
   await assert.rejects(mismatched.execute({ ...call, cwd: data.cwd }), error =>
     error instanceof PythonToolBridgeError && error.code === 'protocol_mismatch'
   )
@@ -424,6 +444,7 @@ test('Python bridge rejects unsafe calls and mismatched protocol responses', asy
 test('recorded response provider normalizes omitted usage counters and retains request identity', async () => {
   const data = fixture<RecordedFixture>('recorded-response.json')
   const provider = createRecordedResponseProvider({ events: data.events })
+
   const request: ProviderRequest = {
     model: data.model,
     messages: [],

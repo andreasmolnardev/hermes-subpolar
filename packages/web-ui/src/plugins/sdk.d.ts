@@ -4,7 +4,7 @@
  *
  * This is the public type surface for ``window.__HERMES_PLUGIN_SDK__`` and
  * ``window.__HERMES_PLUGINS__``, the globals the dashboard host exposes to
- * plugin bundles (see ``web/src/plugins/registry.ts::exposePluginSDK``).
+ * plugin bundles (see ``packages/web-ui/src/plugins/registry.ts::exposePluginSDK``).
  *
  * STATUS: spike. This file documents the contract and gives plugin authors
  * (in-repo IIFEs and external bundles alike) editor types without bundling
@@ -111,7 +111,7 @@ export interface HermesPluginSDK {
    * Typed convenience client for core dashboard endpoints. Typed permissively
    * at the boundary (methods vary in arity and return type — most return
    * ``Promise<T>``, a few return a URL string synchronously); plugins call the
-   * specific methods they need. See ``web/src/lib/api.ts`` for the concrete shape.
+   * specific methods they need. See ``packages/web-ui/src/lib/api.ts`` for the concrete shape.
    */
   api: Record<string, (...args: never[]) => unknown>;
 

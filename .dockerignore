@@ -28,11 +28,8 @@ node_modules
 .pip-cache/
 .uv-cache/
 
-# Built artifacts that are regenerated inside the image.  Excluded so local
-# rebuilds on the developer's machine don't invalidate the npm-install layer
-# that now depends on the full ui-tui/packages/hermes-ink/ tree being present.
-ui-tui/dist/
-ui-tui/packages/hermes-ink/dist/
+# Built browser artifacts are regenerated inside the image.
+packages/web-ui/dist/
 
 # CI/CD
 .github
@@ -66,16 +63,14 @@ runtime/
 
 # ---------- Not needed inside the Docker image ----------
 
-# Client source is not installed in the container. apps/shared is linked from
-# web/package.json as a file: workspace dependency — keep it in build context.
+# Desktop and terminal clients are not shipped in Docker.
 apps/
-!apps/shared/
-!apps/shared/**
+ui-tui/
 
 # Test suite — not shipped in production images
 tests/
 
-# Documentation site (Docusaurus) and supplementary docs
+# Supplementary docs
 website/
 docs/
 

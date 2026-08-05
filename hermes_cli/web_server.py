@@ -16085,7 +16085,7 @@ def mount_spa(application: FastAPI):
             "Headless backend (hermes serve): web UI disabled — use "
             "`hermes dashboard` for the browser UI."
             if _headless
-            else "Frontend not built. Run: cd web && npm run build"
+            else "Frontend not built. Run: npm run --workspace packages/web-ui build"
         )
 
         @application.get("/{full_path:path}")
@@ -16116,7 +16116,7 @@ def mount_spa(application: FastAPI):
             # the same JSON 404 payload mount_spa uses for a fully-missing
             # dist so clients get a clear, consistent signal.
             return JSONResponse(
-                {"error": "Frontend not built. Run: cd web && npm run build"},
+                {"error": "Frontend not built. Run: npm run --workspace packages/web-ui build"},
                 status_code=404,
             )
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"

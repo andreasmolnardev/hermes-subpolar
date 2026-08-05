@@ -2020,7 +2020,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         if not os.environ.get("HERMES_QUIET"):
             print("Installing TUI dependencies…")
         npm_cwd = _workspace_root(tui_dir)
-        # --workspace ui-tui avoids resolving apps/desktop (Electron + node-pty).
+        # --workspace keeps dependency installation scoped to this package.
         # See #38772.
         # When ui-tui/ has its own package-lock.json (e.g. curl install),
         # _workspace_root() returns tui_dir itself.  Passing --workspace in
@@ -5174,11 +5174,15 @@ def _web_ui_build_needed(web_dir: Path) -> bool:
     source had genuinely changed (serving a stale dashboard) and force a
     rebuild when nothing had. A content hash is stable across mtime churn.
 
-    The dashboard source lives under ``web/`` but Vite outputs to
-    ``hermes_cli/web_dist/`` (per vite.config.ts outDir), NOT ``web/dist/``,
+    The dashboard source lives under ``packages/web-ui/`` but Vite outputs to
+    ``hermes_cli/web_dist/`` (per vite.config.ts outDir), NOT ``packages/web-ui/dist/``,
     so the dist directory is never part of the hashed source tree.
     """
-    project_root = web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
+    project_root = (
+        web_dir.parents[1]
+        if web_dir.parent.name in {"apps", "packages"}
+        else web_dir.parent
+    )
     dist_dir = project_root / "hermes_cli" / "web_dist"
     sentinel = dist_dir / ".vite" / "manifest.json"
     if not sentinel.exists():
@@ -5605,7 +5609,11 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     except ImportError:
         # Windows: no flock — fall through to the unserialized build.
         return _do_build_web_ui(web_dir, fatal=fatal)
-    project_root = web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
+    project_root = (
+        web_dir.parents[1]
+        if web_dir.parent.name in {"apps", "packages"}
+        else web_dir.parent
+    )
     dist_index = project_root / "hermes_cli" / "web_dist" / "index.html"
     try:
         lock_file = open(project_root / ".web_ui_build.lock", "a", encoding="utf-8")
@@ -5660,7 +5668,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     if not npm:
         if fatal:
             _say("Web UI frontend not built and npm is not available.")
-            _say("Install Node.js, then run:  cd web && npm install && npm run build")
+            _say("Install Node.js, then run:  npm run --workspace packages/web-ui build")
         return not fatal
     build_env = with_hermes_node_path()
     _say("→ Building web UI...")
@@ -5681,13 +5689,9 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
                 _say(text)
 
     npm_cwd = _workspace_root(web_dir)
-    # Scope the install to the web workspace only so that the full workspace
-    # graph (including apps/desktop with its Electron + node-pty deps) is never
-    # resolved here.  Without --workspace the root package.json's apps/* glob
-    # would pull in desktop on every web build. See #38772.
-    # When web/ has its own package-lock.json, _workspace_root() returns
-    # web_dir itself and --workspace would fail.  See #42973.
-    npm_workspace_args: tuple[str, ...] = () if npm_cwd == web_dir else ("--workspace", "web")
+    # Scope install to browser workspace so unrelated packages never affect
+    # dashboard build.
+    npm_workspace_args: tuple[str, ...] = () if npm_cwd == web_dir else ("--workspace", "packages/web-ui")
     if _is_termux_startup_environment():
         npm_cwd, npm_workspace_args = _termux_workspace_install_context(web_dir)
 
@@ -5707,7 +5711,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r1)
         if fatal:
-            _say("  Run manually:  npm install --workspace web && npm run build -w web")
+            _say("  Run manually:  npm install --workspace packages/web-ui && npm run build -w packages/web-ui")
         return False
     # First attempt — stream output via idle-timeout helper (issue #33788).
     # capture_output=True on a long Vite build looks identical to a hang;
@@ -5741,7 +5745,11 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         build_output = (r2.stderr or "") + (r2.stdout or "")
         stderr_preview = build_output.strip()
         stderr_tail = "\n  ".join(stderr_preview.splitlines()[-10:]) if stderr_preview else ""
-        project_root = web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
+        project_root = (
+            web_dir.parents[1]
+            if web_dir.parent.name in {"apps", "packages"}
+            else web_dir.parent
+        )
         dist_dir = project_root / "hermes_cli" / "web_dist"
         dist_index = dist_dir / "index.html"
 
@@ -5760,10 +5768,14 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r2)
         if fatal:
-            _say("  Run manually:  npm install --workspace web && npm run build -w web")
+            _say("  Run manually:  npm install --workspace packages/web-ui && npm run build -w packages/web-ui")
         return False
     _say("  ✓ Web UI built")
-    project_root = web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
+    project_root = (
+        web_dir.parents[1]
+        if web_dir.parent.name in {"apps", "packages"}
+        else web_dir.parent
+    )
     _write_web_ui_build_stamp(project_root, web_dir)
     return True
 
@@ -10357,7 +10369,7 @@ def cmd_dashboard(args):
         # below) to disable it even if a stray dist exists. Set it first.
         os.environ["HERMES_SERVE_HEADLESS"] = "1"
     elif "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
-        if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
+        if not _build_web_ui(PROJECT_ROOT / "packages" / "web-ui", fatal=True):
             sys.exit(1)
     elif getattr(args, "skip_build", False):
         # --build-mode skip trusts the caller to have pre-built the web UI.
@@ -10379,12 +10391,12 @@ def cmd_dashboard(args):
             if _recoverable:
                 print(f"⚠ --skip-build was passed but no web dist found at: {_dist_root}")
                 print("  Attempting one recovery build of the web UI...")
-                _build_web_ui(PROJECT_ROOT / "web", fatal=True)
+                _build_web_ui(PROJECT_ROOT / "packages" / "web-ui", fatal=True)
             if not (_dist_root / "index.html").exists():
                 print(f"✗ --skip-build was passed but no web dist found at: {_dist_root}")
                 if _recoverable:
                     print("  The recovery build did not produce a usable dist.")
-                print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+                print("  Pre-build first:  npm install --workspace packages/web-ui && npm run build -w packages/web-ui")
                 print("  Or drop --skip-build to build automatically.")
                 sys.exit(1)
             print("  ✓ Recovery build produced a web dist")
@@ -10398,7 +10410,7 @@ def cmd_dashboard(args):
         _dist_root = Path(os.environ["HERMES_WEB_DIST"]).expanduser()
         if not (_dist_root / "index.html").exists():
             print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")
-            print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+            print("  Pre-build first:  npm install --workspace packages/web-ui && npm run build -w packages/web-ui")
             print("  Or unset HERMES_WEB_DIST to build and use the default web UI dist.")
             sys.exit(1)
         # Write the expanded path back: web_server reads HERMES_WEB_DIST raw

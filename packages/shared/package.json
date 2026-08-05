@@ -1,5 +1,6 @@
 {
   "name": "@hermes/shared",
+  "description": "Browser-safe common types and transport contracts.",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -16,9 +17,11 @@
     "lint:fix": "eslint src/ --fix",
     "fix": "npm run lint:fix",
     "typecheck": "tsc -p . --noEmit",
-    "check": "npm run typecheck && npm run lint"
+    "test": "bun test src",
+    "check": "npm run typecheck && npm run test && npm run lint"
   },
   "devDependencies": {
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
   }
 }

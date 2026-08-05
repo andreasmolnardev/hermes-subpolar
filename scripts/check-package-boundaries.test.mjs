@@ -4,16 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "bun:test";
 
-import { check, PACKAGE_NAMES } from "./check-package-boundaries.mjs";
+import { check, PACKAGE_NAMES, SUPPORT_PACKAGE_NAMES } from "./check-package-boundaries.mjs";
 
 async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), "hermes-boundaries-"));
-  for (const name of PACKAGE_NAMES) {
+  for (const name of [...PACKAGE_NAMES, ...SUPPORT_PACKAGE_NAMES]) {
     const directory = join(root, "packages", name);
     await mkdir(join(directory, "src"), { recursive: true });
     await writeFile(join(directory, "src", "index.ts"), "export {};\n");
     await writeFile(join(directory, "package.json"), JSON.stringify({
-      name,
+      name: name === "shared" ? "@hermes/shared" : name,
       private: true,
       type: "module",
       scripts: { typecheck: "true", test: "true", check: "true" },

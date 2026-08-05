@@ -38,14 +38,14 @@ workspace metadata, and one Docker Compose production topology.
 
 - `hermes_cli/subpolar_store.py`: WAL SQLite metadata and root validation.
 - `hermes_cli/web_routers/subpolar.py`: owner-scoped authenticated API.
-- `apps/shared/src/subpolar.ts`: frontend transport types.
-- `web/src/SubpolarApp.tsx`: browser shell and first conversation flow.
+- `packages/shared/src/subpolar.ts`: frontend transport types.
+- `packages/web-ui/src/SubpolarApp.tsx`: browser shell and first conversation flow.
 - `docker-compose.yml`: sole canonical production topology.
 
 ## Verification
 
 - `scripts/run_tests.sh tests/hermes_cli/test_subpolar_store.py`
-- `npm --prefix apps/shared run check` requires installed workspace
+- `npm --prefix packages/shared run check` requires installed workspace
   dependencies; run in Docker/clean install before release.
 - `docker compose config` requires dashboard auth variables by design.
 

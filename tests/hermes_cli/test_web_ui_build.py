@@ -6,7 +6,7 @@ NOT mtime comparison — so ``git pull`` / ``hermes update`` that rewrite
 source mtimes without changing content no longer fool it.
 
 Critical invariant: the dashboard Vite build outputs to hermes_cli/web_dist/
-(vite.config.ts: outDir: "../../hermes_cli/web_dist"), NOT web/dist/.
+    (vite.config.ts: outDir: "../../hermes_cli/web_dist"), NOT packages/web-ui/dist/.
 The sentinel must be checked in the correct output directory or the
 freshness check is a no-op and the OOM rebuild always runs.
 """
@@ -47,7 +47,7 @@ def _touch(path: Path, offset: float = 0.0) -> None:
 
 def _make_web_dir(tmp_path: Path) -> tuple[Path, Path]:
     """Return (web_dir, dist_dir) matching real repo layout."""
-    web_dir = tmp_path / "web"
+    web_dir = tmp_path / "packages" / "web-ui"
     web_dir.mkdir(parents=True)
     (web_dir / "package.json").touch()
     dist_dir = tmp_path / "hermes_cli" / "web_dist"
@@ -64,7 +64,7 @@ class TestWebUIBuildNeeded:
 
     @staticmethod
     def _root(web_dir: Path) -> Path:
-        return web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
+        return web_dir.parents[1] if web_dir.parent.name in {"apps", "packages"} else web_dir.parent
 
     def _stamp_current(self, web_dir: Path) -> None:
         """Record a stamp matching web_dir's current source content."""
@@ -126,10 +126,9 @@ class TestBuildWebUISkipsWhenFresh:
     def test_web_install_omits_workspace_when_web_has_own_lockfile(
         self, tmp_path, monkeypatch
     ):
-        """web/ with its own lockfile => _workspace_root returns web_dir, so
-        --workspace web would fail (npm can't find that workspace from inside
-        web/). The flag must be dropped and the install run plainly from web_dir.
-        Symmetric to the TUI fix in test_tui_npm_install.py. See #42973.
+        """A package with its own lockfile is installed directly, so
+        workspace selection is not passed from inside the package.
+        See #42973.
 
         With web's own lockfile present at cwd, _run_npm_install_deterministic
         uses ``npm ci`` (not ``npm install``).
@@ -367,4 +366,3 @@ class TestBuildRecoversFromMissingToolchain:
         assert result is True
         assert mock_install.call_count == 1
         assert mock_build.call_count == 1
-

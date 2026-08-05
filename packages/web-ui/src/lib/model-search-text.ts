@@ -5,7 +5,7 @@
  * (Kimi Coding's flagship is literally `k3`) that users still search for by
  * the familiar `kimi-…` naming of sibling models.
  *
- * Keep in sync with ui-tui/src/lib/model-search-text.ts and
+ * Keep in sync with gateway model-search contracts and
  * hermes_cli/model_search.py. Behavioural tests live in the TUI package.
  */
 const MODEL_SEARCH_ALIASES: Record<string, readonly string[]> = {

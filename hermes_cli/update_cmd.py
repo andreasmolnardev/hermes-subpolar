@@ -328,7 +328,12 @@ def _web_toolchain_roots(web_dir: Path) -> tuple[Path, ...]:
     of its ancestors, so shims hoisted to the workspace root and shims nested
     under a package that owns its lockfile (#42973) are equally valid.
     """
-    return (web_dir, web_dir.parent)
+    workspace_root = (
+        web_dir.parents[1]
+        if web_dir.parent.name in {"apps", "packages"}
+        else web_dir.parent
+    )
+    return (web_dir, workspace_root)
 
 def _print_curator_first_run_notice() -> None:
     """Print a short heads-up about the skill curator after `hermes update`.
@@ -948,7 +953,7 @@ def _update_via_zip(args):
         _m().sys.exit(1)
 
     node_failures = _update_node_dependencies()
-    _m()._build_web_ui(_m().PROJECT_ROOT / "web")
+    _m()._build_web_ui(_m().PROJECT_ROOT / "packages" / "web-ui")
 
     # Sync skills
     try:
@@ -2005,7 +2010,7 @@ def _npm_lockfile_changed(hermes_root: Path) -> bool:
     # landed must NOT skip the reinstall — otherwise every later `hermes
     # update` keeps rebuilding against a half-installed tree and serving a
     # stale dist.
-    web_dir = _m().PROJECT_ROOT / "web"
+    web_dir = _m().PROJECT_ROOT / "packages" / "web-ui"
     if (web_dir / "package.json").is_file() and not _web_build_toolchain_ready(
         *_web_toolchain_roots(web_dir)
     ):
@@ -2044,7 +2049,7 @@ def _update_node_dependencies() -> list[str]:
     npm = _m()._resolve_node_runtime_npm()
     if not npm:
         # If the only npm reachable inside this WSL shell is the Windows one,
-        # flag it loudly: silently skipping leaves ui-tui deps stale while the
+        # flag it loudly: silently skipping leaves browser dependencies stale while the
         # rest of the update proceeds, and running it would corrupt the tree.
         from hermes_constants import is_wsl
 
@@ -2057,9 +2062,9 @@ def _update_node_dependencies() -> list[str]:
             failed = ["repo root"]
             if any(
                 (_m().PROJECT_ROOT / workspace / "package.json").exists()
-                for workspace in ("ui-tui", "web")
+                for workspace in ("packages/web-ui",)
             ):
-                failed.append("ui-tui, web workspaces")
+                failed.append("packages/web-ui workspace")
             return failed
         return []
 
@@ -2073,13 +2078,7 @@ def _update_node_dependencies() -> list[str]:
         logger.info("npm lockfile unchanged, skipping npm install")
         return []
 
-    # With a single workspace lockfile the root install would cover ALL
-    # workspaces — but apps/desktop pulls in Electron as a devDependency,
-    # and its postinstall downloads a ~200MB binary.  Most users don't
-    # need desktop during `hermes update`, so we install root-only first
-    # then add just the workspaces the CLI/TUI/web build actually requires.
-    # Desktop deps are installed on demand by the desktop launcher
-    # (see _desktop_build_needed).
+    # Install root dependencies first, then the browser workspace explicitly.
     print("→ Updating Node.js dependencies...")
 
     def _partial_update_failure(*labels: str) -> list[str]:
@@ -2116,9 +2115,8 @@ def _update_node_dependencies() -> list[str]:
             print(f"    {stderr.splitlines()[-1]}")
         return _partial_update_failure("repo root")
 
-    # Step 2: install only the workspaces update needs (ui-tui, web).
-    # --workspace selects specific workspaces; the rest (desktop) are skipped.
-    ws_args = [*extra_args, "--workspace", "ui-tui", "--workspace", "web"]
+    # Step 2: install browser workspace dependencies.
+    ws_args = [*extra_args, "--workspace", "packages/web-ui"]
     ws_result = _m()._run_npm_install_deterministic(
         npm,
         _m().PROJECT_ROOT,
@@ -2128,14 +2126,14 @@ def _update_node_dependencies() -> list[str]:
     )
     if ws_result.returncode == 0:
         _record_npm_lockfile_hash(shared_hermes_root)
-        print("  ✓ repo root + ui-tui, web workspaces (desktop skipped)")
+        print("  ✓ repo root + packages/web-ui workspace")
         return []
 
     print("  ⚠ npm workspace install failed")
     stderr = (ws_result.stderr or "").strip() if ws_result.stderr else ""
     if stderr:
         print(f"    {stderr.splitlines()[-1]}")
-    return _partial_update_failure("ui-tui, web workspaces")
+    return _partial_update_failure("packages/web-ui workspace")
 
 def _log_only_write(text: str) -> None:
     """Write ``text`` to ``~/.hermes/logs/update.log`` only, never the terminal.
@@ -4190,7 +4188,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("    https://hermes-agent.nousresearch.com")
 
         node_failures = _update_node_dependencies()
-        _m()._build_web_ui(_m().PROJECT_ROOT / "web")
+        _m()._build_web_ui(_m().PROJECT_ROOT / "packages" / "web-ui")
 
         print()
         print("✓ Code updated!")

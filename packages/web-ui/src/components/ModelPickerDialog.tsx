@@ -17,7 +17,7 @@ import { modelSearchText } from "@/lib/model-search-text";
 /**
  * Two-stage model picker modal.
  *
- * Mirrors ui-tui/src/components/modelPicker.tsx:
+ * Browser model-picker flow:
  *   Stage 1: pick provider (authenticated providers only)
  *   Stage 2: pick model within that provider
  *

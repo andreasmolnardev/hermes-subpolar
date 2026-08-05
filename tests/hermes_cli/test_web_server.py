@@ -4002,7 +4002,7 @@ class TestServeIndexMissingIndex:
             resp = client.get(route)
             assert resp.status_code == 404
             assert resp.json()["error"] == (
-                "Frontend not built. Run: cd web && npm run build"
+                "Frontend not built. Run: npm run --workspace packages/web-ui build"
             )
 
     def test_index_deleted_after_mount_returns_json_404(self, tmp_path, monkeypatch):

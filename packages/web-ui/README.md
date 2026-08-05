@@ -12,18 +12,18 @@ Browser-based dashboard for managing Hermes Agent configuration, API keys, and m
 
 ```bash
 # Start the backend API server
-cd ../
+cd ../..
 python -m hermes_cli.main web --no-open
 
 # In another terminal, start the Vite dev server (with HMR + API proxy)
-cd web/
+cd packages/web-ui/
 npm install
 npm run dev
 ```
 
 Open the **Vite URL** printed in the terminal (usually `http://localhost:5173`). That is the live-reload UI.
 
-`hermes dashboard` on port 9119 serves the **built** bundle from `hermes_cli/web_dist/`, not the Vite dev server — changes in `web/src/` will not appear there until you run `npm run build` and restart the dashboard (or use `web --no-open` + Vite as above).
+`hermes dashboard` on port 9119 serves the **built** bundle from `hermes_cli/web_dist/`, not the Vite dev server — changes in `packages/web-ui/src/` will not appear there until you run `npm run build` and restart the dashboard (or use `web --no-open` + Vite as above).
 
 The Vite dev server proxies `/api` requests to `http://127.0.0.1:9119` (the FastAPI backend).
 
@@ -76,7 +76,7 @@ Read before adding or editing UI styles. These rules keep the dashboard legible 
 
 - The dashboard preserves the Nous brand uppercase aesthetic, but it is **opt-in per element, not global**.
 - Apply uppercase via the DS utility `text-display` on **brand chrome only** — page titles, nav section headings, badges, brand wordmark. DS components (`Button`, `Badge`, `Tabs`, `Segmented`, etc.) already self-apply `text-display`.
-- **Do not introduce new `uppercase`** (the literal Tailwind class) in `hermes-agent/web/src`. Prefer `text-display` for new brand chrome. Legacy `uppercase` call sites (e.g. `components/ui/label.tsx`, `card.tsx`) remain until migrated.
+- **Do not introduce new `uppercase`** (the literal Tailwind class) in `hermes-agent/packages/web-ui/src`. Prefer `text-display` for new brand chrome. Legacy `uppercase` call sites (e.g. `components/ui/label.tsx`, `card.tsx`) remain until migrated.
 - The app shell no longer forces uppercase globally, so blanket `normal-case` opt-outs are unnecessary. Use `normal-case` only where a DS component applies `text-display` but the label should stay sentence case — e.g. dynamic user content (model slugs, theme names) **or** fixed UI copy that is not brand chrome (EnvPage “not configured” toggle, sidebar “New chat”).
 
 ### Fonts
@@ -101,4 +101,3 @@ Typography is **opt-in per surface**, not global on layout shells — the app sh
 - Prefer **semantic tokens** (`text-text-*`, `bg-card`, `border-border`, `text-foreground`, `text-destructive`, `text-success`, `text-warning`) over raw layer references (`text-midground`, `text-foreground`).
 - `text-muted-foreground` is now wired to `--color-text-secondary`, so existing call sites stay correct, but new code should prefer the semantic name.
 - When you genuinely need a non-token color (icon de-emphasis on a chart, terminal foreground via inline style), keep alpha at `≥ 0.7` for any text.
-

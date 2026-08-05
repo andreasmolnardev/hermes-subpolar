@@ -2000,10 +2000,8 @@ def run_doctor(args):
     _npm_bin = _safe_which("npm")
     if _npm_bin:
         # Each entry: (cwd, label, extra_audit_args)
-        # PROJECT_ROOT is audited with --workspaces=false so that the apps/*
-        # glob (which pulls in Electron, node-pty, etc.) is never resolved
-        # for a routine security check. The web and ui-tui workspaces are
-        # audited separately via --workspace flags. See #38772.
+        # PROJECT_ROOT is audited with --workspaces=false, then the browser
+        # workspace is audited separately via a --workspace flag.
         # The WhatsApp bridge may live under a writable HERMES_HOME mirror
         # instead of the (possibly read-only) install tree in Docker — resolve
         # it through the shared helper so we audit the dir that actually holds
@@ -2015,8 +2013,7 @@ def run_doctor(args):
             _whatsapp_bridge_dir = PROJECT_ROOT / "scripts" / "whatsapp-bridge"
         npm_audit_targets = [
             (PROJECT_ROOT, "Browser tools (agent-browser)", ["--workspaces=false"]),
-            (PROJECT_ROOT, "web workspace", ["--workspace", "web"]),
-            (PROJECT_ROOT, "ui-tui workspace", ["--workspace", "ui-tui"]),
+            (PROJECT_ROOT, "packages/web-ui workspace", ["--workspace", "packages/web-ui"]),
             (_whatsapp_bridge_dir, "WhatsApp bridge", []),
         ]
         for npm_dir, label, audit_extra in npm_audit_targets:
@@ -2072,7 +2069,7 @@ def run_doctor(args):
                         f"({vuln_detail})"
                     )
                     if audit_extra and audit_extra[0] == "--workspace":
-                        # The web/ui-tui workspace advisories are in build-time
+                        # Browser workspace advisories are in build-time
                         # tooling (esbuild/vite, etc.), not runtime code that ships
                         # to users. Manual npm remediation may error with a known
                         # arborist crash (edgesOut / isDescendantOf) on this monorepo

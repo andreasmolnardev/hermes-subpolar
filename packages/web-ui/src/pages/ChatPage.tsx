@@ -13,7 +13,7 @@
  *          ▼                                                              .
  *     FastAPI pty_ws  (hermes_cli/web_server.py)                          .
  *          ▼                                                              .
- *     POSIX PTY → `node ui-tui/dist/entry.js` → tui_gateway + AIAgent     .
+ *     Browser WebSocket → tui_gateway + AIAgent.
  */
 
 import { FitAddon } from "@xterm/addon-fit";

@@ -11,10 +11,8 @@
 // intentionally simple — no external dependency — but good enough to make
 // `son4` rank `claude-sonnet-4` above an incidental scattered hit.
 //
-// This is a logically identical copy of ui-tui/src/lib/fuzzy.ts (only prettier
-// formatting differs); keep the two in sync. The TUI copy carries the vitest
-// suite (this `web` package has no test runner), so behavioural changes should
-// be validated there.
+// Keep matching behavior local to browser package; callers rely on stable
+// scores and matched positions for picker highlighting.
 
 export interface FuzzyMatch {
   /** Total score; higher is better. */

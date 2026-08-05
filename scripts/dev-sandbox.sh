@@ -11,7 +11,7 @@
 #   scripts/dev-sandbox.sh python -m hermes_cli.main
 #   scripts/dev-sandbox.sh hermes desktop
 #   scripts/dev-sandbox.sh electron .
-#   scripts/dev-sandbox.sh -- npm run dev   # from apps/desktop/
+#   scripts/dev-sandbox.sh -- npm run dev   # from packages/web-ui/
 #   scripts/dev-sandbox.sh --persistent hermes desktop
 #   scripts/dev-sandbox.sh --persistent -- npm run dev
 #

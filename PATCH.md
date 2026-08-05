@@ -2,6 +2,14 @@
 
 ## Current Revamp
 
+- Added Bun migration foundation with six explicitly named runtime packages,
+  strict shared TypeScript settings, browser-safe data contracts, dependency
+  direction/import-boundary checks, focused behavior tests, and isolated Bun CI.
+- Kept existing npm workspaces, package-lock.json, Python test entry points, and
+  legacy runtime directories during transition. Bun lockfile is authoritative
+  for new packages; package-lock.json remains until legacy npm/Docker install
+  paths are migrated and their CI gate is green.
+
 - Added browser-first Subpolar shell with workspace, Agent, Scheduled, Apps,
   Settings, conversation, Activity, Source Control, and Terminal surfaces.
 - Added owner-scoped workspace, Agent, scheduled-task, integration, activity,

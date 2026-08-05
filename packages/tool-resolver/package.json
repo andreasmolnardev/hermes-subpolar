@@ -1,0 +1,13 @@
+{
+  "name": "tool-resolver",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "data-layer": "0.0.0" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test test",
+    "check": "bun run typecheck && bun run test"
+  }
+}

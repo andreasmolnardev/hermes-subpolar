@@ -1,0 +1,16 @@
+{
+  "name": "harness",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "tool-resolver": "0.0.0",
+    "chat-provider-interface": "0.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test test",
+    "check": "bun run typecheck && bun run test"
+  }
+}

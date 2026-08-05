@@ -1,0 +1,17 @@
+{
+  "name": "web-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "browserDependencies": [],
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "api-gateway": "0.0.0",
+    "data-layer": "0.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test test",
+    "check": "bun run typecheck && bun run test"
+  }
+}

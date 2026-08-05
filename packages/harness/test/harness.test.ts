@@ -22,7 +22,8 @@ import {
   truncateTerminalOutput,
   truncateUtf8,
   utf8Bytes,
-  type ToolOutputResult
+  type ToolOutputResult,
+  estimateRequestTokensRough
 } from "../src/index.ts";
 
 function response(message: HarnessMessage, inputTokens = 1, outputTokens = 1) {
@@ -780,6 +781,31 @@ test("provider budget stops before the provider side effect", async () => {
   assert.equal(result.outcome, "budget_exhausted");
   assert.equal(result.error.reason, "max_provider_calls");
   assert.equal(providerCalls, 0);
+});
+
+test("supported request estimates enforce the existing token budget preflight", async () => {
+  let providerCalls = 0;
+  const requestEstimate = estimateRequestTokensRough([{ role: "user", content: "hello" }]);
+  assert.equal(requestEstimate.supported, true);
+  const estimate = requestEstimate.tokens;
+  const allowed = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "done" });
+    }
+  }, { budgets: { maxTokens: estimate } }));
+  assert.equal(allowed.outcome, "completed");
+  assert.equal(providerCalls, 1);
+
+  const rejected = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, { budgets: { maxTokens: estimate - 1 } }));
+  assert.equal(rejected.outcome, "budget_exhausted");
+  assert.equal(rejected.error.reason, "max_tokens");
+  assert.equal(providerCalls, 1);
 });
 
 test("timeout aborts an uncooperative provider", async () => {

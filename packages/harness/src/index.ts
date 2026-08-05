@@ -45,6 +45,10 @@ import {
   type IterationBudgetDecision,
   type IterationBudgetExhaustionReason
 } from "./iteration-budget";
+import {
+  estimateRequestTokensRough,
+  type HarnessTokenEstimate
+} from "./model-metadata";
 
 export {
   MAX_RETRY_ATTEMPTS,
@@ -101,6 +105,29 @@ export type {
   HarnessUnsupportedSourceKind,
   HarnessPromptAssembly
 } from "./prompt-assembler";
+export {
+  HARNESS_IMAGE_TOKEN_COST,
+  HARNESS_PROVIDER_ERROR_PARSER_VERSION,
+  HARNESS_TOKEN_APPROXIMATION_VERSION,
+  estimateContentPartTokensRough,
+  estimateMessageTokensRough,
+  estimateMessagesTokensRough,
+  estimateRequestTokensRough,
+  estimateTokensRough,
+  estimateToolsTokensRough,
+  getContextLengthFromProviderError,
+  isOutputCapError,
+  isSupportedTokenEstimate,
+  parseAvailableOutputTokensFromError,
+  parseAvailableOutputTokensFromErrorResult,
+  parseContextLimitFromError,
+  parseContextLimitFromErrorResult
+} from "./model-metadata";
+export type {
+  HarnessParsedTokenValue,
+  HarnessRequestTokenEstimateOptions,
+  HarnessTokenEstimate
+} from "./model-metadata";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -1128,6 +1155,17 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           }), controller.signal)
           : messages;
         const providerMessages = normalizeHarnessMessages(assembled);
+        if (request.budgets?.maxTokens !== undefined) {
+          const requestEstimate: HarnessTokenEstimate = estimateRequestTokensRough(providerMessages, {
+            tools: providerTools(request.tools)
+          });
+          // An unsupported shape must not become a guessed budget amount. The
+          // Python runtime remains the fallback for that context.
+          if (requestEstimate.supported) {
+            const estimateDecision = budget.check("tokens", requestEstimate.tokens);
+            if (!estimateDecision.allowed) return terminal(iterationBudgetError(estimateDecision));
+          }
+        }
         attempt += 1;
         const providerDecision = budget.tryConsume("providerCalls");
         if (!providerDecision.allowed) return terminal(iterationBudgetError(providerDecision));

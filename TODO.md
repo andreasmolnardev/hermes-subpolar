@@ -67,11 +67,14 @@ foundation are recorded below so they are not mistaken for full runtime parity.
 
 ### Core Correctness
 
-- [ ] Persist and reload runtime version, schema version, checkpoint, and
-  per-session runtime selection; remove process-local gateway pin state.
+- [x] Persist and reload runtime version, schema version, checkpoint, and
+  per-session runtime selection for the supported TypeScript session path.
+- [ ] Wire every production entrypoint to the durable runtime store and remove
+  the process-local legacy gateway pin state.
 - [ ] Propagate detailed reasoning, cache usage, provider metadata, finish
   reasons, and partial usage through harness events, persistence, and gateway
-  payloads without leaking prompts, arguments, results, or credentials.
+  payloads for every supported provider/event shape without leaking prompts,
+  arguments, results, or credentials.
 - [ ] Add explicit state-transition tests for every terminal outcome and every
   provider/tool/approval cancellation race.
 
@@ -98,6 +101,9 @@ foundation are recorded below so they are not mistaken for full runtime parity.
 
 ### Phase 5: Provider Adapters
 
+- [x] Implement the first recorded-response OpenAI-compatible adapter with
+  injected credentials, tool calls, multimodal content, usage, finish reasons,
+  request identity, malformed-response handling, and retry classification.
 - [ ] Preserve prompt cache controls, reasoning blocks, multimodal encoding,
   provider metadata, and provider-specific usage/error mappings.
 - [ ] Migrate additional providers in usage order: Anthropic, Gemini, Bedrock,
@@ -158,18 +164,28 @@ foundation are recorded below so they are not mistaken for full runtime parity.
 
 ## Required Verification Gates
 
-- [ ] `bun run check:boundaries`
-- [ ] `bun run test:boundaries`
-- [ ] `bun run typecheck:runtime`
-- [ ] `bun run check:monorepo`
+- [x] `bun run check:boundaries`
+- [x] `bun run test:boundaries`
+- [x] `bun run typecheck:runtime`
+- [x] `bun run check:monorepo`
 - [ ] `bun test`
 - [ ] `scripts/run_tests.sh`
-- [ ] `bun test tests-js/migration` with temporary `HERMES_HOME`
+- [x] `bun test tests-js/migration` with temporary `HERMES_HOME`
 - [ ] Python migration and E2E suites through `scripts/run_tests.sh` with
   temporary `HERMES_HOME`
 - [ ] Clean-install verification, package builds, browser E2E, gateway/API
   contract checks, and Docker health checks
 - [ ] Final review reports no unresolved high- or medium-severity findings.
+
+### Verification Notes
+
+- Runtime package checks currently pass: 22 provider, 31 data-layer, 14
+  resolver, 66 harness, and 35 gateway tests in the latest monorepo check.
+- Migration fixtures pass with temporary `HERMES_HOME`: 12 tests.
+- Full `bun test` remains open because optional WhatsApp/browser dependencies
+  and standalone Vitest alias/feature support are unavailable in this checkout.
+- `scripts/run_tests.sh` remains open because the repository has no pytest
+  virtualenv configured; run it in the supported Python development shell.
 
 ## Completion Rule
 

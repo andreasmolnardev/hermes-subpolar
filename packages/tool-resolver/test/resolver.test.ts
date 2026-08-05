@@ -5,6 +5,11 @@ import {
   createToolHandle,
   resolveToolDescriptors,
   resolveTools,
+  sanitizeJsonSchema,
+  sanitizeToolSchemas,
+  stripPatternAndFormat,
+  stripSlashEnum,
+  unrenameToolArgs,
   type ToolDefinition,
   type ToolPolicyInput
 } from "../src/index.ts";
@@ -144,4 +149,184 @@ test("legacy resolveTools keeps concrete callers compatible and orders results",
     { toolName: "a.tool", policy: "auto" },
     { toolName: "z.tool", policy: "deny" }
   ]);
+});
+
+test("sanitizes nullable unions and strict top-level schema keywords without mutation", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      optional: {
+        anyOf: [{ type: "string" }, { type: "null" }],
+        description: "optional value",
+        default: null
+      },
+      reference: { $ref: "#/$defs/Reference", default: null }
+    },
+    anyOf: [{ type: "object" }, { type: "string" }],
+    allOf: [{ required: ["optional"] }],
+    oneOf: [{ type: "object" }, { type: "string" }],
+    enum: ["discarded"],
+    not: { type: "null" },
+    $defs: { Reference: { type: "string" } }
+  } as const;
+  const before = structuredClone(schema);
+
+  const sanitized = sanitizeJsonSchema(schema);
+  assert.deepEqual(schema, before);
+  assert.deepEqual(sanitized, {
+    type: "object",
+    properties: {
+      optional: {
+        type: "string",
+        nullable: true,
+        description: "optional value",
+        default: null
+      },
+      reference: { $ref: "#/$defs/Reference" }
+    },
+    $defs: { Reference: { type: "string" } }
+  });
+});
+
+test("normalizes property keys and required values deterministically", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      "a_": { type: "string" },
+      "a~": { type: "string" },
+      "nested key": {
+        type: "object",
+        properties: { "deep/key": { type: "string" } },
+        required: ["deep/key"]
+      },
+      values: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { "item key": { type: "string" } },
+          required: ["item key"]
+        }
+      }
+    },
+    required: ["a~", "nested key", "missing"]
+  } as const;
+
+  const sanitized = sanitizeJsonSchema(schema);
+  assert.deepEqual(Object.keys(sanitized.properties as Record<string, unknown>), [
+    "a_",
+    "a__2",
+    "nested_key",
+    "values"
+  ]);
+  const properties = sanitized.properties as Record<string, any>;
+  assert.deepEqual(sanitized.required, ["a__2", "nested_key"]);
+  assert.deepEqual(properties.nested_key.required, ["deep_key"]);
+  assert.ok(properties.values.items.properties["item_key"]);
+
+  const args = {
+    a__2: "first",
+    nested_key: { deep_key: "second" },
+    values: [{ item_key: "third" }]
+  };
+  assert.deepEqual(unrenameToolArgs(schema, args), {
+    "a~": "first",
+    "nested key": { "deep/key": "second" },
+    values: [{ "item key": "third" }]
+  });
+  assert.deepEqual(schema.required, ["a~", "nested key", "missing"]);
+});
+
+test("sanitizes malformed schema fragments and preserves meaningful type branches", () => {
+  const sanitized = sanitizeJsonSchema({
+    type: "object",
+    properties: {
+      payload: "object",
+      value: { type: ["number", "string"] },
+      maybe: { type: ["string", "null"] },
+      nullValue: { type: ["null"] }
+    }
+  });
+  const properties = sanitized.properties as Record<string, any>;
+  assert.deepEqual(properties.payload, { type: "object", properties: {} });
+  assert.deepEqual(properties.value, {
+    anyOf: [{ type: "number" }, { type: "string" }]
+  });
+  assert.deepEqual(properties.maybe, { type: "string", nullable: true });
+  assert.deepEqual(properties.nullValue, { type: "null" });
+});
+
+test("recovery strippers are pure and do not strip literal property names", () => {
+  const tools = [
+    {
+      type: "function",
+      function: {
+        name: "search",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", pattern: "^[a-z]+$" },
+            query: { type: "string", format: "date-time" },
+            model: { type: "string", enum: ["Qwen/Qwen3.5", "safe"] }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      name: "get_time",
+      parameters: {
+        type: "object",
+        properties: { timezone: { type: "string", format: "date-time" } }
+      }
+    }
+  ] as const;
+  const before = structuredClone(tools);
+
+  const [withoutPattern, patternCount] = stripPatternAndFormat(tools);
+  assert.equal(patternCount, 3);
+  assert.deepEqual(tools, before);
+  const firstProperties = (withoutPattern[0].function as any).parameters.properties;
+  assert.ok(firstProperties.pattern);
+  assert.equal(firstProperties.pattern.pattern, undefined);
+  assert.equal(firstProperties.query.format, undefined);
+  assert.equal((withoutPattern[1] as any).parameters.properties.timezone.format, undefined);
+
+  const [withoutSlash, slashCount] = stripSlashEnum(tools);
+  assert.equal(slashCount, 1);
+  assert.deepEqual(tools, before);
+  assert.equal((withoutSlash[0].function as any).parameters.properties.model.enum, undefined);
+
+  const sanitizedTools = sanitizeToolSchemas([
+    ...tools,
+    { type: "function", function: { name: "empty" } }
+  ], { stripPatternAndFormat: true, stripSlashEnum: true });
+  assert.equal((sanitizedTools[0].function as any).parameters.properties.query.format, undefined);
+  assert.equal((sanitizedTools[0].function as any).parameters.properties.model.enum, undefined);
+  assert.deepEqual((sanitizedTools[2].function as any).parameters, { type: "object", properties: {} });
+  assert.deepEqual(tools, before);
+});
+
+test("resolver exposes sanitized schemas and reverses renamed arguments before handle execution", () => {
+  let received: unknown;
+  const handle = createToolHandle((args: unknown) => {
+    received = args;
+    return "ok";
+  });
+  const inputSchema = {
+    type: "object",
+    properties: { "query~neq": { type: "string" } },
+    required: ["query~neq"]
+  } as const;
+
+  const [resolved] = resolveToolDescriptors([tool("renamed", {
+    inputSchema,
+    executable: { handle }
+  })]);
+  assert.ok(resolved && "handle" in resolved.executable);
+  assert.deepEqual((resolved?.inputSchema as any).properties, { query_neq: { type: "string" } });
+  assert.deepEqual((resolved?.inputSchema as any).required, ["query_neq"]);
+  assert.notEqual(resolved?.executable.handle, handle);
+  resolved?.executable.handle.execute({ query_neq: "value" });
+  assert.deepEqual(received, { "query~neq": "value" });
+  assert.deepEqual(inputSchema.properties, { "query~neq": { type: "string" } });
 });

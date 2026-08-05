@@ -43,6 +43,11 @@ export type ToolPolicyInput = ToolPolicySnapshot & {
   readonly disabled?: boolean;
 };
 
+export type SchemaSanitizationOptions = {
+  readonly stripPatternAndFormat?: boolean;
+  readonly stripSlashEnum?: boolean;
+};
+
 export type ResolvedTool = {
   readonly name: string;
   readonly policy: Exclude<ToolPolicySnapshot["policy"], "deny">;
@@ -80,6 +85,307 @@ function cloneJsonValue(value: JsonValue, path: string): JsonValue {
     result[key] = cloneJsonValue(item, `${path}.${key}`);
   }
   return result;
+}
+
+function cloneUnknown(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(cloneUnknown);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneUnknown(item)]));
+}
+
+const PROPERTY_KEY_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
+const PROPERTY_KEY_BAD_CHARS = /[^a-zA-Z0-9_.-]/g;
+
+export function sanitizePropertyKey(key: string): string {
+  const sanitized = key.replace(PROPERTY_KEY_BAD_CHARS, "_").slice(0, 64);
+  return sanitized || "param";
+}
+
+function renamePropertyKeys(properties: Record<string, unknown>): Map<string, string> {
+  const taken = new Set(Object.keys(properties).filter(key => PROPERTY_KEY_PATTERN.test(key)));
+  const renames = new Map<string, string>();
+  for (const key of Object.keys(properties)) {
+    if (PROPERTY_KEY_PATTERN.test(key)) continue;
+    const base = sanitizePropertyKey(key);
+    let candidate = base;
+    let suffixNumber = 2;
+    while (taken.has(candidate)) {
+      const suffix = `_${suffixNumber++}`;
+      candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+    }
+    taken.add(candidate);
+    renames.set(key, candidate);
+  }
+  return renames;
+}
+
+function isNullSchema(schema: unknown): boolean {
+  return isRecord(schema) && schema.type === "null";
+}
+
+export function stripNullableUnions(schema: unknown, keepNullableHint = true): unknown {
+  if (Array.isArray(schema)) return schema.map(item => stripNullableUnions(item, keepNullableHint));
+  if (!isRecord(schema)) return schema;
+
+  const stripped = Object.fromEntries(
+    Object.entries(schema).map(([key, value]) => [key, stripNullableUnions(value, keepNullableHint)])
+  ) as Record<string, unknown>;
+
+  for (const key of ["anyOf", "oneOf"] as const) {
+    const variants = stripped[key];
+    if (!Array.isArray(variants)) continue;
+    const nonNull = variants.filter(variant => !isNullSchema(variant));
+    if (nonNull.length !== 1 || nonNull.length === variants.length) continue;
+
+    const replacement = isRecord(nonNull[0])
+      ? { ...nonNull[0] }
+      : {};
+    if (keepNullableHint && replacement.nullable === undefined) replacement.nullable = true;
+    for (const metadataKey of ["title", "description", "default", "examples"] as const) {
+      if (stripped[metadataKey] === undefined || replacement[metadataKey] !== undefined) continue;
+      if (metadataKey === "default" && "$ref" in replacement) continue;
+      replacement[metadataKey] = stripped[metadataKey];
+    }
+    return stripNullableUnions(replacement, keepNullableHint);
+  }
+  return stripped;
+}
+
+const TOP_LEVEL_FORBIDDEN_KEYS = ["allOf", "anyOf", "oneOf", "enum", "not"] as const;
+
+function stripTopLevelCombinators(schema: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...schema };
+  for (const key of TOP_LEVEL_FORBIDDEN_KEYS) delete result[key];
+  return result;
+}
+
+function stripRefSiblings(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(stripRefSiblings);
+  if (!isRecord(schema)) return schema;
+  const result = Object.fromEntries(
+    Object.entries(schema).map(([key, value]) => [key, stripRefSiblings(value)])
+  ) as Record<string, unknown>;
+  if ("$ref" in result) delete result.default;
+  return result;
+}
+
+function sanitizeSchemaNode(node: unknown): unknown {
+  if (typeof node === "string") {
+    if (node === "object") return { type: "object", properties: {} };
+    if (JSON_SCHEMA_TYPES.has(node)) return { type: node };
+    return { type: "object", properties: {} };
+  }
+  if (Array.isArray(node)) return node.map(sanitizeSchemaNode);
+  if (!isRecord(node)) return node;
+
+  const propertyRenames = isRecord(node.properties) ? renamePropertyKeys(node.properties) : new Map<string, string>();
+  const entries: [string, unknown][] = [];
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "type" && Array.isArray(value)) {
+      const hasNull = value.includes("null");
+      const nonNull = value.filter(item => typeof item === "string" && item !== "null");
+      if (nonNull.length === 1) {
+        entries.push(["type", nonNull[0]]);
+        if (hasNull) entries.push(["nullable", true]);
+      } else if (nonNull.length >= 2) {
+        entries.push(["anyOf", nonNull.map(item => ({ type: item }))]);
+        if (hasNull) entries.push(["nullable", true]);
+      } else {
+        entries.push(["type", hasNull ? "null" : "object"]);
+      }
+      continue;
+    }
+
+    if ((key === "properties" || key === "$defs" || key === "definitions") && isRecord(value)) {
+      entries.push([key, Object.fromEntries(
+        Object.entries(value).map(([subKey, subValue]) => [
+          key === "properties" ? (propertyRenames.get(subKey) ?? subKey) : subKey,
+          sanitizeSchemaNode(subValue)
+        ])
+      )]);
+      continue;
+    }
+
+    if (key === "items" || key === "additionalProperties") {
+      entries.push([key, typeof value === "boolean" ? value : sanitizeSchemaNode(value)]);
+      continue;
+    }
+
+    if ((key === "anyOf" || key === "oneOf" || key === "allOf") && Array.isArray(value)) {
+      entries.push([key, value.map(sanitizeSchemaNode)]);
+      continue;
+    }
+
+    if (key === "required") {
+      entries.push([key, Array.isArray(value)
+        ? value.map(item => typeof item === "string" ? (propertyRenames.get(item) ?? item) : item)
+        : cloneUnknown(value)]);
+      continue;
+    }
+
+    if (key === "enum" || key === "examples" || key === "dependentRequired") {
+      entries.push([key, cloneUnknown(value)]);
+      continue;
+    }
+
+    entries.push([key, Array.isArray(value) || isRecord(value) ? sanitizeSchemaNode(value) : value]);
+  }
+
+  const result = Object.fromEntries(entries) as Record<string, unknown>;
+  if (result.type === "object" && !isRecord(result.properties)) result.properties = {};
+  if (result.type === "object" && Array.isArray(result.required) && isRecord(result.properties)) {
+    const properties = result.properties;
+    const valid = result.required.filter(item => typeof item === "string" && Object.hasOwn(properties, item));
+    if (valid.length === 0) delete result.required;
+    else if (valid.length !== result.required.length) result.required = valid;
+  }
+  return result;
+}
+
+function stripPatternAndFormatFromSchema(schema: unknown): [unknown, number] {
+  let stripped = 0;
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (!isRecord(node)) return node;
+    const schemaNode = "type" in node || "anyOf" in node || "oneOf" in node || "allOf" in node;
+    const result = Object.fromEntries(Object.entries(node).flatMap(([key, value]) => {
+      if (schemaNode && (key === "pattern" || key === "format")) {
+        stripped += 1;
+        return [];
+      }
+      return [[key, walk(value)]];
+    })) as Record<string, unknown>;
+    return result;
+  };
+  return [walk(schema), stripped];
+}
+
+function stripSlashEnumsFromSchema(schema: unknown): [unknown, number] {
+  let stripped = 0;
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (!isRecord(node)) return node;
+    const entries = Object.entries(node).flatMap(([key, value]) => {
+      if (key === "enum" && Array.isArray(value) && value.some(item => typeof item === "string" && item.includes("/"))) {
+        stripped += 1;
+        return [];
+      }
+      return [[key, walk(value)]];
+    });
+    return Object.fromEntries(entries);
+  };
+  return [walk(schema), stripped];
+}
+
+export function sanitizeJsonSchema(schema: unknown, options: SchemaSanitizationOptions = {}): JsonSchema {
+  if (typeof schema === "boolean") return schema;
+  const sanitized = sanitizeSchemaNode(schema);
+  if (!isRecord(sanitized)) return { type: "object", properties: {} };
+
+  const top = { ...sanitized };
+  if (top.type !== "object") top.type = "object";
+  if (!isRecord(top.properties)) top.properties = {};
+  let result: unknown = stripNullableUnions(top);
+  if (!isRecord(result)) result = { type: "object", properties: {} };
+  result = stripTopLevelCombinators(result as Record<string, unknown>);
+  result = stripRefSiblings(result);
+  if (options.stripPatternAndFormat) [result] = stripPatternAndFormatFromSchema(result);
+  if (options.stripSlashEnum) [result] = stripSlashEnumsFromSchema(result);
+  return result as JsonSchema;
+}
+
+type ProviderTool = Record<string, unknown>;
+
+function parameterSchema(tool: ProviderTool): { owner: ProviderTool; key: "parameters" } | undefined {
+  const fn = isRecord(tool.function) ? tool.function : undefined;
+  if (fn !== undefined) return { owner: fn, key: "parameters" };
+  if ("parameters" in tool) return { owner: tool, key: "parameters" };
+  return undefined;
+}
+
+export function sanitizeToolSchemas(
+  tools: readonly ProviderTool[],
+  options: SchemaSanitizationOptions = {}
+): ProviderTool[] {
+  return tools.map(tool => {
+    const result = cloneUnknown(tool) as ProviderTool;
+    const target = parameterSchema(result);
+    if (target === undefined) return result;
+    const params = target.owner[target.key];
+    target.owner[target.key] = isRecord(params)
+      ? sanitizeJsonSchema(params, options)
+      : { type: "object", properties: {} };
+    return result;
+  });
+}
+
+function toolParameterSchemas(tools: readonly ProviderTool[]): ProviderTool[] {
+  return tools.map(tool => cloneUnknown(tool) as ProviderTool);
+}
+
+export function stripPatternAndFormat(tools: readonly ProviderTool[]): readonly [ProviderTool[], number] {
+  const result = toolParameterSchemas(tools);
+  let stripped = 0;
+  for (const tool of result) {
+    const target = parameterSchema(tool);
+    const params = target?.owner[target.key];
+    if (target === undefined || !isRecord(params)) continue;
+    const [sanitized, count] = stripPatternAndFormatFromSchema(params);
+    target.owner[target.key] = sanitized;
+    stripped += count;
+  }
+  return [result, stripped];
+}
+
+export function stripSlashEnum(tools: readonly ProviderTool[]): readonly [ProviderTool[], number] {
+  const result = toolParameterSchemas(tools);
+  let stripped = 0;
+  for (const tool of result) {
+    const target = parameterSchema(tool);
+    const params = target?.owner[target.key];
+    if (target === undefined || !isRecord(params)) continue;
+    const [sanitized, count] = stripSlashEnumsFromSchema(params);
+    target.owner[target.key] = sanitized;
+    stripped += count;
+  }
+  return [result, stripped];
+}
+
+export function unrenameToolArgs(paramsSchema: unknown, args: unknown): unknown {
+  if (!isRecord(paramsSchema) || !isRecord(args) || !isRecord(paramsSchema.properties)) return args;
+  const properties = paramsSchema.properties;
+  const renames = renamePropertyKeys(properties);
+  const reverse = new Map([...renames].map(([original, sanitized]) => [sanitized, original]));
+  return Object.fromEntries(Object.entries(args).map(([key, value]) => {
+    const original = reverse.get(key) ?? key;
+    const subschema = Object.hasOwn(properties, original) ? properties[original] : undefined;
+    let unrenamed = value;
+    if (isRecord(subschema) && isRecord(value)) unrenamed = unrenameToolArgs(subschema, value);
+    else if (isRecord(subschema) && Array.isArray(value) && isRecord(subschema.items)) {
+      unrenamed = value.map(item => isRecord(item) ? unrenameToolArgs(subschema.items, item) : item);
+    }
+    return [original, unrenamed];
+  }));
+}
+
+function schemaHasRenamedProperties(schema: unknown, seen = new Set<object>()): boolean {
+  if (!isRecord(schema) || seen.has(schema)) return false;
+  seen.add(schema);
+  if (isRecord(schema.properties)) {
+    if (renamePropertyKeys(schema.properties).size > 0) return true;
+    if (Object.values(schema.properties).some(value => schemaHasRenamedProperties(value, seen))) return true;
+  }
+  for (const key of ["$defs", "definitions", "patternProperties", "dependentSchemas"] as const) {
+    if (isRecord(schema[key]) && Object.values(schema[key]).some(value => schemaHasRenamedProperties(value, seen))) return true;
+  }
+  for (const key of ["additionalProperties", "additionalItems", "contains", "else", "if", "items", "not", "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties"] as const) {
+    if (schemaHasRenamedProperties(schema[key], seen)) return true;
+  }
+  for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"] as const) {
+    if (Array.isArray(schema[key]) && schema[key].some(value => schemaHasRenamedProperties(value, seen))) return true;
+  }
+  return false;
 }
 
 function validateJsonValue(value: unknown, path: string, seen = new Set<object>()): asserts value is JsonValue {
@@ -250,16 +556,30 @@ function copyDescriptor(
   definition: ToolDefinition,
   policy: Exclude<ToolPolicy, "deny">
 ): ToolDescriptor {
+  const originalSchema = validateJsonSchema(definition.inputSchema, definition.name);
+  let executable: ToolExecutable;
+  if ("handle" in definition.executable) {
+    const originalHandle = definition.executable.handle;
+    executable = schemaHasRenamedProperties(originalSchema)
+      ? {
+        handle: createToolHandle((...args: readonly unknown[]) => {
+          if (args.length === 0) return originalHandle.execute();
+          const [input, ...rest] = args;
+          return originalHandle.execute(unrenameToolArgs(originalSchema, input), ...rest);
+        })
+      }
+      : { handle: originalHandle };
+  } else {
+    executable = { reference: definition.executable.reference };
+  }
   return {
     name: definition.name,
     description: definition.description,
-    inputSchema: validateJsonSchema(definition.inputSchema, definition.name),
+    inputSchema: sanitizeJsonSchema(originalSchema),
     policy,
     source: definition.source,
     capabilities: cloneCapabilities(definition.capabilities, definition.name),
-    executable: "handle" in definition.executable
-      ? { handle: definition.executable.handle }
-      : { reference: definition.executable.reference }
+    executable
   };
 }
 

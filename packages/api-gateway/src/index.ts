@@ -74,6 +74,11 @@ import {
   GatewayTurnLeaseManager,
   type GatewayTurnLeaseManagerOptions
 } from "./turn-lease";
+import {
+  MemoryGatewaySessionCwdStore,
+  validateSessionCwd,
+  type GatewaySessionCwdStore
+} from "./session-cwd";
 
 export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
 
@@ -99,6 +104,7 @@ export type GatewayExecutionRequest = {
   requestId?: string;
   identity?: ProviderRequestIdentity;
   sessionId?: string;
+  cwd?: string;
   runtime?: GatewayRuntimeSelection;
   runtimeFallback?: GatewayRuntimeAdapter;
   signal?: AbortSignal;
@@ -142,6 +148,7 @@ export type GatewayNormalizedRequest = {
   readonly requestId: string;
   readonly identity?: ProviderRequestIdentity;
   readonly sessionId: string;
+  readonly cwd?: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly turnLeaseTimeoutMs?: number;
@@ -192,6 +199,7 @@ export type GatewayRuntimeSelectionStore = {
 
 export type GatewayOptions = {
   readonly runtimeSelectionStore?: GatewayRuntimeSelectionStore;
+  readonly sessionCwdStore?: GatewaySessionCwdStore;
   readonly runtimeAdapters?: Partial<Record<GatewayRuntimeName, GatewayRuntimeAdapter>>;
   readonly toolExecutor?: HarnessToolExecutor;
   readonly pythonToolBridge?: PythonToolBridge;
@@ -202,6 +210,8 @@ export type GatewayOptions = {
 
 export type Gateway = {
   executeRequest(request: GatewayExecutionRequest, provider: ChatProvider): Promise<HarnessResult>;
+  setSessionCwd(sessionId: string, cwd: string): Promise<void>;
+  clearSessionCwd(sessionId?: string): Promise<void>;
   clearPinnedRuntime(sessionId?: string): Promise<void>;
 };
 
@@ -223,6 +233,7 @@ class MemoryRuntimeSelectionStore implements GatewayRuntimeSelectionStore {
 }
 
 const legacyRuntimeSelectionStore = new MemoryRuntimeSelectionStore();
+const legacySessionCwdStore = new MemoryGatewaySessionCwdStore();
 let nextRequestId = 0;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -379,6 +390,7 @@ function validateRequestShape(request: GatewayExecutionRequest): void {
       throw new TypeError(`Gateway request ${field} must be a non-empty string`);
     }
   }
+  if (request.cwd !== undefined) validateSessionCwd(request.cwd);
   for (const field of ["timeoutMs", "turnLeaseTimeoutMs", "deadline"] as const) {
     if (request[field] !== undefined &&
       (typeof request[field] !== "number" || !Number.isFinite(request[field]))) {
@@ -448,6 +460,7 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     tools,
     requestId,
     sessionId,
+    ...(request.cwd === undefined ? {} : { cwd: validateSessionCwd(request.cwd) }),
     ...(request.identity === undefined ? {} : { identity: request.identity }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
     ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
@@ -1005,8 +1018,9 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
       ...(toolExecutor === undefined ? {} : { toolExecutor }),
       ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
       ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository }),
-       ...(eventSink === undefined ? {} : { eventSink: (event: HarnessEvent) => eventSink(event) }),
-      idGenerator: request.idGenerator ?? defaultIdGenerator()
+      ...(eventSink === undefined ? {} : { eventSink: (event: HarnessEvent) => eventSink(event) }),
+      idGenerator: request.idGenerator ?? defaultIdGenerator(),
+      ...(request.cwd === undefined ? {} : { cwd: request.cwd })
     };
     const outcome: HarnessOutcome = await executeHarness(harnessRequest);
     if (outcome.outcome === "completed") return providerAdapter.result(outcome.result);
@@ -1098,7 +1112,10 @@ function configureHarnessRequest(
   const references = validateReferencedTools(request.tools);
   const toolExecutor = request.toolExecutor ?? options.toolExecutor;
   const bridge = request.pythonToolBridge ?? options.pythonToolBridge;
-  const bridgeOptions = request.pythonToolBridgeOptions ?? options.pythonToolBridgeOptions;
+  const configuredBridgeOptions = request.pythonToolBridgeOptions ?? options.pythonToolBridgeOptions;
+  const bridgeOptions = request.cwd === undefined
+    ? configuredBridgeOptions
+    : { ...(configuredBridgeOptions ?? {}), cwd: request.cwd };
   if (references.length > 0 && toolExecutor === undefined && bridge === undefined) {
     throw new TypeError("No Python tool bridge or tool executor configured for referenced tools");
   }
@@ -1106,9 +1123,15 @@ function configureHarnessRequest(
     if (bridgeOptions === undefined || bridgeOptions.cwd === undefined) {
       throw new TypeError("Python tool bridge cwd is not configured");
     }
-    if (typeof bridgeOptions.cwd === "string" &&
-      !(bridgeOptions.cwd.startsWith("/") || /^[A-Za-z]:[\\/]/.test(bridgeOptions.cwd))) {
-      throw new TypeError("Python tool bridge cwd must be absolute");
+    if (typeof bridgeOptions.cwd === "string") {
+      try {
+        validateSessionCwd(bridgeOptions.cwd);
+      } catch (error) {
+        if (error instanceof TypeError && error.message === "Gateway cwd must be absolute") {
+          throw new TypeError("Python tool bridge cwd must be absolute");
+        }
+        throw error;
+      }
     }
     if (bridgeOptions.environmentAllowlist?.some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
       throw new TypeError("Python tool bridge environment allowlist is invalid");
@@ -1133,6 +1156,7 @@ function configureHarnessRequest(
 
 export function createGateway(options: GatewayOptions = {}): Gateway {
   const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
+  const sessionCwdStore = options.sessionCwdStore ?? new MemoryGatewaySessionCwdStore();
   const turnLeases = options.turnLeaseManager ?? new GatewayTurnLeaseManager(options.turnLease);
   const adapters = new Map<GatewayRuntimeName, GatewayRuntimeAdapter>([
     ["harness", harnessRuntimeAdapter],
@@ -1147,7 +1171,13 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
 
   return {
     async executeRequest(request, provider): Promise<HarnessResult> {
-      const normalized = normalizeGatewayRequest(request);
+      const normalizedRequest = normalizeGatewayRequest(request);
+      const storedCwd = normalizedRequest.cwd === undefined
+        ? await sessionCwdStore.load(normalizedRequest.sessionId)
+        : undefined;
+      const normalized = storedCwd === undefined
+        ? normalizedRequest
+        : { ...normalizedRequest, cwd: validateSessionCwd(storedCwd) };
       const lease = await turnLeases.acquire(normalized.sessionId, {
         ...(normalized.signal === undefined ? {} : { signal: normalized.signal }),
         ...(normalized.turnLeaseTimeoutMs === undefined
@@ -1183,6 +1213,15 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
         lease.release();
       }
     },
+    async setSessionCwd(sessionId, cwd): Promise<void> {
+      if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+        throw new TypeError("Gateway sessionId must be a non-empty string");
+      }
+      await sessionCwdStore.save(sessionId, validateSessionCwd(cwd));
+    },
+    async clearSessionCwd(sessionId): Promise<void> {
+      await sessionCwdStore.clear?.(sessionId);
+    },
     async clearPinnedRuntime(sessionId): Promise<void> {
       await store.clear?.(sessionId);
     }
@@ -1190,6 +1229,14 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
 }
 
 const legacyGateway = createGateway({ runtimeSelectionStore: legacyRuntimeSelectionStore });
+
+export async function setSessionCwd(sessionId: string, cwd: string): Promise<void> {
+  await legacyGateway.setSessionCwd(sessionId, cwd);
+}
+
+export async function clearSessionCwd(sessionId?: string): Promise<void> {
+  await legacyGateway.clearSessionCwd(sessionId);
+}
 
 export function clearPinnedRuntime(sessionId?: string): void {
   legacyRuntimeSelectionStore.clear(sessionId);
@@ -1230,6 +1277,7 @@ export {
   createPythonToolBridgeExecutor,
   createPythonToolBridgeSubprocessTransport
 } from "./python-bridge";
+export { MemoryGatewaySessionCwdStore, validateSessionCwd } from "./session-cwd";
 export type {
   PythonToolBridgeCall,
   PythonToolBridgeErrorCode,
@@ -1244,3 +1292,4 @@ export type {
   PythonToolBridgeTool,
   PythonToolBridgeTransport
 } from "./python-bridge";
+export type { GatewaySessionCwdStore } from "./session-cwd";

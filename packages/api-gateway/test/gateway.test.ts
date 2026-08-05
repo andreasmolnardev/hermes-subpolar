@@ -77,6 +77,62 @@ test("gateway validates and normalizes request boundaries", () => {
     messages: [{ role: "user", content: "hello" }],
     toolPolicies: [{ toolName: "x", policy: "invalid" } as never]
   }), /toolPolicies\[0\] is invalid/);
+  assert.equal(normalizeGatewayRequest({
+    model: "fake",
+    cwd: " /workspace ",
+    messages: [],
+    toolPolicies: []
+  }).cwd, "/workspace");
+  for (const cwd of ["workspace", "/workspace\u0000unsafe", "/workspace/../unsafe", "C:\\workspace\\..\\unsafe"]) {
+    assert.throws(() => normalizeGatewayRequest({
+      model: "fake",
+      cwd,
+      messages: [],
+      toolPolicies: []
+    }), /cwd/);
+  }
+});
+
+test("session cwd set and clear is isolated through the injected store", async () => {
+  const values = new Map<string, string>();
+  const seen = new Map<string, string | undefined>();
+  const gateway = createGateway({
+    sessionCwdStore: {
+      load: sessionId => values.get(sessionId),
+      save: (sessionId, cwd) => { values.set(sessionId, cwd); },
+      clear: sessionId => {
+        if (sessionId === undefined) values.clear();
+        else values.delete(sessionId);
+      }
+    },
+    runtimeAdapters: {
+      python: {
+        runtime: "python",
+        supports: () => true,
+        async execute(request) {
+          seen.set(request.sessionId, request.cwd);
+          return completion;
+        }
+      }
+    }
+  });
+
+  await gateway.setSessionCwd("session-a", "/workspace/a");
+  await gateway.setSessionCwd("session-b", "/workspace/b");
+  const request = (sessionId: string) => ({
+    model: "fake",
+    sessionId,
+    runtime: "python" as const,
+    messages: [{ role: "user" as const, content: "hello" }],
+    toolPolicies: []
+  });
+  await gateway.executeRequest(request("session-a"), { async complete() { return completion; } });
+  await gateway.executeRequest(request("session-b"), { async complete() { return completion; } });
+  assert.deepEqual([...seen.entries()], [["session-a", "/workspace/a"], ["session-b", "/workspace/b"]]);
+
+  await gateway.clearSessionCwd("session-a");
+  await gateway.executeRequest(request("session-a"), { async complete() { return completion; } });
+  assert.equal(seen.get("session-a"), undefined);
 });
 
 test("descriptor path preserves schema and metadata through harness adapter", async () => {
@@ -142,6 +198,7 @@ test("harness automatically executes reference descriptors through the injected 
     requestId: "request-reference",
     sessionId: "reference-session",
     runtime: "harness",
+    cwd: "/session-workspace",
     deadline,
     messages: [{ role: "user", content: "lookup" }],
     toolPolicies: [
@@ -199,8 +256,8 @@ test("harness automatically executes reference descriptors through the injected 
     env: request.env,
     deadline: request.deadline
   })), [
-    { requestId: "request-reference", toolCallId: "call-a", cwd: "/workspace", env: { PATH: "/bin" }, deadline },
-    { requestId: "request-reference", toolCallId: "call-b", cwd: "/workspace", env: { PATH: "/bin" }, deadline }
+    { requestId: "request-reference", toolCallId: "call-a", cwd: "/session-workspace", env: { PATH: "/bin" }, deadline },
+    { requestId: "request-reference", toolCallId: "call-b", cwd: "/session-workspace", env: { PATH: "/bin" }, deadline }
   ]);
   assert.deepEqual(providerMessages[1]?.messages.slice(-2).map(message => ({
     role: message.role,
@@ -237,18 +294,33 @@ test("reference execution fails closed before provider effects when bridge or sc
   await assert.rejects(() => createGateway().executeRequest(base, provider), /No Python tool bridge/);
   assert.equal(providerCalls, 0);
 
+  let bridgeCalls = 0;
+  const bridge = new PythonToolBridge({
+    async send() {
+      bridgeCalls += 1;
+      throw new Error("bridge must not be reached");
+    }
+  });
+  await assert.rejects(() => createGateway().executeRequest({
+    ...base,
+    pythonToolBridge: bridge,
+    pythonToolBridgeOptions: {}
+  }, provider), /cwd is not configured/);
+  assert.equal(providerCalls, 0);
+  assert.equal(bridgeCalls, 0);
+
   await assert.rejects(() => createGateway().executeRequest({
     ...base,
     toolPolicies: [{ ...base.toolPolicies[0], executable: { reference: "python:lookup\nunsafe" } }]
   }, provider), /Unsafe Python tool bridge reference/);
   assert.equal(providerCalls, 0);
 
-  const bridge = new PythonToolBridge({ send: async () => {
+  const invalidArgumentsBridge = new PythonToolBridge({ send: async () => {
     throw new Error("bridge must not be reached for invalid arguments");
   } });
   await assert.rejects(() => createGateway().executeRequest({
     ...base,
-    pythonToolBridge: bridge,
+    pythonToolBridge: invalidArgumentsBridge,
     pythonToolBridgeOptions: { cwd: "/workspace" }
   }, {
     async complete() {

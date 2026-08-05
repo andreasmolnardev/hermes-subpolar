@@ -1,4 +1,5 @@
 import type { HarnessJsonObject, HarnessToolExecution, HarnessToolExecutor, HarnessToolResult } from "harness";
+import { validateSessionCwd } from "./session-cwd";
 
 export const PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION = 1;
 
@@ -99,21 +100,24 @@ function isSafeIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\r\n]/.test(value);
 }
 
-function isAbsolutePath(value: string): boolean {
-  return value.length > 0 && !value.includes("\u0000") &&
-    (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value));
-}
-
 function isEnvironmentName(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
-function validateCall(call: PythonToolBridgeCall): void {
+function validateCall(call: PythonToolBridgeCall): string {
   if (!isSafeIdentifier(call.requestId) || !isSafeIdentifier(call.toolCallId) ||
     !isSafeIdentifier(call.tool.name) || !isSafeIdentifier(call.tool.reference)) {
     throw new TypeError("Python tool bridge identifiers are invalid");
   }
-  if (!isAbsolutePath(call.cwd)) throw new TypeError("Python tool bridge cwd must be absolute");
+  let cwd: string;
+  try {
+    cwd = validateSessionCwd(call.cwd);
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "Gateway cwd must be absolute") {
+      throw new TypeError("Python tool bridge cwd must be absolute");
+    }
+    throw new TypeError("Python tool bridge cwd is invalid");
+  }
   if (!Number.isFinite(call.deadline)) throw new TypeError("Python tool bridge deadline must be finite");
   if (!isJsonObject(call.arguments)) throw new TypeError("Python tool bridge arguments must be a JSON object");
   for (const [name, value] of Object.entries(call.env)) {
@@ -121,6 +125,7 @@ function validateCall(call: PythonToolBridgeCall): void {
       throw new TypeError("Python tool bridge environment is invalid");
     }
   }
+  return cwd;
 }
 
 function isBridgeResponse(value: unknown): value is PythonToolBridgeResponse {
@@ -164,11 +169,12 @@ export class PythonToolBridge {
   constructor(private readonly transport: PythonToolBridgeTransport) {}
 
   async execute(call: PythonToolBridgeCall, signal?: AbortSignal): Promise<HarnessToolResult> {
-    validateCall(call);
+    const cwd = validateCall(call);
     const request: PythonToolBridgeRequest = {
       protocolVersion: PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
       type: "tool.call",
-      ...call
+      ...call,
+      cwd
     };
     if (signal?.aborted === true) throw bridgeErrorFromAbort(signal, request);
 

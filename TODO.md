@@ -47,6 +47,21 @@ foundation are recorded below so they are not mistaken for full runtime parity.
   restart/resume and no-duplicate-side-effect fixtures.
 - [x] Migration black-box fixtures for streams, persistence recovery, tool
   safety, bridge security, and recorded provider responses.
+- [x] Deterministic transcript normalization, provider-schema sanitization,
+  reversible tool argument keys, and fail-closed malformed-history handling.
+- [x] Neutral provider error classification and bounded retry/fallback policy
+  with attempt identity and no-retry side-effect boundaries.
+- [x] Deterministic tool-output previews, UTF-8 bounds, aggregate budgets,
+  structured fallback, and truncation/error preservation.
+- [x] Deterministic prompt assembly, cache boundaries, session/workspace
+  scoping, multimodal provider content, and versioned token estimation.
+- [x] Iteration budgets with consume/refund/remaining semantics and explicit
+  pre-side-effect exhaustion checks.
+- [x] Session cwd resolution, per-session leases, event projection, complete
+  turn sidecar persistence, and additive Python-compatible SQLite metadata.
+- [x] Versioned whole-turn Python runtime bridge for unsupported sessions,
+  including correlated JSONL, scoped environment, credential handles,
+  cancellation, deadlines, redaction, and subprocess cleanup.
 
 ## Remaining Migration Work
 
@@ -62,12 +77,7 @@ foundation are recorded below so they are not mistaken for full runtime parity.
 
 ### Phase 3: Context And Prompt Parity
 
-- [ ] Port inbound text/image/audio/file normalization and context sidecars.
-- [ ] Port stable system-prompt assembly section by section with byte-stable
-  cacheable prefixes and exact cache marker boundaries.
-- [ ] Port message-role repair, synthetic turns, context references, workspace
-  binding, and scoped context variables.
-- [ ] Add token estimation, model context limits, bounded responses, compression,
+- [ ] Port remaining context sidecars, synthetic-turn variants, compression,
   summaries, overflow recovery, session rotation, and lineage handling.
 - [ ] Adapt memory providers, learning, insights, curator, and context review
   through injected context-source ports with opt-out and timeout behavior.
@@ -100,8 +110,8 @@ foundation are recorded below so they are not mistaken for full runtime parity.
 
 ### Phase 6: Persistence And Gateway Cutover
 
-- [ ] Implement production data-layer SQLite adapter with WAL, additive schema
-  migrations, transactions, ordering, recovery, concurrent readers, and
+- [x] Implement the current production SQLite adapter slice with additive
+  migrations, transactions, ordering, recovery, concurrent-reader tests, and
   Python-created database compatibility.
 - [ ] Prove Python-created sessions resume in TypeScript and TypeScript-created
   sessions remain readable by Python during retention window.

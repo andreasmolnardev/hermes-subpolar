@@ -54,6 +54,12 @@
   session-repository ports, and deterministic migration fixtures. These remain
   foundation/parity evidence only; Python fallback and rollout gates remain
   authoritative.
+- Continued replacement of Python-owned deterministic runtime behavior with
+  transcript/schema normalization, retry/error and tool-output policies,
+  prompt/token assembly, multimodal content, iteration budgets, cwd/leases,
+  complete sidecar persistence, additive SQLite compatibility, and a real
+  versioned whole-turn Python bridge. Unsupported integrations remain
+  Python-authoritative before side effects.
 
 Deferred product items remain listed in `TODO.md` and are not reintroduced by
 this patch.

@@ -3,6 +3,9 @@ import { test } from "bun:test";
 
 import {
   HarnessProviderError,
+  classifyHarnessProviderError,
+  boundedBackoff,
+  boundedMaxAttempts,
   execute,
   executeHarness,
   type HarnessAtomicTurnWrite,
@@ -1086,4 +1089,84 @@ test("partial stream usage is normalized without requiring finish usage", async 
     outputTokens: 3,
     totalTokens: 3
   });
+});
+
+test("retry classification preserves precedence and never returns provider payloads", () => {
+  const secret = "sensitive-provider-payload";
+  const cases: readonly [string, unknown, Parameters<typeof classifyHarnessProviderError>[1] | undefined, string, boolean, boolean][] = [
+    ["cancellation", Object.assign(new Error("cancelled"), { name: "AbortError", statusCode: 500 }), undefined, "cancelled", false, false],
+    ["invalid request", new Error("unsupported parameter: max_tokens"), { statusCode: 400 }, "invalid_request", false, true],
+    ["content policy", new Error("violates our usage policies"), { statusCode: 400 }, "content_filter", false, true],
+    ["tool side effect", { category: "tool_side_effect", message: "write already committed" }, undefined, "tool_side_effect", false, false],
+    ["timeout", new Error("gateway timeout"), { statusCode: 504 }, "timeout", true, true],
+    ["overload", new Error("service is overloaded"), { statusCode: 429 }, "overloaded", true, true],
+    ["rate limit", new Error("too many requests"), { statusCode: 429 }, "rate_limit", true, true],
+    ["network", new Error("opaque transport detail"), { network: true }, "network", true, true],
+    ["server", new Error("internal server error"), { statusCode: 500 }, "server", true, true]
+  ];
+
+  for (const [label, error, options, category, retryable, fallbackEligible] of cases) {
+    const classified = classifyHarnessProviderError(error, options);
+    assert.equal(classified.category, category, label);
+    assert.equal(classified.retryable, retryable, label);
+    assert.equal(classified.fallbackEligible, fallbackEligible, label);
+  }
+
+  const safe = classifyHarnessProviderError(new Error("request failed"), {
+    statusCode: 400,
+    body: { error: { message: `context length exceeded: ${secret}`, code: "context_length_exceeded" } }
+  });
+  assert.equal(safe.category, "context_length");
+  assert.equal(JSON.stringify(safe).includes(secret), false);
+  assert.equal(boundedMaxAttempts({ maxAttempts: 10_000 }), 8);
+  assert.equal(boundedBackoff({ backoffMs: 10_000_000 }, 1), 60_000);
+});
+
+test("attempt identity is global across fallback providers while request ID stays stable", async () => {
+  const seen: HarnessProviderRequest[] = [];
+  let primaryCalls = 0;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      seen.push(providerRequest);
+      primaryCalls += 1;
+      throw new HarnessProviderError("busy", { category: "overloaded" });
+    }
+  }, {
+    identity: { requestId: "ignored-public-id", attempt: 4, parentRequestId: "parent-1" },
+    retryPolicy: { maxAttempts: 2 },
+    fallbackProviders: [{
+      async complete(providerRequest) {
+        seen.push(providerRequest);
+        return response({ role: "assistant", content: "fallback" });
+      }
+    }]
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(primaryCalls, 2);
+  assert.deepEqual(seen.map(providerRequest => ({
+    requestId: providerRequest.requestId,
+    identity: providerRequest.identity,
+    providerId: providerRequest.providerId,
+    providerIndex: providerRequest.providerIndex
+  })), [
+    {
+      requestId: "request-1",
+      identity: { requestId: "request-1", attempt: 4, parentRequestId: "parent-1" },
+      providerId: "primary",
+      providerIndex: 0
+    },
+    {
+      requestId: "request-1",
+      identity: { requestId: "request-1", attempt: 5, parentRequestId: "parent-1" },
+      providerId: "primary",
+      providerIndex: 0
+    },
+    {
+      requestId: "request-1",
+      identity: { requestId: "request-1", attempt: 6, parentRequestId: "parent-1" },
+      providerId: "fallback-1",
+      providerIndex: 1
+    }
+  ]);
 });

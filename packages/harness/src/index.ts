@@ -10,6 +10,7 @@ import type {
   ProviderJsonValue,
   ProviderModelOptions,
   ProviderRequest,
+  ProviderRequestIdentity,
   ProviderResult,
   ProviderStreamEvent,
   ProviderTool,
@@ -23,6 +24,33 @@ import {
   normalizeHarnessMessages,
   normalizeProviderResult
 } from "./message-normalization";
+import {
+  attemptIdentity,
+  boundedBackoff,
+  boundedMaxAttempts,
+  classifyHarnessProviderError,
+  remainingMilliseconds,
+  type HarnessProviderFailure,
+  type HarnessProviderFailureCategory,
+  type HarnessRetryPolicy
+} from "./retry-policy";
+
+export {
+  MAX_RETRY_ATTEMPTS,
+  MAX_RETRY_BACKOFF_MS,
+  classifyHarnessProviderError,
+  boundedBackoff,
+  boundedMaxAttempts,
+  remainingMilliseconds,
+  attemptIdentity
+} from "./retry-policy";
+export type {
+  HarnessProviderFailure,
+  HarnessProviderFailureCategory,
+  HarnessRetryPolicy,
+  ProviderAttemptIdentity,
+  RetryClassificationOptions
+} from "./retry-policy";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -40,7 +68,10 @@ export type HarnessTool = Omit<ProviderTool, "policy"> & {
 
 export type HarnessUsage = ProviderUsage;
 export type HarnessProviderRequest = ProviderRequest &
-  Required<Pick<ProviderRequest, "signal" | "cancellation" | "requestId">>;
+  Required<Pick<ProviderRequest, "signal" | "cancellation" | "requestId" | "identity">> & {
+    readonly providerId: string;
+    readonly providerIndex: number;
+  };
 export type HarnessProviderResult = ProviderResult;
 export type HarnessFinishReason = ProviderFinishReason;
 export type HarnessProviderMetadata = ProviderMetadata;
@@ -121,26 +152,26 @@ export type HarnessEventBase = {
 
 export type HarnessEvent =
   | (HarnessEventBase & { readonly type: "request.started" })
-  | (HarnessEventBase & { readonly type: "provider.requested"; readonly providerIndex: number })
-  | (HarnessEventBase & { readonly type: "provider.completed"; readonly providerIndex: number; readonly usage: HarnessUsage })
+  | (HarnessEventBase & { readonly type: "provider.requested"; readonly providerIndex: number; readonly providerId: string; readonly attempt: number })
+  | (HarnessEventBase & { readonly type: "provider.completed"; readonly providerIndex: number; readonly providerId: string; readonly attempt: number; readonly usage: HarnessUsage })
   | (HarnessEventBase & { readonly type: "approval.requested"; readonly call: HarnessToolCall })
   | (HarnessEventBase & { readonly type: "approval.resolved"; readonly callId: string; readonly decision: HarnessApprovalDecision })
   | (HarnessEventBase & { readonly type: "tool.called"; readonly call: HarnessToolCall })
   | (HarnessEventBase & { readonly type: "tool.completed"; readonly callId: string; readonly result: HarnessToolResult })
-  | (HarnessEventBase & { readonly type: "retry.scheduled"; readonly providerIndex: number; readonly attempt: number; readonly delayMs: number })
-  | (HarnessEventBase & { readonly type: "fallback.selected"; readonly providerIndex: number })
+  | (HarnessEventBase & { readonly type: "retry.scheduled"; readonly providerIndex: number; readonly providerId: string; readonly attempt: number; readonly delayMs: number })
+  | (HarnessEventBase & { readonly type: "fallback.selected"; readonly providerIndex: number; readonly providerId: string })
   | (HarnessEventBase & { readonly type: "terminal"; readonly outcome: HarnessTerminalOutcomeType; readonly message?: string });
 
 type HarnessEventInput =
   | { readonly type: "request.started"; readonly requestId: string; readonly sessionId: string }
-  | { readonly type: "provider.requested"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number }
-  | { readonly type: "provider.completed"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly usage: HarnessUsage }
+  | { readonly type: "provider.requested"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly providerId: string; readonly attempt: number }
+  | { readonly type: "provider.completed"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly providerId: string; readonly attempt: number; readonly usage: HarnessUsage }
   | { readonly type: "approval.requested"; readonly requestId: string; readonly sessionId: string; readonly call: HarnessToolCall }
   | { readonly type: "approval.resolved"; readonly requestId: string; readonly sessionId: string; readonly callId: string; readonly decision: HarnessApprovalDecision }
   | { readonly type: "tool.called"; readonly requestId: string; readonly sessionId: string; readonly call: HarnessToolCall }
   | { readonly type: "tool.completed"; readonly requestId: string; readonly sessionId: string; readonly callId: string; readonly result: HarnessToolResult }
-  | { readonly type: "retry.scheduled"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly attempt: number; readonly delayMs: number }
-  | { readonly type: "fallback.selected"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number }
+  | { readonly type: "retry.scheduled"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly providerId: string; readonly attempt: number; readonly delayMs: number }
+  | { readonly type: "fallback.selected"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly providerId: string }
   | { readonly type: "terminal"; readonly requestId: string; readonly sessionId: string; readonly outcome: HarnessTerminalOutcomeType; readonly message?: string };
 
 export type HarnessEventSink = (event: HarnessEvent) => void | Promise<void>;
@@ -243,11 +274,6 @@ export type HarnessBudgets = {
   readonly maxTokens?: number;
 };
 
-export type HarnessRetryPolicy = {
-  readonly maxAttempts?: number;
-  readonly backoffMs?: number | ((attempt: number) => number);
-};
-
 export type HarnessRequest = {
   readonly requestId: string;
   readonly sessionId: string;
@@ -256,6 +282,7 @@ export type HarnessRequest = {
   readonly tools: readonly HarnessTool[];
   readonly provider: HarnessProvider;
   readonly fallbackProviders?: readonly HarnessProvider[];
+  readonly identity?: ProviderRequestIdentity;
   readonly budgets?: HarnessBudgets;
   readonly retryPolicy?: HarnessRetryPolicy;
   readonly signal?: AbortSignal;
@@ -303,40 +330,12 @@ export type HarnessRunResult = HarnessOutcome;
 
 export type HarnessResult = HarnessProviderResult;
 
-export type HarnessProviderFailureCategory =
-  | "authentication"
-  | "authorization"
-  | "invalid_request"
-  | "model_not_found"
-  | "context_length"
-  | "content_filter"
-  | "rate_limit"
-  | "overloaded"
-  | "timeout"
-  | "cancelled"
-  | "network"
-  | "server"
-  | "unknown";
-
-export type HarnessProviderFailure = {
-  readonly category: HarnessProviderFailureCategory;
-  readonly retryable: boolean;
-  readonly fallbackEligible: boolean;
-  readonly message: string;
-};
-
-const RETRYABLE_CATEGORIES: ReadonlySet<HarnessProviderFailureCategory> = new Set([
-  "rate_limit",
-  "overloaded",
-  "timeout",
-  "network",
-  "server"
-]);
-
 export class HarnessProviderError extends Error {
   readonly category: HarnessProviderFailureCategory;
   readonly retryable: boolean;
   readonly fallbackEligible: boolean;
+  readonly statusCode: number | undefined;
+  readonly requestId: string | undefined;
 
   constructor(
     message: string,
@@ -344,71 +343,25 @@ export class HarnessProviderError extends Error {
       readonly category: HarnessProviderFailureCategory;
       readonly retryable?: boolean;
       readonly fallbackEligible?: boolean;
+      readonly statusCode?: number;
+      readonly requestId?: string;
     }
   ) {
     super(message);
     this.name = "HarnessProviderError";
     this.category = options.category;
-    this.retryable = options.retryable ?? RETRYABLE_CATEGORIES.has(options.category);
+    this.retryable = options.retryable ?? (
+      options.category === "rate_limit" || options.category === "overloaded" || options.category === "timeout" ||
+      options.category === "network" || options.category === "server"
+    );
     this.fallbackEligible = options.fallbackEligible ?? this.retryable;
+    this.statusCode = options.statusCode;
+    this.requestId = options.requestId;
   }
-}
-
-function isProviderCategory(value: string): value is HarnessProviderFailureCategory {
-  return value === "authentication" || value === "authorization" || value === "invalid_request" ||
-    value === "model_not_found" || value === "context_length" || value === "content_filter" ||
-    value === "rate_limit" || value === "overloaded" || value === "timeout" || value === "cancelled" ||
-    value === "network" || value === "server" || value === "unknown";
 }
 
 function thrownAsFailure(value: object): HarnessProviderFailure {
-  if (value instanceof HarnessProviderError) {
-    return {
-      category: value.category,
-      retryable: value.retryable,
-      fallbackEligible: value.fallbackEligible,
-      message: value.message
-    };
-  }
-  if (value instanceof Error) {
-    if (value.name === "AbortError") {
-      return { category: "cancelled", retryable: false, fallbackEligible: false, message: value.message };
-    }
-    if (value.name === "TimeoutError") {
-      return { category: "timeout", retryable: true, fallbackEligible: true, message: value.message };
-    }
-    const providerError = value as {
-      readonly category?: string;
-      readonly retryable?: boolean;
-      readonly fallbackEligible?: boolean;
-    };
-    if (providerError.category !== undefined && isProviderCategory(providerError.category)) {
-      const retryable = providerError.retryable === true || RETRYABLE_CATEGORIES.has(providerError.category);
-      return {
-        category: providerError.category,
-        retryable,
-        fallbackEligible: providerError.fallbackEligible === true || retryable,
-        message: value.message
-      };
-    }
-    return { category: "unknown", retryable: false, fallbackEligible: false, message: value.message };
-  }
-  const candidate = value as {
-    readonly category?: string;
-    readonly retryable?: boolean;
-    readonly fallbackEligible?: boolean;
-    readonly message?: string;
-  };
-  const category = candidate.category !== undefined && isProviderCategory(candidate.category)
-    ? candidate.category
-    : "unknown";
-  const retryable = candidate.retryable === true || RETRYABLE_CATEGORIES.has(category);
-  return {
-    category,
-    retryable,
-    fallbackEligible: candidate.fallbackEligible === true || retryable,
-    message: typeof candidate.message === "string" ? candidate.message : "Provider failed"
-  };
+  return classifyHarnessProviderError(value);
 }
 
 function parseArguments(value: string): HarnessJsonObject | undefined {
@@ -613,7 +566,9 @@ async function collectProviderStream(
       case "error":
         throw new HarnessProviderError(event.error.message, {
           category: event.error.category,
-          retryable: event.error.retryable
+          retryable: event.error.retryable,
+          ...(event.error.statusCode === undefined ? {} : { statusCode: event.error.statusCode }),
+          ...(event.error.requestId === undefined ? {} : { requestId: event.error.requestId })
         });
     }
   }
@@ -721,11 +676,6 @@ function atomicRepository(
   return persistence !== undefined && typeof persistence.commitTurn === "function"
     ? persistence as HarnessSessionRepository
     : undefined;
-}
-
-function defaultDelay(policy: HarnessRetryPolicy, attempt: number): number {
-  const value = typeof policy.backoffMs === "function" ? policy.backoffMs(attempt) : (policy.backoffMs ?? 0);
-  return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function providerTools(tools: readonly HarnessTool[]): readonly ProviderTool[] {
@@ -1000,7 +950,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   let finalResult: HarnessProviderResult | undefined;
   const providers = [request.provider, ...(request.fallbackProviders ?? [])];
   const retryPolicy = request.retryPolicy ?? {};
-  const maxAttempts = Math.max(1, retryPolicy.maxAttempts ?? 1);
+  const maxAttempts = boundedMaxAttempts(retryPolicy);
 
   try {
     while (true) {
@@ -1042,8 +992,22 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           : messages;
         const providerMessages = normalizeHarnessMessages(assembled);
         attempt += 1;
-        await emit({ type: "provider.requested", requestId: request.requestId, sessionId: request.sessionId, providerIndex });
         providerCalls += 1;
+        const providerAttempt = attemptIdentity(request.requestId, request.identity, providerCalls, providerIndex);
+        const { providerId, providerIndex: attemptProviderIndex, ...identity } = providerAttempt;
+        await emit({
+          type: "provider.requested",
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          providerIndex: attemptProviderIndex,
+          providerId,
+          attempt: identity.attempt
+        });
+        const remaining = remainingMilliseconds(request.clock.now(), deadline);
+        if (remaining !== undefined && remaining <= 0) return terminal(budgetError("Harness deadline exceeded"));
+        // Preserve the caller's timeout for provider identity/fidelity. The
+        // absolute deadline carries the reduced remaining budget per attempt.
+        const attemptTimeoutMs = request.timeoutMs;
         try {
           const rawProviderResult = await abortable(collectProviderStream(currentProvider, {
             model: request.model,
@@ -1051,12 +1015,15 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             tools: providerTools(request.tools),
             signal: controller.signal,
             cancellation: controller.signal,
-            ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+            ...(attemptTimeoutMs === undefined ? {} : { timeoutMs: Math.max(0, attemptTimeoutMs) }),
             ...(deadline === undefined ? {} : { deadline }),
             ...(request.options === undefined ? {} : { options: request.options }),
             ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
             ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
-            requestId: request.requestId
+            requestId: request.requestId,
+            identity,
+            providerId,
+            providerIndex: attemptProviderIndex
           }), controller.signal);
           const existingCallIds = new Set(
             messages.flatMap(message => message.role === "assistant"
@@ -1078,22 +1045,48 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             usage: providerResult.usage,
             messageId: assistantId
           });
-          await emit({ type: "provider.completed", requestId: request.requestId, sessionId: request.sessionId, providerIndex, usage: providerResult.usage });
+          await emit({
+            type: "provider.completed",
+            requestId: request.requestId,
+            sessionId: request.sessionId,
+              providerIndex: attemptProviderIndex,
+            providerId,
+            attempt: identity.attempt,
+            usage: providerResult.usage
+          });
         } catch (error) {
           const failure = thrownAsFailure(typeof error === "object" && error !== null ? error : new Error(String(error)));
           lastFailure = failure;
           const stopAfterFailure = stopped();
           if (stopAfterFailure !== undefined) return terminal(stopAfterFailure);
           if (failure.retryable && attempt < maxAttempts) {
-            const delayMs = defaultDelay(retryPolicy, attempt);
-            await emit({ type: "retry.scheduled", requestId: request.requestId, sessionId: request.sessionId, providerIndex, attempt, delayMs });
+            const delayMs = boundedBackoff(retryPolicy, attempt);
+            const remainingBeforeBackoff = remainingMilliseconds(request.clock.now(), deadline);
+            if (remainingBeforeBackoff !== undefined && delayMs >= remainingBeforeBackoff) {
+              return terminal(budgetError("Harness deadline exceeded"));
+            }
+            await emit({
+              type: "retry.scheduled",
+              requestId: request.requestId,
+              sessionId: request.sessionId,
+              providerIndex: attemptProviderIndex,
+              providerId,
+              attempt: identity.attempt,
+              delayMs
+            });
             await abortable(request.sleeper.sleep(delayMs, controller.signal), controller.signal);
             continue;
           }
           if (failure.fallbackEligible && providerIndex + 1 < providers.length) {
             providerIndex += 1;
             attempt = 0;
-            await emit({ type: "fallback.selected", requestId: request.requestId, sessionId: request.sessionId, providerIndex });
+            await emit({
+              type: "fallback.selected",
+              requestId: request.requestId,
+              sessionId: request.sessionId,
+              providerIndex,
+              providerId: providerIndex === 0 ? "primary" : `fallback-${providerIndex}`
+            });
             continue;
           }
           return terminal(failureOutcome("provider_failure", new Error(failure.message), failure.category));

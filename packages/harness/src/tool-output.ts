@@ -1,11 +1,31 @@
-import type { ProviderContent, ProviderContentPart } from "chat-provider-interface";
+import type {
+  ProviderContent,
+  ProviderContentPart,
+  ProviderJsonObject,
+  ProviderJsonValue
+} from "chat-provider-interface";
+import { isProviderJsonValue } from "chat-provider-interface";
 
 export const DEFAULT_TOOL_PREVIEW_BYTES = 1_500;
+
+function isProviderJsonObject(value: unknown): value is ProviderJsonObject {
+  return isProviderJsonValue(value as ProviderJsonValue) &&
+    typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isProviderJson(value: unknown): value is ProviderJsonValue {
+  return isProviderJsonValue(value as ProviderJsonValue);
+}
 
 export type ToolOutputResult = {
   readonly content: ProviderContent;
   readonly isError?: boolean;
   readonly truncated?: boolean;
+  readonly apiContent?: ProviderContent;
+  readonly displayKind?: string;
+  readonly displayMetadata?: ProviderJsonObject;
+  readonly synthetic?: boolean;
+  readonly context?: ProviderJsonValue;
 };
 
 export type Utf8Truncation = {
@@ -147,7 +167,12 @@ function resultWithContent(
     ...(result.isError === undefined ? {} : { isError: result.isError }),
     ...(result.truncated === undefined && !truncated
       ? {}
-      : { truncated: truncated || result.truncated === true })
+      : { truncated: truncated || result.truncated === true }),
+    ...(result.apiContent === undefined ? {} : { apiContent: result.apiContent }),
+    ...(result.displayKind === undefined ? {} : { displayKind: result.displayKind }),
+    ...(result.displayMetadata === undefined ? {} : { displayMetadata: result.displayMetadata }),
+    ...(result.synthetic === undefined ? {} : { synthetic: result.synthetic }),
+    ...(result.context === undefined ? {} : { context: result.context })
   };
 }
 
@@ -164,17 +189,32 @@ export function boundToolResult(
     readonly content?: unknown;
     readonly isError?: unknown;
     readonly truncated?: unknown;
+    readonly apiContent?: unknown;
+    readonly displayKind?: unknown;
+    readonly displayMetadata?: unknown;
+    readonly synthetic?: unknown;
+    readonly context?: unknown;
   };
   if (!isProviderContent(candidate.content) ||
       (candidate.isError !== undefined && typeof candidate.isError !== "boolean") ||
-      (candidate.truncated !== undefined && typeof candidate.truncated !== "boolean")) {
+      (candidate.truncated !== undefined && typeof candidate.truncated !== "boolean") ||
+      (candidate.apiContent !== undefined && !isProviderContent(candidate.apiContent)) ||
+      (candidate.displayKind !== undefined && typeof candidate.displayKind !== "string") ||
+      (candidate.displayMetadata !== undefined && !isProviderJsonObject(candidate.displayMetadata)) ||
+      (candidate.synthetic !== undefined && typeof candidate.synthetic !== "boolean") ||
+      (candidate.context !== undefined && !isProviderJson(candidate.context))) {
     throw new TypeError("Tool returned an invalid result");
   }
 
   const result: ToolOutputResult = {
     content: candidate.content,
     ...(candidate.isError === undefined ? {} : { isError: candidate.isError }),
-    ...(candidate.truncated === undefined ? {} : { truncated: candidate.truncated })
+    ...(candidate.truncated === undefined ? {} : { truncated: candidate.truncated }),
+    ...(candidate.apiContent === undefined ? {} : { apiContent: candidate.apiContent }),
+    ...(candidate.displayKind === undefined ? {} : { displayKind: candidate.displayKind }),
+    ...(candidate.displayMetadata === undefined ? {} : { displayMetadata: candidate.displayMetadata }),
+    ...(candidate.synthetic === undefined ? {} : { synthetic: candidate.synthetic }),
+    ...(candidate.context === undefined ? {} : { context: candidate.context })
   };
   if (typeof result.content === "string") {
     const bounded = generatePreview(result.content, maxBytes);

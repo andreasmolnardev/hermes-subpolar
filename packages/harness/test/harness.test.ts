@@ -174,6 +174,177 @@ test("checkpoint failure aborts before the tool side effect", async () => {
   assert.equal(executed, false);
 });
 
+test("fresh-session setup fails before the provider is called", async () => {
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, {
+    persistence: {
+      async ensureSession() {
+        throw new Error("storage is read-only");
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "provider_failure");
+  assert.equal(result.error.category, "persistence");
+  assert.equal(providerCalls, 0);
+});
+
+test("inbound user persistence is ordered and not duplicated on resume", async () => {
+  const firstWrites: HarnessAtomicTurnWrite[] = [];
+  const first = await executeHarness(request({
+    async complete() {
+      return response({ role: "assistant", content: "answer" });
+    }
+  }, {
+    persistence: {
+      async commitTurn(write) {
+        firstWrites.push(write);
+      }
+    }
+  }));
+
+  assert.equal(first.outcome, "completed");
+  assert.deepEqual(firstWrites[0]?.messages.map(message => message.role), ["user", "assistant"]);
+
+  const secondWrites: HarnessAtomicTurnWrite[] = [];
+  const resumed = firstWrites[0]?.messages as unknown as readonly HarnessMessage[];
+  const second = await executeHarness(request({
+    async complete() {
+      return response({ role: "assistant", content: "answer again" });
+    }
+  }, {
+    messages: [{ role: "user", content: "hello" }],
+    loadMessages: async () => resumed,
+    persistence: {
+      async commitTurn(write) {
+        secondWrites.push(write);
+      }
+    }
+  }));
+
+  assert.equal(second.outcome, "completed");
+  assert.deepEqual(secondWrites[0]?.messages.map(message => message.role), ["assistant"]);
+});
+
+test("atomic writes preserve structured assistant and tool sidecars", async () => {
+  const writes: HarnessAtomicTurnWrite[] = [];
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return {
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "lookup" },
+              { type: "reasoning", text: "because" },
+              { type: "tool-call", id: "sidecar-call", name: "lookup", arguments: "{}" }
+            ],
+            reasoning: "because",
+            toolCalls: [{ id: "sidecar-call", name: "lookup", arguments: "{}" }],
+            apiContent: [{ type: "text", text: "provider lookup" }],
+            displayKind: "assistant-card",
+            displayMetadata: { source: "provider" },
+            synthetic: false,
+            context: { trace: "assistant" }
+          } as unknown as HarnessMessage,
+          usage: {
+            inputTokens: 11,
+            outputTokens: 7,
+            totalTokens: 18,
+            reasoningTokens: 3,
+            cachedInputTokens: 5,
+            cacheCreationInputTokens: 2,
+            cacheReadInputTokens: 3
+          }
+        };
+      }
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    tools: [{ name: "lookup", policy: "allow" }],
+    toolExecutor: async () => ({
+      content: [
+        { type: "text", text: "value" },
+        { type: "reasoning", text: "tool reasoning" }
+      ],
+      apiContent: [{ type: "text", text: "raw value" }],
+      displayKind: "tool-card",
+      displayMetadata: { source: "tool" },
+      synthetic: true,
+      context: { trace: "tool" }
+    }),
+    persistence: {
+      async commitTurn(write) {
+        writes.push(write);
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(writes.length, 2);
+  const assistant = writes[0]?.messages[1];
+  const tool = writes[0]?.messages[2];
+  assert.deepEqual(assistant?.content, [
+    { type: "text", text: "lookup" },
+    { type: "reasoning", text: "because" },
+    { type: "tool-call", id: "sidecar-call", name: "lookup", arguments: "{}" }
+  ]);
+  assert.equal(assistant?.reasoning, "because");
+  assert.deepEqual(assistant?.apiContent, [{ type: "text", text: "provider lookup" }]);
+  assert.deepEqual(assistant?.displayMetadata, { source: "provider" });
+  assert.deepEqual(assistant?.context, { trace: "assistant" });
+  assert.deepEqual(tool?.content, [
+    { type: "text", text: "value" },
+    { type: "reasoning", text: "tool reasoning" }
+  ]);
+  assert.deepEqual(tool?.toolResult?.content, tool?.content);
+  assert.deepEqual(tool?.apiContent, [{ type: "text", text: "raw value" }]);
+  assert.deepEqual(tool?.displayMetadata, { source: "tool" });
+  assert.deepEqual(tool?.context, { trace: "tool" });
+  assert.equal(writes[0]?.messages[1]?.usage?.reasoningTokens, 3);
+  const usage = writes[0]?.usage;
+  assert.equal((Array.isArray(usage) ? usage[0] : usage)?.usage.cacheReadInputTokens, 3);
+});
+
+test("final atomic write carries runtime, checkpoint, and recovery metadata", async () => {
+  const writes: HarnessAtomicTurnWrite[] = [];
+  const runtime = {
+    runtimeVersion: "harness-test",
+    schemaVersion: 1 as const,
+    migratedFromSchemaVersion: 0,
+    migrationId: "migration-1",
+    migratedAt: "2026-08-05T00:00:00.000Z"
+  };
+  const result = await executeHarness(request({
+    async complete() {
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    runtime,
+    persistence: {
+      async commitTurn(write) {
+        writes.push(write);
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0]?.checkpoint?.runtime, runtime);
+  assert.deepEqual(writes[0]?.migrationState?.runtime, runtime);
+  assert.equal(writes[0]?.checkpoint?.messageSequence, 2);
+  assert.equal(writes[0]?.migrationState?.recovery?.status, "recoverable");
+  assert.equal(writes[0]?.migrationState?.recovery?.turnId, "request-1");
+  assert.equal(writes[0]?.migrationState?.recovery?.checkpointId, "request-1:checkpoint");
+});
+
 test("recovery metadata supplies completed tool results without replaying the call", async () => {
   const completedCall = { id: "recovered", name: "write", arguments: "{}" };
   let executed = false;
@@ -281,7 +452,7 @@ test("provider fields and detailed result survive retries and fallback", async (
   })), [
     {
       model: "fake",
-      messages: [loadedMessage],
+      messages: [loadedMessage, { role: "user", content: "hello" }],
       tools: [],
       options,
       cacheHints,
@@ -293,7 +464,7 @@ test("provider fields and detailed result survive retries and fallback", async (
     },
     {
       model: "fake",
-      messages: [loadedMessage],
+      messages: [loadedMessage, { role: "user", content: "hello" }],
       tools: [],
       options,
       cacheHints,
@@ -305,7 +476,7 @@ test("provider fields and detailed result survive retries and fallback", async (
     },
     {
       model: "fake",
-      messages: [loadedMessage],
+      messages: [loadedMessage, { role: "user", content: "hello" }],
       tools: [],
       options,
       cacheHints,
@@ -448,7 +619,7 @@ test("valid resumed histories preserve order and strip persistence-only result d
       seen.push([...providerRequest.messages]);
       return response({ role: "assistant", content: "continued" });
     }
-  }, { loadMessages: async () => resumed }));
+  }, { loadMessages: async () => resumed, messages: [{ role: "user", content: "resume" }] }));
 
   assert.equal(result.outcome, "completed");
   assert.deepEqual(seen[0]?.map(message => message.role), ["user", "assistant", "tool"]);
@@ -932,9 +1103,12 @@ test("atomic repository write records a completed tool round before interruption
 
   assert.equal(result.outcome, "cancelled");
   assert.equal(providerCalls, 2);
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, 2);
   assert.deepEqual(writes[0]?.messages.map(message => message.role), ["user", "assistant", "tool"]);
   assert.equal(writes[0]?.messages[2]?.toolResult?.toolCallId, "atomic-call");
+  assert.deepEqual(writes[0]?.migrationState?.recovery?.completedToolCallIds, ["atomic-call"]);
+  assert.equal(writes[1]?.messages.length, 0);
+  assert.equal(writes[1]?.migrationState?.recovery?.status, "interrupted");
 });
 
 test("atomic persistence failure stops continuation and emits one terminal", async () => {

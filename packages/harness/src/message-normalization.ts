@@ -87,7 +87,13 @@ type NormalizedCall = {
 };
 
 type NormalizedMessage = {
-  readonly message: ProviderMessage;
+  readonly message: ProviderMessage & {
+    readonly apiContent?: ProviderContent;
+    readonly displayKind?: string;
+    readonly displayMetadata?: ProviderJsonValue & { readonly [key: string]: ProviderJsonValue };
+    readonly synthetic?: boolean;
+    readonly context?: ProviderJsonValue;
+  };
   readonly calls: readonly NormalizedCall[];
 };
 
@@ -337,6 +343,45 @@ function normalizedContent(
   return { content, calls };
 }
 
+function normalizedSidecars(
+  candidate: Record<string, unknown>,
+  path: string
+): {
+  readonly apiContent?: ProviderContent;
+  readonly displayKind?: string;
+  readonly displayMetadata?: { readonly [key: string]: ProviderJsonValue };
+  readonly synthetic?: boolean;
+  readonly context?: ProviderJsonValue;
+} {
+  let apiContent: ProviderContent | undefined;
+  if (candidate.apiContent !== undefined) {
+    apiContent = normalizedContent(candidate.apiContent, `${path}.apiContent`, { value: 0 }).content;
+  }
+  if (candidate.displayKind !== undefined && typeof candidate.displayKind !== "string") {
+    throw new TypeError(`${path}.displayKind must be a string`);
+  }
+  if (candidate.displayMetadata !== undefined &&
+      (!isProviderJsonValue(candidate.displayMetadata as ProviderJsonValue) ||
+       Array.isArray(candidate.displayMetadata))) {
+    throw new TypeError(`${path}.displayMetadata must be a JSON object`);
+  }
+  if (candidate.synthetic !== undefined && typeof candidate.synthetic !== "boolean") {
+    throw new TypeError(`${path}.synthetic must be a boolean`);
+  }
+  if (candidate.context !== undefined && !isProviderJsonValue(candidate.context as ProviderJsonValue)) {
+    throw new TypeError(`${path}.context must be a JSON value`);
+  }
+  return {
+    ...(apiContent === undefined ? {} : { apiContent }),
+    ...(candidate.displayKind === undefined ? {} : { displayKind: candidate.displayKind }),
+    ...(candidate.displayMetadata === undefined ? {} : {
+      displayMetadata: sanitizeJson(candidate.displayMetadata as ProviderJsonValue) as { readonly [key: string]: ProviderJsonValue }
+    }),
+    ...(candidate.synthetic === undefined ? {} : { synthetic: candidate.synthetic }),
+    ...(candidate.context === undefined ? {} : { context: sanitizeJson(candidate.context as ProviderJsonValue) })
+  };
+}
+
 function rewriteContent(
   content: ProviderContent,
   calls: readonly ProviderToolCall[],
@@ -442,6 +487,7 @@ function normalizedMessage(value: unknown, index: number): NormalizedMessage {
     : isProviderJsonValue(candidate.metadata)
       ? sanitizeJson(candidate.metadata) as ProviderMetadata
       : (() => { throw new TypeError(`History message[${index}].metadata is malformed`); })();
+  const sidecars = normalizedSidecars(candidate, `History message[${index}]`);
   const message: ProviderMessage = {
     role: candidate.role,
     content: normalized.content,
@@ -452,7 +498,8 @@ function normalizedMessage(value: unknown, index: number): NormalizedMessage {
     ...(candidate.name === undefined ? {} : typeof candidate.name === "string"
       ? { name: sanitizeString(candidate.name) }
       : (() => { throw new TypeError(`History message[${index}].name must be a string`); })()),
-    ...(metadata === undefined ? {} : { metadata })
+    ...(metadata === undefined ? {} : { metadata }),
+    ...sidecars
   };
   return { message, calls };
 }
@@ -477,7 +524,13 @@ function normalizeHarnessMessage(value: unknown, index: number): ProviderMessage
   return applyUniqueIds(normalizedMessage(value, index), new Set()).message;
 }
 
-export function normalizeHarnessMessages(values: readonly ProviderMessage[]): readonly ProviderMessage[] {
+export function normalizeHarnessMessages(values: readonly ProviderMessage[]): readonly (ProviderMessage & {
+  readonly apiContent?: ProviderContent;
+  readonly displayKind?: string;
+  readonly displayMetadata?: { readonly [key: string]: ProviderJsonValue };
+  readonly synthetic?: boolean;
+  readonly context?: ProviderJsonValue;
+})[] {
   const normalized = values.map((value, index) => normalizedMessage(value, index));
   const used = new Set<string>();
   const messages = normalized.map(message => applyUniqueIds(message, used));

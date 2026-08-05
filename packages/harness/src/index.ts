@@ -136,7 +136,16 @@ export type HarnessJsonObject = ProviderJsonObject;
 export type HarnessContent = ProviderContent;
 export type HarnessContentPart = ProviderContentPart;
 export type HarnessToolCall = ProviderToolCall;
-export type HarnessMessage = ProviderMessage;
+export type HarnessMessageSidecars = {
+  /** Exact provider-facing content when the persisted display content differs. */
+  readonly apiContent?: HarnessContent;
+  /** Presentation-only data retained for resume and projections. */
+  readonly displayKind?: string;
+  readonly displayMetadata?: HarnessJsonObject;
+  readonly synthetic?: boolean;
+  readonly context?: HarnessJsonValue;
+};
+export type HarnessMessage = ProviderMessage & HarnessMessageSidecars;
 
 // Harness keeps deny as an execution policy; providers receive normalized tools.
 export type HarnessTool = Omit<ProviderTool, "policy"> & {
@@ -295,6 +304,14 @@ export type HarnessMigrationStateMetadata = {
   readonly recovery?: HarnessRecoveryMetadata;
 };
 
+export type HarnessSessionSetup = {
+  readonly sessionId: string;
+  readonly workspaceId?: string;
+  readonly model: string;
+  readonly runtime: HarnessRuntimeMetadata;
+  readonly createdAt: string;
+};
+
 export type HarnessToolCheckpoint = {
   readonly requestId: string;
   readonly sessionId: string;
@@ -311,7 +328,8 @@ export type HarnessPersistencePort = {
   append?(event: HarnessEvent): Promise<void>;
   load?(sessionId: string): Promise<readonly HarnessMessage[]>;
   listMessages?(sessionId: string): Promise<readonly unknown[]>;
-  ensureSession?(sessionId: string): Promise<void>;
+  /** Verify or create the session before any provider or tool effect. */
+  ensureSession?(sessionId: string, setup?: HarnessSessionSetup): Promise<void>;
   commitTurn?(write: HarnessAtomicTurnWrite): Promise<unknown>;
   transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
   checkpoint?(checkpoint: HarnessToolCheckpoint): Promise<void>;
@@ -325,6 +343,11 @@ export type HarnessPersistedMessageDraft = {
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly content: HarnessContent;
   readonly createdAt: string;
+  readonly apiContent?: HarnessContent;
+  readonly displayKind?: string;
+  readonly displayMetadata?: HarnessJsonObject;
+  readonly synthetic?: boolean;
+  readonly context?: HarnessJsonValue;
   readonly name?: string;
   readonly toolCalls?: readonly HarnessToolCall[];
   readonly toolCallId?: string;
@@ -344,6 +367,8 @@ export type HarnessPersistedMessageDraft = {
     readonly totalTokens?: number;
     readonly cachedInputTokens?: number;
     readonly reasoningTokens?: number;
+    readonly cacheCreationInputTokens?: number;
+    readonly cacheReadInputTokens?: number;
   };
 };
 
@@ -366,7 +391,7 @@ export type HarnessAtomicTurnWrite = {
 
 export type HarnessSessionRepository = {
   commitTurn(write: HarnessAtomicTurnWrite): Promise<unknown>;
-  ensureSession?(sessionId: string): Promise<void>;
+  ensureSession?(sessionId: string, setup?: HarnessSessionSetup): Promise<void>;
   listMessages?(sessionId: string): Promise<readonly unknown[]>;
   transaction?<T>(operation: (transaction: Pick<HarnessSessionRepository, "commitTurn">) => Promise<T>): Promise<T>;
 };
@@ -637,6 +662,11 @@ function persistedMessage(
     role: message.role,
     content: message.content,
     createdAt,
+    ...(message.apiContent === undefined ? {} : { apiContent: message.apiContent }),
+    ...(message.displayKind === undefined ? {} : { displayKind: message.displayKind }),
+    ...(message.displayMetadata === undefined ? {} : { displayMetadata: message.displayMetadata }),
+    ...(message.synthetic === undefined ? {} : { synthetic: message.synthetic }),
+    ...(message.context === undefined ? {} : { context: message.context }),
     ...(message.name === undefined ? {} : { name: message.name }),
     ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
     ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
@@ -660,6 +690,7 @@ function persistedAssistant(
   id: string,
   createdAt: string
 ): HarnessPersistedMessageDraft {
+  const metadata = result.message.metadata ?? result.metadata;
   return {
     id,
     role: "assistant",
@@ -667,11 +698,12 @@ function persistedAssistant(
     createdAt,
     ...(result.message.name === undefined ? {} : { name: result.message.name }),
     ...(result.message.toolCalls === undefined ? {} : { toolCalls: result.message.toolCalls }),
+    ...messageSidecars(result.message),
     ...(result.finishReason === undefined ? {} : { finishReason: persistedFinishReason(result.finishReason) }),
     ...(result.reasoning ?? result.message.reasoning) === undefined
       ? {}
       : { reasoning: result.reasoning ?? result.message.reasoning },
-    ...(result.message.metadata === undefined ? {} : { metadata: result.message.metadata }),
+    ...(metadata === undefined ? {} : { metadata }),
     usage: result.usage
   };
 }
@@ -687,6 +719,7 @@ function persistedToolResult(
     role: "tool",
     content: result.content,
     createdAt,
+    ...messageSidecars(result),
     name: call.name,
     toolCallId: call.id,
     toolResult: {
@@ -702,6 +735,18 @@ function persistedToolResult(
         ...(result.truncated === undefined ? {} : { truncated: result.truncated })
       }
     })
+  };
+}
+
+function messageSidecars(value: unknown): HarnessMessageSidecars {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const candidate = value as Partial<HarnessMessageSidecars>;
+  return {
+    ...(candidate.apiContent === undefined ? {} : { apiContent: candidate.apiContent }),
+    ...(candidate.displayKind === undefined ? {} : { displayKind: candidate.displayKind }),
+    ...(candidate.displayMetadata === undefined ? {} : { displayMetadata: candidate.displayMetadata }),
+    ...(candidate.synthetic === undefined ? {} : { synthetic: candidate.synthetic }),
+    ...(candidate.context === undefined ? {} : { context: candidate.context })
   };
 }
 
@@ -820,6 +865,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   let pendingToolCallIds: readonly string[] = [];
   let committedTurn = false;
   const runtime = request.runtime ?? { runtimeVersion: "harness", schemaVersion: 1 as const };
+  const turnStartedAt = new Date(request.clock.now()).toISOString();
   const commitPending = async (
     finalize = false,
     finalStatus: HarnessRecoveryMetadata["status"] = "recoverable"
@@ -849,10 +895,11 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       recovery: {
         turnId: request.requestId,
         status: recoveryStatus,
-        startedAt: recordedAt,
+        startedAt: turnStartedAt,
         updatedAt: recordedAt,
         checkpointId: checkpoint.id,
-        pendingToolCallIds: [...pendingToolCallIds]
+        pendingToolCallIds: [...pendingToolCallIds],
+        completedToolCallIds: completedTurnTools.map(completed => completed.call.id)
       }
     };
     const write: HarnessAtomicTurnWrite = {
@@ -910,10 +957,16 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     pendingIds: readonly string[],
     result?: HarnessToolResult
   ): Promise<boolean> => {
-    if (request.persistence?.checkpoint === undefined) return true;
     const completedToolCalls = phase === "tool-completed" && result !== undefined
       ? [...completedTurnTools, { call: task.call, result }]
       : completedTurnTools;
+    if (request.persistence?.checkpoint === undefined) {
+      if (phase === "tool-completed" && result !== undefined) {
+        completedTurnTools.push({ call: task.call, result });
+      }
+      pendingToolCallIds = [...pendingIds];
+      return true;
+    }
     try {
       await request.persistence.checkpoint({
         requestId: request.requestId,
@@ -947,7 +1000,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     if (persistenceFailure !== undefined) {
       finalOutcome = persistenceFailureOutcome(persistenceFailure);
     } else if (!(await commitPending(
-      pendingMessages.length > 0 || !committedTurn,
+      true,
       finalOutcome.outcome === "cancelled" ? "interrupted" : "recoverable"
     ))) {
       finalOutcome = persistenceFailureOutcome(persistenceFailure ?? new Error("Atomic turn persistence failed"));
@@ -988,7 +1041,13 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   const ensureSession = request.sessionRepository?.ensureSession ?? request.persistence?.ensureSession;
   if (ensureSession !== undefined) {
     try {
-      await ensureSession(request.sessionId);
+      await ensureSession(request.sessionId, {
+        sessionId: request.sessionId,
+        ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
+        model: request.model,
+        runtime,
+        createdAt: turnStartedAt
+      });
     } catch (error) {
       persistenceFailure = typeof error === "object" && error !== null
         ? error instanceof Error ? error : new Error("Session setup failed")
@@ -1008,6 +1067,8 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   const messageLoader = request.loadMessages ?? request.persistence?.load ??
     (repositoryLoader === undefined ? undefined : async (sessionId: string) =>
       await repositoryLoader(sessionId) as readonly HarnessMessage[]);
+  const messageLoaderUsesPersistence = request.loadMessages === undefined &&
+    (request.persistence?.load !== undefined || repositoryLoader !== undefined);
   if (messageLoader) {
     try {
       const recovered = await messageLoader(request.sessionId);
@@ -1018,6 +1079,11 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       }
     } catch (error) {
       request.logger?.warn?.(`Harness message recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      if (messageLoaderUsesPersistence) persistenceFailure = failure;
+      return terminal(messageLoaderUsesPersistence
+        ? persistenceFailureOutcome(failure)
+        : failureOutcome("provider_failure", failure, "history"));
     }
   }
   if (request.persistence?.recover !== undefined) {
@@ -1041,6 +1107,8 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       }
     } catch (error) {
       request.logger?.warn?.(`Harness turn recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
+      persistenceFailure = error instanceof Error ? error : new Error(String(error));
+      return terminal(persistenceFailureOutcome(persistenceFailure));
     }
   }
   if (recovery?.status === "interrupted") {
@@ -1049,37 +1117,22 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   try {
     messages = normalizeHarnessMessages(messages);
   } catch (error) {
-    let storageFallbackSucceeded = false;
-    // A read-only or newer store may expose records this runtime cannot decode.
-    // The caller's request is still a valid provider context, so fall back to it
-    // before any provider or tool side effect rather than replaying bad storage.
-    if (messageLoader !== undefined && usedStoredMessages) {
-      try {
-        messages = normalizeHarnessMessages(request.messages);
-        loadedMessageCount = 0;
-        usedStoredMessages = false;
-        storageFallbackSucceeded = true;
-      } catch {
-        // Preserve the original history failure when the request is invalid too.
-      }
-    }
-    if (usedStoredMessages || !storageFallbackSucceeded) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      return terminal(failureOutcome("provider_failure", failure, "history"));
-    }
-    // The fallback above normalized the request successfully.
+    const failure = error instanceof Error ? error : new Error(String(error));
+    return terminal(failureOutcome("provider_failure", failure, "history"));
   }
   const inboundUser = [...request.messages].reverse().find(message => message.role === "user");
   const inboundNormalized = inboundUser === undefined
     ? undefined
     : normalizeHarnessMessages([inboundUser])[0];
-  const inboundPresent = inboundNormalized !== undefined && messages.some(message => message.role === "user" &&
-    JSON.stringify(message.content) === JSON.stringify(inboundNormalized.content));
-  const inboundAlreadyLoaded = inboundPresent && loadedMessageCount > 0;
-  if (inboundNormalized !== undefined && !inboundPresent && !usedStoredMessages) {
+  const storedInbound = usedStoredMessages
+    ? [...messages.slice(0, loadedMessageCount)].reverse().find(message => message.role === "user")
+    : undefined;
+  const inboundAlreadyLoaded = inboundNormalized !== undefined && storedInbound !== undefined &&
+    JSON.stringify(storedInbound) === JSON.stringify(inboundNormalized);
+  if (inboundNormalized !== undefined && usedStoredMessages && !inboundAlreadyLoaded) {
     messages = [...messages, inboundNormalized];
   }
-  nextSequence = repositoryLoader === undefined && ensureSession === undefined
+  nextSequence = request.sessionRepository?.commitTurn === undefined && atomicRepository(request.persistence) === undefined
     ? messages.length - (inboundAlreadyLoaded ? 0 : inboundNormalized === undefined ? 0 : 1)
     : loadedMessageCount;
   if (inboundNormalized !== undefined && !inboundAlreadyLoaded) {
@@ -1292,7 +1345,13 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           toolResults.set(call.id, existing);
           toolResultsByCall.set(callKey, existing);
           if (!toolMessages.has(call.id)) {
-            messages = [...messages, { role: "tool", toolCallId: call.id, name: call.name, content: existing.content }];
+            messages = [...messages, {
+              role: "tool",
+              toolCallId: call.id,
+              name: call.name,
+              content: existing.content,
+              ...messageSidecars(existing)
+            }];
             toolMessages.add(call.id);
           }
           continue;
@@ -1450,7 +1509,8 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           role: "tool",
           toolCallId: task.call.id,
           name: task.call.name,
-          content: aggregateResult.content
+          content: aggregateResult.content,
+          ...messageSidecars(aggregateResult)
         }];
         pendingMessages.push(persistedToolResult(
           task.call,

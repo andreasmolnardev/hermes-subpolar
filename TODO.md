@@ -29,27 +29,34 @@ foundation are recorded below so they are not mistaken for full runtime parity.
   explicit in-memory session runtime pinning with Python fallback.
 - [x] Deterministic migration fixtures for message order, tool correlation,
   usage, retry/fallback, cancellation, and diagnostic redaction.
+- [x] Atomic turn persistence through repository transactions, including
+  assistant/tool messages, usage, checkpoints, migration metadata, rollback,
+  and interrupted-turn recovery hooks.
+- [x] Harness stream consumption, reasoning/tool interleaving, UTF-8 output
+  bounds, timeout/concurrency controls, malformed-result rejection, strict
+  role/tool adjacency validation, and checkpoint-before-side-effect tests.
+- [x] Versioned Python tool bridge contracts with correlated IDs, scoped
+  environment, deadlines, cancellation, structured errors, subprocess
+  cleanup, and security fixtures.
+- [x] Credential-injected recorded-response OpenAI-compatible adapter with
+  tool schemas, usage, finish reasons, request identity, malformed-response
+  validation, and retry classification.
+- [x] SQLite adapter recovery, additive metadata migration, Python legacy
+  tool-record normalization, ordering, rollback, and concurrent-reader tests.
+- [x] Durable gateway runtime-selection and session-repository ports with
+  restart/resume and no-duplicate-side-effect fixtures.
+- [x] Migration black-box fixtures for streams, persistence recovery, tool
+  safety, bridge security, and recorded provider responses.
 
 ## Remaining Migration Work
 
 ### Core Correctness
 
-- [ ] Replace harness event-only persistence with atomic assistant/tool message,
-  usage, checkpoint, and migration-state writes through `SessionRepository`.
 - [ ] Persist and reload runtime version, schema version, checkpoint, and
   per-session runtime selection; remove process-local gateway pin state.
-- [ ] Implement role-alternation repair/rejection equivalent to Python,
-  including orphan tool results, resumed interrupted turns, and provider
-  adjacency rules.
-- [ ] Persist recoverable interrupted-turn state before side-effecting tools and
-  prove restart does not duplicate completed effects.
 - [ ] Propagate detailed reasoning, cache usage, provider metadata, finish
   reasons, and partial usage through harness events, persistence, and gateway
   payloads without leaking prompts, arguments, results, or credentials.
-- [ ] Implement stream consumption in harness with typed deltas, reasoning,
-  tool-call interleaving, cancellation, and final reconciliation.
-- [ ] Add bounded tool output/truncation, timeout, concurrency limits, malformed
-  result handling, and safe spill behavior.
 - [ ] Add explicit state-transition tests for every terminal outcome and every
   provider/tool/approval cancellation race.
 
@@ -72,28 +79,15 @@ foundation are recorded below so they are not mistaken for full runtime parity.
 
 ### Phase 4: Tools And Python Bridge
 
-- [ ] Implement versioned subprocess/JSON bridge for unmigrated Python tools.
-- [ ] Include protocol version, request ID, tool-call ID, workspace/cwd,
-  scoped environment, deadline, cancellation, and structured errors.
-- [ ] Enforce allowlisted environment and opaque secret handles; never forward
-  the full parent environment or credentials.
-- [ ] Add protocol mismatch, worker crash, cancellation, timeout, oversized
-  output, malformed output, cleanup, and no-orphan-process E2E tests using
-  temporary `HERMES_HOME`.
 - [ ] Migrate pure deterministic tools first; retain OS-native, browser, MCP,
   plugin, skill, sandbox, terminal, and platform tools behind the bridge.
-- [ ] Preserve approval queues, policy layering, hooks, plugin contracts,
-  checkpoint-before-side-effect behavior, and idempotent recovery semantics.
+- [ ] Preserve approval queues, policy layering, hooks, and plugin contracts
+  through the bridge; checkpoint and idempotent recovery foundations are done.
 - [ ] Add shared Python/TypeScript black-box suites for schemas, policy,
   approval, execution, result insertion, truncation, and failure behavior.
 
 ### Phase 5: Provider Adapters
 
-- [ ] Implement recorded-response OpenAI-compatible non-streaming adapter with
-  tool schemas, tool calls, usage, finish reasons, malformed response handling,
-  retry classification, credentials through an injected provider, and request
-  identity.
-- [ ] Add common adapter conformance suite and credential-free fixtures.
 - [ ] Preserve prompt cache controls, reasoning blocks, multimodal encoding,
   provider metadata, and provider-specific usage/error mappings.
 - [ ] Migrate additional providers in usage order: Anthropic, Gemini, Bedrock,

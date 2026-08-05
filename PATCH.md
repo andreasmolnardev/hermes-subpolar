@@ -47,6 +47,13 @@
 - Documented implemented Python/TypeScript runtime boundary, explicit harness
   lifecycle, neutral contracts, deterministic resolver, in-memory persistence
   adapter, and retained Python fallback; no default cutover claimed.
+- Added atomic repository turn writes, checkpoint-before-tool recovery,
+  stream/reasoning reconciliation, strict role/tool validation, bounded tool
+  execution, SQLite legacy metadata compatibility, a scoped Python tool bridge,
+  a credential-injected OpenAI-compatible adapter, durable gateway runtime and
+  session-repository ports, and deterministic migration fixtures. These remain
+  foundation/parity evidence only; Python fallback and rollout gates remain
+  authoritative.
 
 Deferred product items remain listed in `TODO.md` and are not reintroduced by
 this patch.

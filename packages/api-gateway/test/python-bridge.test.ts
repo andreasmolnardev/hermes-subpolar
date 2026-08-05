@@ -5,11 +5,18 @@ import {
   PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
   PythonToolBridge,
   PythonToolBridgeError,
+  PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+  PythonRuntimeBridge,
+  PythonRuntimeBridgeError,
   createAllowlistedEnvironment,
   createPythonToolBridgeExecutor,
   createPythonToolBridgeSubprocessTransport,
+  createPythonRuntimeBridgeSubprocessTransport,
   type PythonToolBridgeRequest,
-  type PythonToolBridgeProcess
+  type PythonToolBridgeProcess,
+  type PythonRuntimeBridgeEvent,
+  type PythonRuntimeBridgeProcess,
+  type PythonRuntimeBridgeRequest
 } from "../src/index.ts";
 
 const call = {
@@ -189,4 +196,131 @@ test("environment helper copies only allowlisted variables", () => {
     createAllowlistedEnvironment({ PATH: "/bin", TOKEN: "secret" }, ["PATH"]),
     { PATH: "/bin" }
   );
+});
+
+const runtimeResult = {
+  message: { role: "assistant" as const, content: "python result" },
+  usage: { inputTokens: 2, outputTokens: 3 }
+};
+
+test("runtime bridge carries a whole structured turn and validates event correlation", async () => {
+  let sent: PythonRuntimeBridgeRequest | undefined;
+  const events: PythonRuntimeBridgeEvent[] = [];
+  const bridge = new PythonRuntimeBridge({
+    async send(request, options) {
+      sent = request;
+      await options.onEvent?.({
+        protocolVersion: PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+        type: "runtime.event",
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        event: { type: "text.delta", text: "hello" }
+      });
+      return {
+        protocolVersion: PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+        type: "runtime.result",
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        result: runtimeResult
+      };
+    }
+  });
+
+  assert.deepEqual(await bridge.execute({
+    requestId: "request-runtime",
+    sessionId: "session-runtime",
+    model: "model",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [{ name: "search", executable: { reference: "python:search" } }],
+    policies: [{ toolName: "search", policy: "allow" }],
+    cwd: "/workspace",
+    environment: { PATH: "/bin" },
+    credentialHandles: ["credential:provider"],
+    deadline: Date.now() + 2_000,
+    cancellation: { requested: false }
+  }, undefined, event => { events.push(event); }), runtimeResult);
+  assert.equal(sent?.protocolVersion, 1);
+  assert.equal(sent?.type, "runtime.turn");
+  assert.deepEqual(sent?.credentialHandles, ["credential:provider"]);
+  assert.deepEqual(events.map(event => event.event), [{ type: "text.delta", text: "hello" }]);
+});
+
+test("runtime bridge rejects a correlated response with a private worker diagnostic", async () => {
+  const bridge = new PythonRuntimeBridge({
+    async send(request) {
+      return {
+        protocolVersion: PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+        type: "error",
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        error: { code: "worker_error", message: "private credential diagnostic" }
+      };
+    }
+  });
+  await assert.rejects(bridge.execute({
+    requestId: "request-runtime-error",
+    sessionId: "session-runtime-error",
+    model: "model",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [],
+    policies: [],
+    cwd: "/workspace",
+    environment: {},
+    credentialHandles: [],
+    deadline: Date.now() + 2_000,
+    cancellation: { requested: false }
+  }), error => {
+    assert(error instanceof PythonRuntimeBridgeError);
+    assert.equal(error.code, "worker_error");
+    assert.equal(error.message.includes("private credential"), false);
+    return true;
+  });
+});
+
+test("runtime subprocess transport always kills the one-turn worker", async () => {
+  let killed = false;
+  let received = "";
+  const process: PythonRuntimeBridgeProcess = {
+    stdin: {
+      write(chunk) {
+        received = chunk;
+        return chunk.length;
+      },
+      end() { return undefined; }
+    },
+    stdout: {
+      async *[Symbol.asyncIterator]() {
+        yield JSON.stringify({
+          protocolVersion: PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+          type: "runtime.result",
+          requestId: "request-runtime-process",
+          sessionId: "session-runtime-process",
+          result: runtimeResult
+        }) + "\n";
+      }
+    },
+    kill() { killed = true; }
+  };
+  const transport = createPythonRuntimeBridgeSubprocessTransport((command, options) => {
+    assert.deepEqual(command, ["python", "runtime.py"]);
+    assert.equal(options.cwd, "/workspace");
+    assert.deepEqual(options.env, { PATH: "/bin" });
+    return process;
+  }, ["python", "runtime.py"]);
+  const bridge = new PythonRuntimeBridge(transport);
+  await bridge.execute({
+    requestId: "request-runtime-process",
+    sessionId: "session-runtime-process",
+    model: "model",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [],
+    policies: [],
+    cwd: "/workspace",
+    environment: { PATH: "/bin" },
+    credentialHandles: [],
+    deadline: Date.now() + 2_000,
+    cancellation: { requested: false }
+  });
+  assert.equal(JSON.parse(received).credentialHandles.length, 0);
+  assert.equal(killed, true);
 });

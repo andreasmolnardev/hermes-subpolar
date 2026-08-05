@@ -71,6 +71,13 @@ import {
   type PythonToolBridgeTool
 } from "./python-bridge";
 import {
+  createPythonRuntimeAllowlistedEnvironment,
+  PythonRuntimeBridge,
+  type PythonRuntimeBridgeEvent,
+  type PythonRuntimeBridgeTool,
+  type PythonRuntimeBridgePolicy
+} from "./python-runtime-bridge";
+import {
   GatewayTurnLeaseManager,
   type GatewayTurnLeaseManagerOptions
 } from "./turn-lease";
@@ -125,6 +132,8 @@ export type GatewayExecutionRequest = {
   toolExecutor?: HarnessToolExecutor;
   pythonToolBridge?: PythonToolBridge;
   pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
+  pythonRuntimeBridge?: PythonRuntimeBridge;
+  pythonRuntimeBridgeOptions?: Omit<PythonRuntimeBridgeAdapterOptions, "bridge">;
   toolTimeoutMs?: number;
   toolConcurrency?: number;
   toolOutputLimits?: HarnessToolOutputLimits;
@@ -161,6 +170,8 @@ export type GatewayNormalizedRequest = {
   readonly toolExecutor?: HarnessToolExecutor;
   readonly pythonToolBridge?: PythonToolBridge;
   readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
+  readonly pythonRuntimeBridge?: PythonRuntimeBridge;
+  readonly pythonRuntimeBridgeOptions?: Omit<PythonRuntimeBridgeAdapterOptions, "bridge">;
   readonly toolTimeoutMs?: number;
   readonly toolConcurrency?: number;
   readonly toolOutputLimits?: HarnessToolOutputLimits;
@@ -179,6 +190,24 @@ export interface GatewayRuntimeAdapter {
     provider: ChatProvider,
     eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
   ): Promise<HarnessResult>;
+}
+
+export type PythonRuntimeBridgeAdapterOptions = {
+  readonly bridge: PythonRuntimeBridge;
+  readonly cwd?: string | ((request: GatewayNormalizedRequest) => string);
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly environmentAllowlist?: readonly string[];
+  readonly credentialHandles?: readonly string[] | ((request: GatewayNormalizedRequest) => readonly string[]);
+  readonly deadline?: number | ((request: GatewayNormalizedRequest) => number);
+  readonly defaultDeadlineMs?: number;
+  readonly now?: () => number;
+};
+
+export class GatewayPythonRuntimeBridgeNotConfiguredError extends Error {
+  constructor() {
+    super("Python runtime bridge is not configured");
+    this.name = "GatewayPythonRuntimeBridgeNotConfiguredError";
+  }
 }
 
 export class GatewayRuntimeUnsupportedError extends Error {
@@ -204,6 +233,8 @@ export type GatewayOptions = {
   readonly toolExecutor?: HarnessToolExecutor;
   readonly pythonToolBridge?: PythonToolBridge;
   readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
+  readonly pythonRuntimeBridge?: PythonRuntimeBridge;
+  readonly pythonRuntimeBridgeOptions?: Omit<PythonRuntimeBridgeAdapterOptions, "bridge">;
   readonly turnLeaseManager?: GatewayTurnLeaseManager;
   readonly turnLease?: GatewayTurnLeaseManagerOptions;
 };
@@ -474,6 +505,8 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.toolExecutor === undefined ? {} : { toolExecutor: request.toolExecutor }),
     ...(request.pythonToolBridge === undefined ? {} : { pythonToolBridge: request.pythonToolBridge }),
     ...(request.pythonToolBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: request.pythonToolBridgeOptions }),
+    ...(request.pythonRuntimeBridge === undefined ? {} : { pythonRuntimeBridge: request.pythonRuntimeBridge }),
+    ...(request.pythonRuntimeBridgeOptions === undefined ? {} : { pythonRuntimeBridgeOptions: request.pythonRuntimeBridgeOptions }),
     ...(request.toolTimeoutMs === undefined ? {} : { toolTimeoutMs: request.toolTimeoutMs }),
     ...(request.toolConcurrency === undefined ? {} : { toolConcurrency: request.toolConcurrency }),
     ...(request.toolOutputLimits === undefined ? {} : { toolOutputLimits: request.toolOutputLimits }),
@@ -1028,29 +1061,139 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
   }
 };
 
+function pythonRuntimeTool(tool: GatewayResolvedTool): PythonRuntimeBridgeTool {
+  if (!isDescriptor(tool)) return { name: tool.name };
+  if (!("reference" in tool.executable)) {
+    throw new TypeError(`Python runtime cannot execute TypeScript tool handle: ${tool.name}`);
+  }
+  return {
+    name: tool.name,
+    ...(tool.description === undefined ? {} : { description: tool.description }),
+    ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema as Exclude<PythonRuntimeBridgeTool["inputSchema"], undefined> }),
+    ...(tool.source === undefined ? {} : { source: tool.source }),
+    ...(tool.capabilities === undefined ? {} : { capabilities: tool.capabilities as Exclude<PythonRuntimeBridgeTool["capabilities"], undefined> }),
+    executable: { reference: tool.executable.reference }
+  };
+}
+
+function projectPythonRuntimeEvent(
+  event: PythonRuntimeBridgeEvent,
+  request: GatewayNormalizedRequest,
+  eventSink: ((event: GatewayEventProjectionInput) => void | Promise<void>) | undefined,
+  nextEventId: () => string
+): Promise<void> {
+  if (eventSink === undefined) return Promise.resolve();
+  const base = {
+    id: nextEventId(),
+    requestId: request.requestId,
+    sessionId: request.sessionId,
+    at: Date.now()
+  } as const;
+  const payload = event.event;
+  switch (payload.type) {
+    case "started":
+      return Promise.resolve(eventSink({ ...base, type: "provider.started", providerIndex: 0 }));
+    case "text.delta":
+      return Promise.resolve(eventSink({ ...base, type: "provider.text.delta", text: payload.text }));
+    case "reasoning.delta":
+      return Promise.resolve(eventSink({ ...base, type: "provider.reasoning.delta", text: payload.text }));
+    case "tool-call.delta":
+      return Promise.resolve(eventSink({
+        ...base,
+        type: "provider.tool-call.delta",
+        ...(payload.id === undefined ? {} : { callId: payload.id }),
+        ...(payload.name === undefined ? {} : { name: payload.name }),
+        ...(payload.arguments === undefined ? {} : { arguments: payload.arguments })
+      }));
+    case "tool-call":
+      return Promise.resolve(eventSink({
+        ...base,
+        type: "provider.tool-call",
+        call: { id: payload.id, name: payload.name, arguments: payload.arguments }
+      }));
+    case "tool-result":
+      return Promise.resolve(eventSink({
+        ...base,
+        type: "provider.tool-result",
+        callId: payload.toolCallId,
+        result: { content: payload.content, ...(payload.isError === undefined ? {} : { isError: payload.isError }) }
+      }));
+    case "usage":
+      return Promise.resolve(eventSink({ ...base, type: "provider.usage", usage: payload.usage }));
+    case "finished":
+      return Promise.resolve(eventSink({ ...base, type: "provider.finished", ...(payload.usage === undefined ? {} : { usage: payload.usage }) }));
+    case "failed":
+      return Promise.resolve(eventSink({ ...base, type: "provider.failed", providerIndex: 0, ...(payload.category === undefined ? {} : { category: payload.category }) }));
+  }
+}
+
+export function createGatewayRuntimeAdapter(options: PythonRuntimeBridgeAdapterOptions): GatewayRuntimeAdapter {
+  if (options.defaultDeadlineMs !== undefined && (!Number.isFinite(options.defaultDeadlineMs) || options.defaultDeadlineMs <= 0)) {
+    throw new TypeError("Python runtime bridge default deadline must be positive");
+  }
+  const now = options.now ?? (() => Date.now());
+  return {
+    runtime: "python",
+    supports: () => true,
+    async execute(request, provider, eventSink) {
+      // The provider argument is intentionally unused: whole-turn Python fallback owns the turn.
+      void provider;
+      const cwd = request.cwd ?? (typeof options.cwd === "function" ? options.cwd(request) : options.cwd);
+      if (cwd === undefined) throw new TypeError("Python runtime bridge cwd is not configured");
+      let validatedCwd: string;
+      try {
+        validatedCwd = validateSessionCwd(cwd);
+      } catch {
+        throw new TypeError("Python runtime bridge cwd is invalid");
+      }
+      const deadline = request.deadline ?? (typeof options.deadline === "function"
+        ? options.deadline(request)
+        : options.deadline ?? (request.timeoutMs === undefined
+          ? now() + (options.defaultDeadlineMs ?? 30_000)
+          : now() + request.timeoutMs));
+      if (!Number.isFinite(deadline)) throw new TypeError("Python runtime bridge deadline must be finite");
+      const credentialHandles = typeof options.credentialHandles === "function"
+        ? options.credentialHandles(request)
+        : options.credentialHandles ?? [];
+      if (!Array.isArray(credentialHandles) || credentialHandles.some(handle => typeof handle !== "string")) {
+        throw new TypeError("Python runtime bridge credential handles are invalid");
+      }
+      const tools = request.tools.map(pythonRuntimeTool);
+      const policies: readonly PythonRuntimeBridgePolicy[] = tools.map(tool => ({
+        toolName: tool.name,
+        policy: request.tools.find(candidate => candidate.name === tool.name)?.policy ?? "allow"
+      }));
+      let eventId = 0;
+      const result = await options.bridge.execute({
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        model: request.model,
+        messages: request.messages,
+        tools,
+        policies,
+        cwd: validatedCwd,
+        environment: createPythonRuntimeAllowlistedEnvironment(
+          options.environment ?? {},
+          options.environmentAllowlist ?? []
+        ),
+        credentialHandles,
+        deadline,
+        cancellation: { requested: false },
+        ...(request.identity === undefined ? {} : { identity: request.identity }),
+        ...(request.options === undefined ? {} : { options: request.options }),
+        ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
+        ...(request.metadata === undefined ? {} : { metadata: request.metadata })
+      }, request.signal, event => projectPythonRuntimeEvent(event, request, eventSink, () => `python-${++eventId}`));
+      return result;
+    }
+  };
+}
+
 export const legacyPythonRuntimeAdapter: GatewayRuntimeAdapter = {
   runtime: "python",
   supports: () => true,
-  async execute(request, provider) {
-    const tools = request.tools.map(asHarnessTool);
-    const signal = request.signal;
-    const result = await provider.complete(asProviderRequest(
-      request,
-      request.messages,
-      tools,
-      {
-        ...(signal === undefined ? {} : { signal, cancellation: signal }),
-        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-        ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
-        requestId: request.requestId
-      },
-      {
-        ...(request.identity ?? {}),
-        requestId: request.identity?.requestId ?? request.requestId,
-        attempt: request.identity?.attempt ?? 1
-      }
-    ));
-    return asHarnessResult(result);
+  async execute() {
+    throw new GatewayPythonRuntimeBridgeNotConfiguredError();
   }
 };
 
@@ -1069,6 +1212,7 @@ async function selectRuntime(
     ? { runtime: "python" as const }
     : typeof selection === "string" ? { runtime: selection } : selection;
   const selectedRuntime = validateRuntimeName(selected.runtime);
+  const defaultPythonAdapter = adapters.get("python") ?? legacyPythonRuntimeAdapter;
   const persistedRuntime = await store.load(request.sessionId);
   if (persistedRuntime !== undefined) validateRuntimeName(persistedRuntime);
   if (persistedRuntime === undefined && selected.adapter !== undefined) {
@@ -1086,8 +1230,8 @@ async function selectRuntime(
     ? selected.adapter ?? adapters.get(selectedRuntime)!
     : adapters.get(persistedRuntime)!;
   const selectedFallback = persistedRuntime === undefined
-    ? selected.fallback ?? fallback ?? legacyPythonRuntimeAdapter
-    : fallback ?? legacyPythonRuntimeAdapter;
+    ? selected.fallback ?? fallback ?? defaultPythonAdapter
+    : fallback ?? defaultPythonAdapter;
   return { adapter, fallback: selectedFallback, persistedRuntime };
 }
 
@@ -1158,9 +1302,15 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
   const sessionCwdStore = options.sessionCwdStore ?? new MemoryGatewaySessionCwdStore();
   const turnLeases = options.turnLeaseManager ?? new GatewayTurnLeaseManager(options.turnLease);
+  const configuredPythonAdapter = options.pythonRuntimeBridge === undefined
+    ? legacyPythonRuntimeAdapter
+    : createGatewayRuntimeAdapter({
+      bridge: options.pythonRuntimeBridge,
+      ...(options.pythonRuntimeBridgeOptions ?? {})
+    });
   const adapters = new Map<GatewayRuntimeName, GatewayRuntimeAdapter>([
     ["harness", harnessRuntimeAdapter],
-    ["python", legacyPythonRuntimeAdapter]
+    ["python", configuredPythonAdapter]
   ]);
   for (const adapter of Object.values(options.runtimeAdapters ?? {})) {
     if (adapter !== undefined) {
@@ -1208,6 +1358,12 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
         const executionRequest = adapter.runtime === "harness"
           ? configureHarnessRequest(normalized, options)
           : normalized;
+        if (executionRequest.pythonRuntimeBridge !== undefined && adapter.runtime === "python") {
+          adapter = createGatewayRuntimeAdapter({
+            bridge: executionRequest.pythonRuntimeBridge,
+            ...(executionRequest.pythonRuntimeBridgeOptions ?? {})
+          });
+        }
         return await adapter.execute(executionRequest, provider, safeHarnessEventSink(request));
       } finally {
         lease.release();
@@ -1277,6 +1433,32 @@ export {
   createPythonToolBridgeExecutor,
   createPythonToolBridgeSubprocessTransport
 } from "./python-bridge";
+export {
+  PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+  PythonRuntimeBridge,
+  PythonRuntimeBridgeError,
+  createPythonRuntimeAllowlistedEnvironment,
+  createPythonRuntimeBridgeSubprocessTransport
+} from "./python-runtime-bridge";
+export type {
+  PythonRuntimeBridgeCall,
+  PythonRuntimeBridgeCancellation,
+  PythonRuntimeBridgeErrorCode,
+  PythonRuntimeBridgeEvent,
+  PythonRuntimeBridgeFailure,
+  PythonRuntimeJsonValue,
+  PythonRuntimeJsonValue as PythonRuntimeBridgeJsonValue,
+  PythonRuntimeBridgeMessage,
+  PythonRuntimeBridgePolicy,
+  PythonRuntimeBridgeProcess,
+  PythonRuntimeBridgeRequest,
+  PythonRuntimeBridgeResponse,
+  PythonRuntimeBridgeSpawner,
+  PythonRuntimeBridgeSpawnOptions,
+  PythonRuntimeBridgeSuccess,
+  PythonRuntimeBridgeTool,
+  PythonRuntimeBridgeTransport
+} from "./python-runtime-bridge";
 export { MemoryGatewaySessionCwdStore, validateSessionCwd } from "./session-cwd";
 export type {
   PythonToolBridgeCall,

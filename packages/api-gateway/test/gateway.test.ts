@@ -7,9 +7,13 @@ import {
   executeRequest,
   normalizeGatewayRequest,
   PythonToolBridge,
+  PythonRuntimeBridge,
   PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
+  PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+  GatewayPythonRuntimeBridgeNotConfiguredError,
   GatewayTurnLeaseError,
   GatewayTurnLeaseManager,
+  type GatewayRuntimeAdapter,
   type GatewaySessionRepository,
   type PythonToolBridgeRequest
 } from "../src/index.ts";
@@ -44,9 +48,27 @@ function fakeRepository(initialMessages: readonly Record<string, unknown>[] = []
   return { repository, messages, writes, runtimes };
 }
 
+function explicitTestPythonAdapter(): GatewayRuntimeAdapter {
+  return {
+    runtime: "python",
+    supports: () => true,
+    async execute(request, provider) {
+      return provider.complete({
+        model: request.model,
+        messages: request.messages,
+        tools: [],
+        requestId: request.requestId
+      });
+    }
+  };
+}
+
 test("gateway preserves legacy ChatMessage and policy snapshot inputs", async () => {
-  const result = await executeRequest({
+  const result = await createGateway({
+    runtimeAdapters: { python: explicitTestPythonAdapter() }
+  }).executeRequest({
     model: "fake",
+    runtime: "python",
     messages: [{ role: "user", content: "hello" }],
     toolPolicies: [{ toolName: "shell.exec", policy: "deny" }]
   }, {
@@ -338,6 +360,77 @@ test("reference execution fails closed before provider effects when bridge or sc
   assert.equal(providerCalls, 1);
 });
 
+test("configured Python runtime owns the whole turn and never calls the injected provider", async () => {
+  let providerCalls = 0;
+  let seenRequest: Record<string, unknown> | undefined;
+  const runtimeBridge = new PythonRuntimeBridge({
+    async send(request, options) {
+      seenRequest = request as unknown as Record<string, unknown>;
+      await options.onEvent?.({
+        protocolVersion: PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+        type: "runtime.event",
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        event: { type: "started" }
+      });
+      return {
+        protocolVersion: PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+        type: "runtime.result",
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        result: completion
+      };
+    }
+  });
+  const result = await createGateway({
+    pythonRuntimeBridge: runtimeBridge,
+    pythonRuntimeBridgeOptions: {
+      cwd: "/workspace",
+      environment: { PATH: "/bin", SECRET: "not forwarded" },
+      environmentAllowlist: ["PATH"],
+      credentialHandles: ["credential:one"]
+    }
+  }).executeRequest({
+    model: "python-model",
+    sessionId: "python-session",
+    runtime: "python",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: [{ toolName: "search", policy: "allow" }]
+  }, {
+    async complete() {
+      providerCalls += 1;
+      return completion;
+    }
+  });
+
+  assert.deepEqual(result, completion);
+  assert.equal(providerCalls, 0);
+  assert.equal(seenRequest?.model, "python-model");
+  assert.deepEqual(seenRequest?.environment, { PATH: "/bin" });
+  assert.deepEqual(seenRequest?.credentialHandles, ["credential:one"]);
+  assert.equal(seenRequest?.type, "runtime.turn");
+});
+
+test("Python runtime fails closed before provider effects when no bridge is configured", async () => {
+  let providerCalls = 0;
+  await assert.rejects(() => createGateway().executeRequest({
+    model: "python-model",
+    sessionId: "unconfigured-python-session",
+    runtime: "python",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: []
+  }, {
+    async complete() {
+      providerCalls += 1;
+      return completion;
+    }
+  }), error => {
+    assert(error instanceof GatewayPythonRuntimeBridgeNotConfiguredError);
+    return true;
+  });
+  assert.equal(providerCalls, 0);
+});
+
 test("mapped harness events stay ordered, deduplicate terminal, and redact diagnostics", async () => {
   clearPinnedRuntime("events-session");
   const events: GatewayProtocolEvent[] = [];
@@ -425,7 +518,20 @@ test("unsupported harness descriptor retains explicit Python fallback without du
       source: "python",
       executable: { reference: "python:boolean-schema" },
       policy: "allow"
-    }]
+    }],
+    runtimeFallback: {
+      runtime: "python",
+      supports: () => true,
+      async execute(request, provider) {
+        const result = await provider.complete({
+          model: request.model,
+          messages: request.messages,
+          tools: request.tools as unknown as ProviderRequest["tools"],
+          requestId: request.requestId
+        });
+        return result;
+      }
+    }
   }, {
     async complete(request) {
       calls += 1;

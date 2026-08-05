@@ -79,6 +79,32 @@ export type ProviderReasoningPart = {
   text: string;
 };
 
+/** Media sources are passed through; adapters must not retrieve them. */
+export type ProviderImagePart = {
+  type: "image";
+  url: string;
+  mimeType?: string;
+  alt?: string;
+};
+
+export type ProviderImageUrlPart = {
+  type: "image_url";
+  imageUrl: string | { url: string; detail?: "auto" | "low" | "high" };
+};
+
+export type ProviderAudioPart = {
+  type: "audio";
+  url: string;
+  mimeType?: string;
+};
+
+export type ProviderFilePart = {
+  type: "file";
+  url: string;
+  mimeType?: string;
+  name?: string;
+};
+
 export type ProviderToolCall = {
   id: string;
   name: string;
@@ -102,6 +128,10 @@ export type ProviderToolResultPart = ProviderToolResult & {
 export type ProviderContentPart =
   | ProviderTextPart
   | ProviderReasoningPart
+  | ProviderImagePart
+  | ProviderImageUrlPart
+  | ProviderAudioPart
+  | ProviderFilePart
   | ProviderToolCallPart
   | ProviderToolResultPart;
 
@@ -463,7 +493,113 @@ function assertIdentity(identity: ProviderRequestIdentity | undefined, path: str
   }
 }
 
+function assertString(value: unknown, path: string, nonEmpty = false): asserts value is string {
+  if (typeof value !== "string" || (nonEmpty && value.trim().length === 0)) {
+    throw new TypeError(`${path} must be ${nonEmpty ? "a non-empty " : "a "}string`);
+  }
+}
+
+function assertAllowedKeys(value: object, keys: readonly string[], path: string): void {
+  const allowed = new Set(keys);
+  const unexpected = Object.keys(value).find((key) => !allowed.has(key));
+  if (unexpected !== undefined) throw new TypeError(`${path}.${unexpected} is unsupported`);
+}
+
+function assertMediaUrl(value: unknown, path: string): asserts value is string {
+  assertString(value, path, true);
+  if (value.trim() !== value) throw new TypeError(`${path} must not have surrounding whitespace`);
+  if (value.startsWith("data:")) {
+    if (!/^data:[^;,\s]+;base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+      throw new TypeError(`${path} must be a valid base64 data URL`);
+    }
+    return;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new TypeError(`${path} must be an http(s) or data URL`);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username.length > 0 || parsed.password.length > 0 || parsed.hostname.length === 0) {
+    throw new TypeError(`${path} must be an http(s) or data URL`);
+  }
+}
+
+function assertContent(content: ProviderContent, path: string): void {
+  if (typeof content === "string") return;
+  if (!Array.isArray(content)) throw new TypeError(`${path} must be a string or content parts`);
+
+  content.forEach((part, index) => {
+    const partPath = `${path}[${index}]`;
+    if (typeof part !== "object" || part === null || Array.isArray(part)) {
+      throw new TypeError(`${partPath} is malformed`);
+    }
+    if (part.type === "text" || part.type === "reasoning") {
+      assertAllowedKeys(part, ["type", "text"], partPath);
+      assertString(part.text, `${partPath}.text`);
+    } else if (part.type === "image") {
+      assertAllowedKeys(part, ["type", "url", "mimeType", "alt"], partPath);
+      assertMediaUrl(part.url, `${partPath}.url`);
+      if (part.mimeType !== undefined) assertString(part.mimeType, `${partPath}.mimeType`, true);
+      if (part.alt !== undefined) assertString(part.alt, `${partPath}.alt`);
+    } else if (part.type === "image_url") {
+      assertAllowedKeys(part, ["type", "imageUrl"], partPath);
+      if (typeof part.imageUrl === "string") {
+        assertMediaUrl(part.imageUrl, `${partPath}.imageUrl`);
+      } else {
+        if (typeof part.imageUrl !== "object" || part.imageUrl === null || Array.isArray(part.imageUrl)) {
+          throw new TypeError(`${partPath}.imageUrl is malformed`);
+        }
+        assertAllowedKeys(part.imageUrl, ["url", "detail"], `${partPath}.imageUrl`);
+        assertMediaUrl(part.imageUrl.url, `${partPath}.imageUrl.url`);
+        if (part.imageUrl.detail !== undefined &&
+          part.imageUrl.detail !== "auto" && part.imageUrl.detail !== "low" && part.imageUrl.detail !== "high") {
+          throw new TypeError(`${partPath}.imageUrl.detail is unsupported`);
+        }
+      }
+    } else if (part.type === "audio") {
+      assertAllowedKeys(part, ["type", "url", "mimeType"], partPath);
+      assertMediaUrl(part.url, `${partPath}.url`);
+      if (part.mimeType !== undefined) assertString(part.mimeType, `${partPath}.mimeType`, true);
+    } else if (part.type === "file") {
+      assertAllowedKeys(part, ["type", "url", "mimeType", "name"], partPath);
+      assertMediaUrl(part.url, `${partPath}.url`);
+      if (part.mimeType !== undefined) assertString(part.mimeType, `${partPath}.mimeType`, true);
+      if (part.name !== undefined) assertString(part.name, `${partPath}.name`, true);
+    } else if (part.type === "tool-call") {
+      assertAllowedKeys(part, ["type", "id", "name", "arguments"], partPath);
+      assertString(part.id, `${partPath}.id`, true);
+      assertString(part.name, `${partPath}.name`, true);
+      assertString(part.arguments, `${partPath}.arguments`);
+    } else if (part.type === "tool-result") {
+      assertAllowedKeys(part, ["type", "toolCallId", "content", "isError"], partPath);
+      assertString(part.toolCallId, `${partPath}.toolCallId`, true);
+      assertContent(part.content, `${partPath}.content`);
+      if (part.isError !== undefined && typeof part.isError !== "boolean") {
+        throw new TypeError(`${partPath}.isError must be a boolean`);
+      }
+    } else {
+      throw new TypeError(`${partPath}.type is unsupported`);
+    }
+  });
+}
+
 function assertMessage(message: ProviderMessage, path: string): void {
+  if (message.role !== "system" && message.role !== "user" &&
+    message.role !== "assistant" && message.role !== "tool") {
+    throw new TypeError(`${path}.role is unsupported`);
+  }
+  assertContent(message.content, `${path}.content`);
+  if (message.reasoning !== undefined) assertString(message.reasoning, `${path}.reasoning`);
+  message.toolCalls?.forEach((call, index) => {
+    const callPath = `${path}.toolCalls[${index}]`;
+    assertString(call.id, `${callPath}.id`, true);
+    assertString(call.name, `${callPath}.name`, true);
+    assertString(call.arguments, `${callPath}.arguments`);
+  });
+  if (message.toolCallId !== undefined) assertString(message.toolCallId, `${path}.toolCallId`, true);
+  if (message.name !== undefined) assertString(message.name, `${path}.name`, true);
   assertMetadata(message.metadata, `${path}.metadata`);
 }
 
@@ -562,6 +698,13 @@ export function validateProviderStreamEvent(event: ProviderStreamEvent): void {
       assertOptionalFiniteNumber(event.error.statusCode, "stream.error.statusCode");
       if (event.requestId !== undefined && event.requestId.trim().length === 0) {
         throw new TypeError("stream.error.requestId must be non-empty");
+      }
+      break;
+    case "tool-result":
+      assertString(event.toolCallId, "stream.tool-result.toolCallId", true);
+      assertContent(event.content, "stream.tool-result.content");
+      if (event.isError !== undefined && typeof event.isError !== "boolean") {
+        throw new TypeError("stream.tool-result.isError must be a boolean");
       }
       break;
     default:

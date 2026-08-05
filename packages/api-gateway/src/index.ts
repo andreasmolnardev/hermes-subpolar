@@ -264,6 +264,20 @@ function validateProviderContent(value: unknown, path: string): void {
       }
       continue;
     }
+    if (part.type === "image" || part.type === "image_url" || part.type === "audio" || part.type === "file") {
+      if (part.type === "image_url") {
+        const imageUrl = part.imageUrl;
+        if ((typeof imageUrl !== "string" &&
+          (typeof imageUrl !== "object" || imageUrl === null ||
+            typeof (imageUrl as { readonly url?: unknown }).url !== "string")) ||
+          (typeof imageUrl === "string" && imageUrl.length === 0)) {
+          throw new TypeError(`${partPath}.imageUrl is malformed`);
+        }
+      } else if (typeof part.url !== "string" || part.url.length === 0) {
+        throw new TypeError(`${partPath}.url must be non-empty`);
+      }
+      continue;
+    }
     if (part.type === "tool-result") {
       if (typeof part.toolCallId !== "string" || part.toolCallId.length === 0 ||
         (part.isError !== undefined && typeof part.isError !== "boolean")) {

@@ -168,6 +168,72 @@ test("OpenAI-compatible adapter serializes provider requests and normalizes tool
   assert.deepEqual(result.identity, { requestId: "request-1", attempt: 2, parentRequestId: "parent-1" });
 });
 
+test("OpenAI-compatible adapter serializes injected multimodal data without fetching it", async () => {
+  const { provider, recorded } = providerWith({
+    body: {
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }]
+    }
+  });
+  const requestWithMedia: ProviderRequest = {
+    model: "fixture-model",
+    requestId: "media-request",
+    cacheHints: { key: "stable", read: true, write: true },
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "Describe these in order." },
+        { type: "image", url: "https://cdn.example/image.png", mimeType: "image/png" },
+        { type: "audio", url: "data:audio/wav;base64,QUJD", mimeType: "audio/wav" },
+        { type: "file", url: "data:application/pdf;base64,REVG", name: "notes.pdf" }
+      ]
+    }],
+    tools: []
+  };
+
+  await provider.complete(requestWithMedia);
+  await provider.complete(requestWithMedia);
+
+  assert.equal(recorded.calls.length, 2);
+  const firstBody = String(recorded.calls[0]?.init?.body);
+  const secondBody = String(recorded.calls[1]?.init?.body);
+  assert.equal(firstBody, secondBody);
+  assert.deepEqual(JSON.parse(firstBody).messages, [{
+    role: "user",
+    content: [
+      { type: "text", text: "Describe these in order." },
+      { type: "image_url", image_url: { url: "https://cdn.example/image.png" } },
+      { type: "input_audio", input_audio: { data: "QUJD", format: "wav" } },
+      { type: "file", file: { file_data: "data:application/pdf;base64,REVG", filename: "notes.pdf" } }
+    ]
+  }]);
+});
+
+test("OpenAI-compatible adapter rejects malformed media before fetch", async () => {
+  const { provider, recorded } = providerWith({
+    body: { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "unused" } }] }
+  });
+
+  await assert.rejects(
+    provider.complete({
+      model: "fixture-model",
+      messages: [{ role: "user", content: [{ type: "audio", url: "https://cdn.example/speech.wav" }] }],
+      tools: []
+    } as ProviderRequest),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request"
+  );
+  assert.equal(recorded.calls.length, 0);
+
+  await assert.rejects(
+    provider.complete({
+      model: "fixture-model",
+      messages: [{ role: "user", content: [{ type: "image", url: "file:///etc/passwd" }] }],
+      tools: []
+    } as ProviderRequest),
+    (error: Error) => error instanceof TypeError && error.message.includes("http(s) or data URL")
+  );
+  assert.equal(recorded.calls.length, 0);
+});
+
 test("OpenAI-compatible adapter validates malformed responses without leaking payloads", async () => {
   const { provider } = providerWith({
     body: { choices: [{ message: { role: "assistant", content: "bad" } }] }

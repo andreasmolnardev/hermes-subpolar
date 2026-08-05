@@ -52,6 +52,46 @@ test("provider interface supports text and typed content parts", async () => {
   assert.equal(result.finishReason, "stop");
 });
 
+test("recorded responses preserve multimodal content, roles, and part order", async () => {
+  const messages: readonly ProviderMessage[] = [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "before" },
+        { type: "image", url: "https://cdn.example/image.png" },
+        { type: "audio", url: "data:audio/wav;base64,QUJD" },
+        { type: "file", url: "data:application/pdf;base64,REVG", name: "note.pdf" },
+        { type: "text", text: "after" }
+      ]
+    }
+  ];
+  const provider = createRecordedResponseProvider({
+    events: [{ type: "finish", finishReason: "stop" }]
+  });
+
+  await provider.complete({ model: "recorded", messages, tools: [] });
+  assert.deepEqual(provider.requests[0]?.messages, messages);
+});
+
+test("provider validation rejects malformed and unsafe content", () => {
+  assert.throws(() => validateProviderRequest({
+    model: "fake",
+    messages: [{
+      role: "user",
+      content: [{ type: "image", url: "javascript:alert(1)" }]
+    }],
+    tools: []
+  } as ProviderRequest), /http\(s\) or data URL/);
+  assert.throws(() => validateProviderRequest({
+    model: "fake",
+    messages: [{
+      role: "user",
+      content: [{ type: "video", url: "https://cdn.example/video.mp4" }]
+    } as never],
+    tools: []
+  }), /type is unsupported/);
+});
+
 test("complete preserves tool-call IDs, reasoning, metadata, and detailed usage", async () => {
   const provider: ChatProvider = {
     async complete(request) {

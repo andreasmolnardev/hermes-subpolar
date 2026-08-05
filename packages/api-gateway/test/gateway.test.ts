@@ -627,9 +627,10 @@ test("harness runtime passes provider request and result fidelity through the ga
   assert.deepEqual(result, providerResult);
 });
 
-test("gateway rejects provider-unsupported content before calling the provider", async () => {
+test("gateway forwards supported multimodal content without flattening it", async () => {
   let calls = 0;
-  await assert.rejects(() => executeRequest({
+  let seen: ProviderRequest | undefined;
+  await executeRequest({
     model: "fake",
     runtime: "harness",
     messages: [{
@@ -638,12 +639,14 @@ test("gateway rejects provider-unsupported content before calling the provider",
     } as never],
     toolPolicies: []
   }, {
-    async complete() {
+    async complete(request) {
       calls += 1;
+      seen = request;
       return completion;
     }
-  }), /unsupported by the provider interface/);
-  assert.equal(calls, 0);
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(seen?.messages[0]?.content, [{ type: "image", url: "https://example.test/image.png" }]);
 });
 
 test("gateway increments provider identity attempts across harness retries", async () => {

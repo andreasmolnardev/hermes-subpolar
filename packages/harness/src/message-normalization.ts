@@ -270,6 +270,48 @@ function normalizedContent(
       if (typeof candidate.text !== "string") throw new TypeError(`${partPath}.text must be a string`);
       return { type: candidate.type, text: sanitizeString(candidate.text) };
     }
+    if (candidate.type === "image" || candidate.type === "audio" || candidate.type === "file") {
+      if (typeof candidate.url !== "string" || candidate.url.trim().length === 0) {
+        throw new TypeError(`${partPath}.url must be a non-empty string`);
+      }
+      if (candidate.mimeType !== undefined && typeof candidate.mimeType !== "string") {
+        throw new TypeError(`${partPath}.mimeType must be a string`);
+      }
+      if (candidate.type === "image" && candidate.alt !== undefined && typeof candidate.alt !== "string") {
+        throw new TypeError(`${partPath}.alt must be a string`);
+      }
+      if (candidate.type === "file" && candidate.name !== undefined && typeof candidate.name !== "string") {
+        throw new TypeError(`${partPath}.name must be a string`);
+      }
+      return {
+        type: candidate.type,
+        url: sanitizeString(candidate.url),
+        ...(candidate.mimeType === undefined ? {} : { mimeType: sanitizeString(candidate.mimeType as string) }),
+        ...(candidate.alt === undefined ? {} : { alt: sanitizeString(candidate.alt as string) }),
+        ...(candidate.name === undefined ? {} : { name: sanitizeString(candidate.name as string) })
+      } as ProviderContentPart;
+    }
+    if (candidate.type === "image_url") {
+      const imageUrl = candidate.imageUrl;
+      if (typeof imageUrl === "string") {
+        if (imageUrl.trim().length === 0) throw new TypeError(`${partPath}.imageUrl must be non-empty`);
+        return { type: "image_url", imageUrl: sanitizeString(imageUrl) };
+      }
+      if (typeof imageUrl !== "object" || imageUrl === null || Array.isArray(imageUrl) ||
+          typeof (imageUrl as Record<string, unknown>).url !== "string" ||
+          ((imageUrl as Record<string, unknown>).detail !== undefined &&
+            !["auto", "low", "high"].includes(String((imageUrl as Record<string, unknown>).detail)))) {
+        throw new TypeError(`${partPath}.imageUrl is malformed`);
+      }
+      const imageRecord = imageUrl as Record<string, unknown>;
+      return {
+        type: "image_url",
+        imageUrl: {
+          url: sanitizeString(imageRecord.url as string),
+          ...(imageRecord.detail === undefined ? {} : { detail: imageRecord.detail as "auto" | "low" | "high" })
+        }
+      };
+    }
     if (candidate.type === "tool-call") {
       const call = normalizedCall(candidate, partPath, callIndex.value++);
       calls.push(call);

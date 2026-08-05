@@ -104,6 +104,14 @@ export function isProviderContent(value: unknown): value is ProviderContent {
       return typeof candidate.id === "string" && typeof candidate.name === "string" &&
         typeof candidate.arguments === "string";
     }
+    if (candidate.type === "image" || candidate.type === "audio" || candidate.type === "file") {
+      return typeof candidate.url === "string" && candidate.url.length > 0;
+    }
+    if (candidate.type === "image_url") {
+      return typeof candidate.imageUrl === "string" ||
+        (typeof candidate.imageUrl === "object" && candidate.imageUrl !== null &&
+          typeof (candidate.imageUrl as Record<string, unknown>).url === "string");
+    }
     if (candidate.type === "tool-result") {
       return typeof candidate.toolCallId === "string" &&
         isProviderContent(candidate.content) &&
@@ -118,7 +126,8 @@ export function contentText(content: ProviderContent): string {
   return content.map((part: ProviderContentPart) => {
     if (part.type === "text" || part.type === "reasoning") return part.text;
     if (part.type === "tool-call") return `${part.name}(${part.arguments})`;
-    return contentText(part.content);
+    if (part.type === "tool-result") return contentText(part.content);
+    return "";
   }).join("");
 }
 

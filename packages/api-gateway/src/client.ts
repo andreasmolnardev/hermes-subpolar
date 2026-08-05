@@ -193,7 +193,8 @@ function transportContent(value: HarnessToolResult["content"]): string {
   return value.map(part => {
     if (part.type === "text" || part.type === "reasoning") return part.text;
     if (part.type === "tool-call") return part.arguments;
-    return transportContent(part.content);
+    if (part.type === "tool-result") return transportContent(part.content);
+    return "";
   }).join("");
 }
 

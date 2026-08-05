@@ -9,6 +9,10 @@ import {
   type ChatProvider,
   type ProviderContent,
   type ProviderContentPart,
+  type ProviderAudioPart,
+  type ProviderFilePart,
+  type ProviderImagePart,
+  type ProviderImageUrlPart,
   type ProviderMessage,
   type ProviderRequest,
   type ProviderResult,
@@ -79,6 +83,9 @@ function contentText(content: ProviderContent): string {
   return content.map((part) => {
     if (part.type === "text") return part.text;
     if (part.type === "tool-result") return contentText(part.content);
+    if (part.type === "image" || part.type === "image_url" || part.type === "audio" || part.type === "file") {
+      throw new TypeError(`OpenAI-compatible adapter cannot flatten ${part.type} content`);
+    }
     return "";
   }).join("");
 }
@@ -109,11 +116,76 @@ function serializeToolCall(call: ProviderToolCall): ReadonlyJsonRecord {
   };
 }
 
+function dataUrl(value: string): { readonly mimeType: string; readonly data: string } {
+  const match = /^data:([^;,\s]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (match === null) throw new TypeError("OpenAI-compatible audio content requires a base64 data URL");
+  return { mimeType: match[1] as string, data: match[2] as string };
+}
+
+function audioFormat(part: ProviderAudioPart): "wav" | "mp3" {
+  const source = dataUrl(part.url);
+  const mimeType = (part.mimeType ?? source.mimeType).toLowerCase();
+  if (mimeType === "audio/wav" || mimeType === "audio/x-wav" || mimeType === "audio/wave") return "wav";
+  if (mimeType === "audio/mp3" || mimeType === "audio/mpeg") return "mp3";
+  throw new TypeError("OpenAI-compatible audio content must be wav or mp3");
+}
+
+function serializeImage(part: ProviderImagePart | ProviderImageUrlPart): ReadonlyJsonRecord {
+  if (part.type === "image") return { type: "image_url", image_url: { url: part.url } };
+  return {
+    type: "image_url",
+    image_url: typeof part.imageUrl === "string"
+      ? { url: part.imageUrl }
+      : { url: part.imageUrl.url, ...(part.imageUrl.detail === undefined ? {} : { detail: part.imageUrl.detail }) }
+  };
+}
+
+function serializeAudio(part: ProviderAudioPart): ReadonlyJsonRecord {
+  const source = dataUrl(part.url);
+  return {
+    type: "input_audio",
+    input_audio: { data: source.data, format: audioFormat(part) }
+  };
+}
+
+function serializeFile(part: ProviderFilePart): ReadonlyJsonRecord {
+  return {
+    type: "file",
+    file: {
+      file_data: part.url,
+      ...(part.name === undefined ? {} : { filename: part.name })
+    }
+  };
+}
+
+function hasMediaPart(content: readonly ProviderContentPart[]): boolean {
+  return content.some((part) => part.type === "image" || part.type === "image_url" ||
+    part.type === "audio" || part.type === "file");
+}
+
+function serializeContentParts(content: readonly ProviderContentPart[]): readonly ReadonlyJsonRecord[] {
+  return content.map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "image" || part.type === "image_url") return serializeImage(part);
+    if (part.type === "audio") return serializeAudio(part);
+    if (part.type === "file") return serializeFile(part);
+    throw new TypeError(`OpenAI-compatible multimodal content cannot contain ${part.type}`);
+  });
+}
+
 function serializeMessage(message: ProviderMessage): ReadonlyJsonRecord {
   const calls = messageToolCalls(message);
+  const media = typeof message.content === "string" ? false : hasMediaPart(message.content);
+  if (media && message.role !== "user") {
+    throw new TypeError("OpenAI-compatible multimodal content is supported only for user messages");
+  }
   const serialized: JsonRecord = {
     role: message.role,
-    content: contentText(message.content)
+    content: typeof message.content === "string"
+      ? message.content
+      : media
+        ? serializeContentParts(message.content)
+        : contentText(message.content)
   };
   if (message.role === "assistant" && calls.length > 0) {
     serialized.content = contentText(message.content) || null;
@@ -315,6 +387,17 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
       if (options.credentials.project !== undefined) headers["OpenAI-Project"] = options.credentials.project;
       if (requestId !== undefined) headers["X-Request-ID"] = requestId;
 
+      let body: string;
+      try {
+        body = JSON.stringify(serializeRequest(request));
+      } catch (error) {
+        throw requestError(
+          "Invalid OpenAI-compatible request content",
+          "invalid_request",
+          requestId
+        );
+      }
+
       try {
         if (context.signal.aborted) throw abortRequestError(context);
         let response: Response;
@@ -322,7 +405,7 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
           response = await options.fetch(endpointFor(options.baseUrl), {
             method: "POST",
             headers,
-            body: JSON.stringify(serializeRequest(request)),
+            body,
             signal: context.signal
           });
         } catch (error) {

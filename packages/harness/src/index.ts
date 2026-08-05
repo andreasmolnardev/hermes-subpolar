@@ -34,6 +34,13 @@ import {
   type HarnessProviderFailureCategory,
   type HarnessRetryPolicy
 } from "./retry-policy";
+import {
+  boundToolResult,
+  contentText,
+  enforceToolTurnBudget,
+  DEFAULT_TOOL_PREVIEW_BYTES,
+  type ToolOutputResult
+} from "./tool-output";
 
 export {
   MAX_RETRY_ATTEMPTS,
@@ -51,6 +58,16 @@ export type {
   ProviderAttemptIdentity,
   RetryClassificationOptions
 } from "./retry-policy";
+export {
+  boundToolResult,
+  DEFAULT_TOOL_PREVIEW_BYTES,
+  enforceToolTurnBudget,
+  generatePreview,
+  truncateTerminalOutput,
+  truncateUtf8,
+  utf8Bytes
+} from "./tool-output";
+export type { ToolOutputResult, Utf8Truncation } from "./tool-output";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -97,11 +114,7 @@ export type HarnessToolExecution = {
   readonly signal: AbortSignal;
 };
 
-export type HarnessToolResult = {
-  readonly content: ProviderContent;
-  readonly isError?: boolean;
-  readonly truncated?: boolean;
-};
+export type HarnessToolResult = ToolOutputResult;
 
 export type HarnessToolExecutor = (
   execution: HarnessToolExecution
@@ -261,6 +274,10 @@ export type HarnessSessionRepository = {
 export type HarnessToolOutputLimits = {
   /** Maximum UTF-8 bytes retained for one tool result. */
   readonly maxBytes?: number;
+  /** Optional maximum UTF-8 bytes retained across one assistant tool turn. */
+  readonly maxTurnBytes?: number;
+  /** Maximum UTF-8 bytes used for structured-result fallback previews. */
+  readonly previewBytes?: number;
 };
 
 export type HarnessMessageLoader = (
@@ -373,45 +390,6 @@ function parseArguments(value: string): HarnessJsonObject | undefined {
   }
 }
 
-function utf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
-  if (utf8Bytes(value) <= maxBytes) return { value, truncated: false };
-  let result = "";
-  let bytes = 0;
-  for (const character of value) {
-    const characterBytes = utf8Bytes(character);
-    if (bytes + characterBytes > maxBytes) break;
-    result += character;
-    bytes += characterBytes;
-  }
-  return { value: result, truncated: true };
-}
-
-function isProviderContent(value: unknown): value is ProviderContent {
-  if (typeof value === "string") return true;
-  if (!Array.isArray(value)) return false;
-  return value.every((part: unknown) => {
-    if (typeof part !== "object" || part === null || Array.isArray(part)) return false;
-    const candidate = part as Record<string, unknown>;
-    if (candidate.type === "text" || candidate.type === "reasoning") {
-      return typeof candidate.text === "string";
-    }
-    if (candidate.type === "tool-call") {
-      return typeof candidate.id === "string" && typeof candidate.name === "string" &&
-        typeof candidate.arguments === "string";
-    }
-    if (candidate.type === "tool-result") {
-      return typeof candidate.toolCallId === "string" &&
-        isProviderContent(candidate.content) &&
-        (candidate.isError === undefined || typeof candidate.isError === "boolean");
-    }
-    return false;
-  });
-}
-
 function validateHarnessStreamUsage(usage: ProviderUsageInput): void {
   if ((usage.inputTokens !== undefined && !Number.isFinite(usage.inputTokens)) ||
       (usage.outputTokens !== undefined && !Number.isFinite(usage.outputTokens)) ||
@@ -426,50 +404,6 @@ function validateHarnessStreamEvent(event: ProviderStreamEvent): void {
   } else if (event.type === "finish" && event.usage !== undefined) {
     validateHarnessStreamUsage(event.usage);
   }
-}
-
-function contentText(content: ProviderContent): string {
-  if (typeof content === "string") return content;
-  return content.map((part: ProviderContentPart) => {
-    if (part.type === "text" || part.type === "reasoning") return part.text;
-    if (part.type === "tool-call") return `${part.name}(${part.arguments})`;
-    return contentText(part.content);
-  }).join("");
-}
-
-function boundedToolResult(value: unknown, maxBytes: number): HarnessToolResult {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError("Tool returned an invalid result");
-  }
-  const candidate = value as { readonly content?: unknown; readonly isError?: unknown };
-  if (!isProviderContent(candidate.content) ||
-      (candidate.isError !== undefined && typeof candidate.isError !== "boolean")) {
-    throw new TypeError("Tool returned an invalid result");
-  }
-
-  if (typeof candidate.content === "string") {
-    const bounded = truncateUtf8(candidate.content, maxBytes);
-    return {
-      content: bounded.value,
-      ...(candidate.isError === undefined ? {} : { isError: candidate.isError }),
-      ...(bounded.truncated ? { truncated: true } : {})
-    };
-  }
-
-  const serialized = JSON.stringify(candidate.content);
-  if (serialized !== undefined && utf8Bytes(serialized) <= maxBytes) {
-    return {
-      content: candidate.content,
-      ...(candidate.isError === undefined ? {} : { isError: candidate.isError })
-    };
-  }
-
-  const bounded = truncateUtf8(contentText(candidate.content), maxBytes);
-  return {
-    content: bounded.value,
-    ...(candidate.isError === undefined ? {} : { isError: candidate.isError }),
-    truncated: true
-  };
 }
 
 function timeoutError(): Error {
@@ -1169,6 +1103,15 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       const maxBytes = Number.isFinite(maxBytesCandidate) && maxBytesCandidate >= 0
         ? Math.floor(maxBytesCandidate)
         : 64 * 1024;
+      const previewBytesCandidate = request.toolOutputLimits?.previewBytes ?? DEFAULT_TOOL_PREVIEW_BYTES;
+      const previewBytes = Number.isFinite(previewBytesCandidate) && previewBytesCandidate >= 0
+        ? Math.floor(previewBytesCandidate)
+        : DEFAULT_TOOL_PREVIEW_BYTES;
+      const maxTurnBytesCandidate = request.toolOutputLimits?.maxTurnBytes;
+      const maxTurnBytes = maxTurnBytesCandidate !== undefined &&
+        Number.isFinite(maxTurnBytesCandidate) && maxTurnBytesCandidate >= 0
+        ? Math.floor(maxTurnBytesCandidate)
+        : undefined;
       const concurrencyCandidate = request.toolConcurrency ?? 1;
       const concurrency = Number.isFinite(concurrencyCandidate) && concurrencyCandidate > 0
         ? Math.max(1, Math.floor(concurrencyCandidate))
@@ -1207,7 +1150,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             controller.signal,
             request.toolTimeoutMs
           );
-          const result = boundedToolResult(raw, maxBytes);
+          const result = boundToolResult(raw, maxBytes, previewBytes);
           if (!(await checkpointTool(
             task,
             "tool-completed",
@@ -1244,26 +1187,35 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
       await Promise.all(
         Array.from({ length: Math.min(concurrency, pendingTools.length) }, () => worker())
       );
+      const successfulRoundResults = toolResultsForRound.flatMap(entry =>
+        "error" in entry ? [] : [entry.result]
+      );
+      const aggregateRoundResults = maxTurnBytes === undefined
+        ? successfulRoundResults
+        : enforceToolTurnBudget(successfulRoundResults, maxTurnBytes);
+      let aggregateResultIndex = 0;
       const roundFailure = toolResultsForRound.find(entry => "error" in entry);
       for (const entry of toolResultsForRound) {
         if (entry === undefined || "error" in entry) continue;
         const { task, result } = entry;
-        toolResults.set(task.call.id, result);
-        toolResultsByCall.set(task.callKey, result);
+        const aggregateResult = aggregateRoundResults[aggregateResultIndex] ?? result;
+        aggregateResultIndex += 1;
+        toolResults.set(task.call.id, aggregateResult);
+        toolResultsByCall.set(task.callKey, aggregateResult);
         toolMessages.add(task.call.id);
         messages = [...messages, {
           role: "tool",
           toolCallId: task.call.id,
           name: task.call.name,
-          content: result.content
+          content: aggregateResult.content
         }];
         pendingMessages.push(persistedToolResult(
           task.call,
-          result,
+          aggregateResult,
           request.idGenerator("message"),
           new Date(request.clock.now()).toISOString()
         ));
-        await emit({ type: "tool.completed", requestId: request.requestId, sessionId: request.sessionId, callId: task.call.id, result });
+        await emit({ type: "tool.completed", requestId: request.requestId, sessionId: request.sessionId, callId: task.call.id, result: aggregateResult });
       }
       if (!(await commitPending())) {
         return terminal(persistenceFailureOutcome(persistenceFailure ?? new Error("Atomic turn persistence failed")));

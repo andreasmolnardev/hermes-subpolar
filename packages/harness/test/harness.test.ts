@@ -15,7 +15,14 @@ import {
   type HarnessProviderRequest,
   type HarnessProviderResult,
   type HarnessRequest,
-  type HarnessToolCheckpoint
+  type HarnessToolCheckpoint,
+  boundToolResult,
+  enforceToolTurnBudget,
+  generatePreview,
+  truncateTerminalOutput,
+  truncateUtf8,
+  utf8Bytes,
+  type ToolOutputResult
 } from "../src/index.ts";
 
 function response(message: HarnessMessage, inputTokens = 1, outputTokens = 1) {
@@ -942,6 +949,81 @@ test("oversized tool output is safely truncated before provider continuation", a
 
   assert.equal(result.outcome, "completed");
   assert.equal(observed, "😀");
+});
+
+test("tool output limits preserve small results and use newline-aware previews", () => {
+  const small: ToolOutputResult = { content: "small", isError: true, truncated: false };
+  assert.deepEqual(boundToolResult(small, 32), small);
+
+  const large = boundToolResult({ content: "first line\nsecond line\nthird line", isError: true }, 16);
+  assert.deepEqual(large, { content: "first line\n", isError: true, truncated: true });
+  assert.equal(utf8Bytes(large.content as string) <= 16, true);
+});
+
+test("tool output truncation never splits Unicode and previews retain a complete line", () => {
+  assert.deepEqual(truncateUtf8("A😀B", 2), { value: "A", truncated: true });
+  assert.deepEqual(truncateUtf8("A😀B", 5), { value: "A😀", truncated: true });
+  assert.deepEqual(generatePreview("😀\nsecond", 6), { value: "😀\n", truncated: true });
+});
+
+test("aggregate tool budget selects largest results first and keeps call order", () => {
+  const results: readonly ToolOutputResult[] = [
+    { content: "aaaa" },
+    { content: "bbbbbbbb", isError: true },
+    { content: "cccccc", truncated: true }
+  ];
+
+  const bounded = enforceToolTurnBudget(results, 14);
+  assert.deepEqual(bounded.map(result => result.content), ["aaaa", "bbbb", "cccccc"]);
+  assert.deepEqual(bounded.map(result => result.isError), [undefined, true, undefined]);
+  assert.equal(bounded[2]?.truncated, true);
+  assert.equal(utf8Bytes(bounded.map(result => String(result.content)).join("")), 14);
+});
+
+test("executeHarness applies the aggregate tool budget before continuation", async () => {
+  let providerCalls = 0;
+  let observed: readonly unknown[] = [];
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return response({
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "aggregate-a", name: "first", arguments: "{}" },
+            { id: "aggregate-b", name: "second", arguments: "{}" }
+          ]
+        });
+      }
+      observed = providerRequest.messages.slice(-2).map(message => message.content);
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    tools: [{ name: "first", policy: "allow" }, { name: "second", policy: "allow" }],
+    toolOutputLimits: { maxBytes: 100, maxTurnBytes: 10 },
+    toolExecutor: async execution => ({
+      content: execution.call.id === "aggregate-a" ? "aaaaa" : "bbbbbbbb"
+    })
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(observed, ["aaaaa", "bbbbb"]);
+});
+
+test("structured fallback and terminal truncation are deterministic and preserve errors", () => {
+  const structured = boundToolResult({
+    content: [{ type: "text", text: "alpha" }, { type: "reasoning", text: "beta" }],
+    isError: true,
+    truncated: true
+  }, 8, 5);
+  assert.deepEqual(structured, { content: "alpha", isError: true, truncated: true });
+
+  const terminal = truncateTerminalOutput(`HEAD${"x".repeat(200)}TAIL`, 120);
+  assert.equal(utf8Bytes(terminal.value) <= 120, true);
+  assert.equal(terminal.value.includes("HEAD"), true);
+  assert.equal(terminal.value.includes("TAIL"), true);
+  assert.deepEqual(terminal, truncateTerminalOutput(`HEAD${"x".repeat(200)}TAIL`, 120));
 });
 
 test("malformed tool result fails closed without continuation", async () => {

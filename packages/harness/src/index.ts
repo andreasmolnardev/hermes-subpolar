@@ -68,6 +68,24 @@ export {
   utf8Bytes
 } from "./tool-output";
 export type { ToolOutputResult, Utf8Truncation } from "./tool-output";
+export {
+  assembleHarnessContext,
+  createHarnessContextAssembler,
+  isHarnessUnsupportedContextSourceError,
+  HarnessUnsupportedContextSourceError,
+  HARNESS_PROMPT_SECTION_ORDER
+} from "./prompt-assembler";
+export type {
+  HarnessFallbackSignal,
+  HarnessPromptAssemblerOptions,
+  HarnessPromptBudget,
+  HarnessPromptCacheMarker,
+  HarnessPromptSection,
+  HarnessPromptSectionName,
+  HarnessPromptSource,
+  HarnessUnsupportedSourceKind,
+  HarnessPromptAssembly
+} from "./prompt-assembler";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -138,6 +156,7 @@ export type HarnessContext = {
   readonly requestId: string;
   readonly sessionId: string;
   readonly model: string;
+  readonly workspaceId?: string;
   readonly messages: readonly HarnessMessage[];
   readonly tools: readonly HarnessTool[];
   readonly signal: AbortSignal;
@@ -295,6 +314,7 @@ export type HarnessRequest = {
   readonly requestId: string;
   readonly sessionId: string;
   readonly model: string;
+  readonly workspaceId?: string;
   readonly messages: readonly HarnessMessage[];
   readonly tools: readonly HarnessTool[];
   readonly provider: HarnessProvider;
@@ -919,6 +939,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             requestId: request.requestId,
             sessionId: request.sessionId,
             model: request.model,
+            ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
             messages,
             tools: request.tools,
             signal: controller.signal

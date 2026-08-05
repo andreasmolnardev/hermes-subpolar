@@ -445,6 +445,163 @@ test("valid resumed histories preserve order and strip persistence-only result d
   assert.equal("toolResult" in (seen[0]?.[2] ?? {}), false);
 });
 
+test("normalization replaces lone surrogates without damaging Unicode pairs", async () => {
+  let observed: HarnessMessage[] | undefined;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      observed = [...providerRequest.messages];
+      return response({ role: "assistant", content: "ok" });
+    }
+  }, {
+    messages: [{
+      role: "user",
+      content: "bad\ud800 and good 😀",
+      metadata: { nested: ["also\udfff"] }
+    }]
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(observed?.[0]?.content, "bad� and good 😀");
+  assert.deepEqual(observed?.[0]?.metadata, { nested: ["also�"] });
+});
+
+test("missing tool-call IDs use stable content-derived IDs", async () => {
+  const ids: string[] = [];
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return response({
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "", name: "weather", arguments: '{"city":"Paris"}' }]
+        });
+      }
+      assert.equal(providerRequest.messages.at(-1)?.role, "tool");
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    tools: [{ name: "weather", policy: "allow" }],
+    toolExecutor: async execution => {
+      ids.push(execution.call.id);
+      return { content: "sunny" };
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(ids, ["call_0dd162a7f3ce"]);
+});
+
+test("duplicate call IDs are renamed and results follow their adjacent calls", async () => {
+  const messages: readonly HarnessMessage[] = [
+    { role: "user", content: "resume" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: "same", name: "first", arguments: "{}" },
+        { id: "same", name: "second", arguments: "{}" }
+      ]
+    },
+    { role: "tool", toolCallId: "same", content: "one" },
+    { role: "tool", toolCallId: "same", content: "two" }
+  ];
+  let observed: readonly HarnessMessage[] | undefined;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      observed = providerRequest.messages;
+      return response({ role: "assistant", content: "continued" });
+    }
+  }, { messages }));
+
+  assert.equal(result.outcome, "completed");
+  const assistant = observed?.find(message => message.role === "assistant");
+  assert.deepEqual(assistant?.toolCalls?.map(call => call.id), ["same", "same_d2"]);
+  assert.deepEqual(observed?.filter(message => message.role === "tool").map(message => message.toolCallId), ["same", "same_d2"]);
+  assert.deepEqual(messages[1]?.toolCalls?.map(call => call.id), ["same", "same"]);
+});
+
+test("tool results correlate against either provider call ID field", async () => {
+  let observed: readonly HarnessMessage[] | undefined;
+  const messages = [
+    { role: "user" as const, content: "resume" },
+    {
+      role: "assistant" as const,
+      content: "",
+      toolCalls: [{ id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}" }]
+    },
+    { role: "tool" as const, toolCallId: "fc_1", content: "found" }
+  ] as unknown as readonly HarnessMessage[];
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      observed = providerRequest.messages;
+      return response({ role: "assistant", content: "continued" });
+    }
+  }, { messages }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(observed?.[1]?.toolCalls?.[0]?.id, "call_1");
+  assert.equal(observed?.[2]?.toolCallId, "call_1");
+});
+
+test("safe argument repair handles trailing commas but leaves truncation fail-closed", async () => {
+  let executed = false;
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return providerCalls === 1
+        ? response({ role: "assistant", content: "", toolCalls: [{ id: "safe", name: "parse", arguments: '{"items":[1,2,],}' }] })
+        : response({ role: "assistant", content: "done" });
+    }
+  }, {
+    tools: [{ name: "parse", policy: "allow" }],
+    toolExecutor: async execution => {
+      executed = execution.arguments.items instanceof Array;
+      return { content: "ok" };
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(executed, true);
+
+  const unsupported = await executeHarness(request({
+    async complete() {
+      return response({ role: "assistant", content: "", toolCalls: [{ id: "unsafe", name: "parse", arguments: '{"items":[1,2' }] });
+    }
+  }, {
+    tools: [{ name: "parse", policy: "allow" }],
+    toolExecutor: async () => ({ content: "must not run" })
+  }));
+  assert.equal(unsupported.outcome, "tool_failure");
+});
+
+test("interrupted recovery closes a trailing tool result before replay", async () => {
+  let observed: readonly HarnessMessage[] | undefined;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      observed = providerRequest.messages;
+      return response({ role: "assistant", content: "continued" });
+    }
+  }, {
+    messages: [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: "", toolCalls: [{ id: "interrupted", name: "run", arguments: "{}" }] },
+      { role: "tool", toolCallId: "interrupted", content: "partial" }
+    ],
+    persistence: {
+      async recover() {
+        return { turnId: "request-1", status: "interrupted" as const, pendingToolCallIds: [] };
+      }
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(observed?.map(message => message.role), ["user", "assistant", "tool", "assistant"]);
+  assert.equal(observed?.at(-1)?.content, "Operation interrupted.");
+});
+
 test("multiple tool calls execute sequentially in provider order", async () => {
   const calls: string[] = [];
   let providerCalls = 0;

@@ -5,9 +5,9 @@ import type {
   ProviderFinishReason,
   ProviderJsonObject,
   ProviderJsonPrimitive,
-  ProviderJsonValue,
   ProviderMessage,
   ProviderMetadata,
+  ProviderJsonValue,
   ProviderModelOptions,
   ProviderRequest,
   ProviderResult,
@@ -17,7 +17,12 @@ import type {
   ProviderUsage,
   ProviderUsageInput
 } from "chat-provider-interface";
-import { isProviderJsonValue, normalizeProviderUsage } from "chat-provider-interface";
+import { normalizeProviderUsage } from "chat-provider-interface";
+import {
+  closeInterruptedToolSequence,
+  normalizeHarnessMessages,
+  normalizeProviderResult
+} from "./message-normalization";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -406,14 +411,10 @@ function thrownAsFailure(value: object): HarnessProviderFailure {
   };
 }
 
-function isJsonObject(value: HarnessJsonValue): value is HarnessJsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseArguments(value: string): HarnessJsonObject | undefined {
   try {
     const parsed = JSON.parse(value) as HarnessJsonValue;
-    return isJsonObject(parsed) ? parsed : undefined;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as HarnessJsonObject : undefined;
   } catch {
     return undefined;
   }
@@ -456,185 +457,6 @@ function isProviderContent(value: unknown): value is ProviderContent {
     }
     return false;
   });
-}
-
-function normalizedToolCall(value: unknown, path: string): HarnessToolCall {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError(`${path} must be a tool call`);
-  }
-  const candidate = value as Record<string, unknown>;
-  const rawArguments = candidate.arguments;
-  const argumentsValue = typeof rawArguments === "string"
-    ? rawArguments
-    : isProviderJsonValue(rawArguments as ProviderJsonValue) && isJsonObject(rawArguments as HarnessJsonValue)
-      ? JSON.stringify(rawArguments)
-      : undefined;
-  if (typeof candidate.id !== "string" || candidate.id.length === 0 ||
-      typeof candidate.name !== "string" || candidate.name.length === 0 ||
-      argumentsValue === undefined) {
-    throw new TypeError(`${path} is malformed`);
-  }
-  return { id: candidate.id, name: candidate.name, arguments: argumentsValue };
-}
-
-function normalizedProviderContent(value: unknown, path: string): ProviderContent {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) throw new TypeError(`${path} must be a string or content parts`);
-
-  return value.map((part, index): ProviderContentPart => {
-    const partPath = `${path}[${index}]`;
-    if (typeof part !== "object" || part === null || Array.isArray(part)) {
-      throw new TypeError(`${partPath} is malformed`);
-    }
-    const candidate = part as Record<string, unknown>;
-    if (candidate.type === "text" || candidate.type === "reasoning") {
-      if (typeof candidate.text !== "string") throw new TypeError(`${partPath}.text must be a string`);
-      return { type: candidate.type, text: candidate.text };
-    }
-    if (candidate.type === "tool-call") {
-      const call = normalizedToolCall(candidate, partPath);
-      return { type: "tool-call", ...call };
-    }
-    if (candidate.type === "tool-result") {
-      if (typeof candidate.toolCallId !== "string" || candidate.toolCallId.length === 0) {
-        throw new TypeError(`${partPath}.toolCallId must be non-empty`);
-      }
-      if (candidate.isError !== undefined && typeof candidate.isError !== "boolean") {
-        throw new TypeError(`${partPath}.isError must be a boolean`);
-      }
-      return {
-        type: "tool-result",
-        toolCallId: candidate.toolCallId,
-        content: normalizedProviderContent(candidate.content, `${partPath}.content`),
-        ...(candidate.isError === undefined ? {} : { isError: candidate.isError })
-      };
-    }
-    throw new TypeError(`${partPath}.type is unsupported`);
-  });
-}
-
-function sameToolCall(left: HarnessToolCall, right: HarnessToolCall): boolean {
-  return left.id === right.id && left.name === right.name && left.arguments === right.arguments;
-}
-
-function normalizedHarnessMessage(value: unknown, index: number): HarnessMessage {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError(`History message[${index}] is malformed`);
-  }
-  const candidate = value as Record<string, unknown>;
-  if (candidate.role !== "system" && candidate.role !== "user" &&
-      candidate.role !== "assistant" && candidate.role !== "tool") {
-    throw new TypeError(`History message[${index}] has an invalid role`);
-  }
-
-  const content = normalizedProviderContent(candidate.content, `History message[${index}].content`);
-  const contentCalls = Array.isArray(content)
-    ? content.filter((part): part is Extract<ProviderContentPart, { type: "tool-call" }> => part.type === "tool-call")
-      .map(part => ({ id: part.id, name: part.name, arguments: part.arguments }))
-    : [];
-  const declaredCalls = candidate.toolCalls === undefined
-    ? undefined
-    : Array.isArray(candidate.toolCalls)
-      ? candidate.toolCalls.map((call, callIndex) => normalizedToolCall(call, `History message[${index}].toolCalls[${callIndex}]`))
-      : (() => { throw new TypeError(`History message[${index}].toolCalls must be an array`); })();
-
-  if ((candidate.role !== "assistant" && declaredCalls !== undefined) ||
-      (candidate.role !== "tool" && candidate.toolCallId !== undefined)) {
-    throw new TypeError(`History message[${index}] has tool fields on a non-tool assistant message`);
-  }
-  if (candidate.role === "tool" &&
-      (typeof candidate.toolCallId !== "string" || candidate.toolCallId.length === 0)) {
-    throw new TypeError(`History message[${index}] toolCallId must be non-empty`);
-  }
-  if (candidate.role === "tool" && Array.isArray(content)) {
-    for (const part of content) {
-      if (part.type === "tool-result" && part.toolCallId !== candidate.toolCallId) {
-        throw new TypeError(`History message[${index}] tool-result does not match toolCallId`);
-      }
-    }
-  }
-
-  const toolCalls = contentCalls.length === 0
-    ? declaredCalls
-    : declaredCalls === undefined
-      ? contentCalls
-      : declaredCalls.length === contentCalls.length && declaredCalls.every((call, callIndex) => {
-        const contentCall = contentCalls[callIndex];
-        return contentCall !== undefined && sameToolCall(call, contentCall);
-      })
-        ? declaredCalls
-        : (() => { throw new TypeError(`History message[${index}] tool-call parts do not match toolCalls`); })();
-
-  const persistedResult = candidate.toolResult;
-  if (persistedResult !== undefined) {
-    if (typeof persistedResult !== "object" || persistedResult === null || Array.isArray(persistedResult)) {
-      throw new TypeError(`History message[${index}].toolResult is malformed`);
-    }
-    const result = persistedResult as Record<string, unknown>;
-    if (typeof result.toolCallId !== "string" || result.toolCallId.length === 0 ||
-        result.toolCallId !== candidate.toolCallId ||
-        !isProviderContent(result.content) || typeof result.isError !== "boolean") {
-      throw new TypeError(`History message[${index}].toolResult is inconsistent`);
-    }
-    normalizedProviderContent(result.content, `History message[${index}].toolResult.content`);
-  }
-
-  return {
-    role: candidate.role,
-    content,
-    ...(candidate.reasoning === undefined ? {} : { reasoning: typeof candidate.reasoning === "string" ? candidate.reasoning : (() => { throw new TypeError(`History message[${index}].reasoning must be a string`); })() }),
-    ...(toolCalls === undefined ? {} : { toolCalls }),
-    ...(candidate.toolCallId === undefined ? {} : { toolCallId: candidate.toolCallId as string }),
-    ...(candidate.name === undefined ? {} : { name: typeof candidate.name === "string" ? candidate.name : (() => { throw new TypeError(`History message[${index}].name must be a string`); })() }),
-    ...(candidate.metadata === undefined ? {} : { metadata: candidate.metadata as ProviderMetadata })
-  };
-}
-
-function normalizeHarnessMessages(values: readonly HarnessMessage[]): readonly HarnessMessage[] {
-  const messages = values.map((message, index) => normalizedHarnessMessage(message, index));
-  const callIds = new Set<string>();
-  let pending: Map<string, HarnessToolCall> | undefined;
-
-  for (const [index, message] of messages.entries()) {
-    if (message.role === "tool") {
-      if (pending === undefined) throw new TypeError(`History message[${index}] has an orphan tool result`);
-      const call = pending.get(message.toolCallId ?? "");
-      if (call === undefined) {
-        throw new TypeError(`History message[${index}] does not match a pending tool call`);
-      }
-      pending.delete(message.toolCallId ?? "");
-      if (pending.size === 0) pending = undefined;
-      continue;
-    }
-
-    if (pending !== undefined) {
-      throw new TypeError(`History message[${index}] breaks tool result adjacency`);
-    }
-    if (message.toolCalls !== undefined && message.toolCalls.length > 0) {
-      const next = new Map<string, HarnessToolCall>();
-      for (const call of message.toolCalls) {
-        if (callIds.has(call.id) || next.has(call.id)) {
-          throw new TypeError(`History contains duplicate tool call ID: ${call.id}`);
-        }
-        callIds.add(call.id);
-        next.set(call.id, call);
-      }
-      pending = next;
-    }
-  }
-  if (pending !== undefined) throw new TypeError("History ends with unresolved tool calls");
-  return messages;
-}
-
-function normalizeProviderResult(result: ProviderResult, index: number): ProviderResult {
-  const message = normalizedHarnessMessage(result.message, index);
-  if (message.role !== "assistant") throw new TypeError("Provider result message must have assistant role");
-  const ids = new Set<string>();
-  for (const call of message.toolCalls ?? []) {
-    if (ids.has(call.id)) throw new TypeError(`Provider result contains duplicate tool call ID: ${call.id}`);
-    ids.add(call.id);
-  }
-  return { ...result, message };
 }
 
 function validateHarnessStreamUsage(usage: ProviderUsageInput): void {
@@ -967,6 +789,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   let persistenceFailure: Error | undefined;
   let pendingMessages: HarnessPersistedMessageDraft[] = [];
   let pendingUsage: HarnessPersistedUsage[] = [];
+  let messages: readonly HarnessMessage[] = request.messages;
   let nextSequence = 0;
   const commitPending = async (): Promise<boolean> => {
     const repository = request.sessionRepository ?? atomicRepository(request.persistence);
@@ -1053,6 +876,9 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
   };
   const terminal = async (outcome: HarnessOutcome): Promise<HarnessOutcome> => {
     let finalOutcome = outcome;
+    if (finalOutcome.outcome === "cancelled") {
+      messages = closeInterruptedToolSequence(messages);
+    }
     if (persistenceFailure !== undefined) {
       finalOutcome = persistenceFailureOutcome(persistenceFailure);
     } else if (!(await commitPending())) {
@@ -1091,7 +917,6 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     return terminal(stop ?? cancellationError());
   }
 
-  let messages = request.messages;
   let recovery: HarnessRecoveryMetadata | undefined;
   const repositoryLoader = request.sessionRepository?.listMessages !== undefined
     ? (sessionId: string) => request.sessionRepository!.listMessages!(sessionId)
@@ -1131,6 +956,9 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     } catch (error) {
       request.logger?.warn?.(`Harness turn recovery failed: ${errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))}`);
     }
+  }
+  if (recovery?.status === "interrupted") {
+    messages = closeInterruptedToolSequence(messages);
   }
   try {
     messages = normalizeHarnessMessages(messages);
@@ -1230,7 +1058,12 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
             ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
             requestId: request.requestId
           }), controller.signal);
-          providerResult = normalizeProviderResult(rawProviderResult, messages.length);
+          const existingCallIds = new Set(
+            messages.flatMap(message => message.role === "assistant"
+              ? (message.toolCalls ?? []).map(call => call.id.split("|", 1)[0] ?? call.id)
+              : [])
+          );
+          providerResult = normalizeProviderResult(rawProviderResult, messages.length, existingCallIds);
           totalTokens += providerResult.usage.totalTokens ?? providerResult.usage.inputTokens + providerResult.usage.outputTokens;
           const assistantId = request.idGenerator("message");
           pendingMessages.push(persistedAssistant(

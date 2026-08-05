@@ -28,7 +28,6 @@ def test_dockerfile_does_not_chown_install_trees_to_hermes() -> None:
     text = _dockerfile_text()
     forbidden_patterns = (
         r"chown\s+-R\s+hermes:hermes\s+/opt/hermes/\.venv",
-        r"chown\s+-R\s+hermes:hermes\s+/opt/hermes/ui-tui",
         r"chown\s+-R\s+hermes:hermes\s+/opt/hermes/gateway",
         r"chown\s+-R\s+hermes:hermes\s+/opt/hermes/node_modules",
     )

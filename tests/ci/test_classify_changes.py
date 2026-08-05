@@ -57,12 +57,10 @@ CASES = {
     "python source → python": (["run_agent.py"], _lanes(python=True, scan=True)),
     "dep manifest → python": (["pyproject.toml"], _lanes(python=True, scan=True, deps=True)),
     "uv.lock → python": (["uv.lock"], _lanes(python=True)),
-    "ts package → frontend": (["apps/desktop/src/app.tsx"], _lanes(frontend=True)),
-    "ui-tui → frontend": (["ui-tui/src/entry.ts"], _lanes(frontend=True)),
+    "ts package → frontend": (["packages/web-ui/src/app.tsx"], _lanes(frontend=True)),
+    "shared package → frontend": (["packages/shared/src/index.ts"], _lanes(frontend=True)),
     # Lockfile bump shifts every TS package's tree, but not the Python suite.
     "root lockfile → frontend, not python": (["package-lock.json"], _lanes(frontend=True, npm_lock=True)),
-    "nested lockfile → npm_lock": (["website/package-lock.json"], _lanes(site=True, npm_lock=True)),
-    "website → site": (["website/docs/intro.md"], _lanes(site=True)),
     # SKILL.md reads like docs, but the skill-doc tests read skills/, so a
     # skill edit must still run Python.
     "skill md → python + site": (["skills/github/SKILL.md"], _lanes(python=True, site=True)),
@@ -70,7 +68,7 @@ CASES = {
     # Unknown top-level file keeps Python on rather than risk a silent skip.
     "unknown toplevel → python": (["Makefile"], _lanes(python=True)),
     "mixed docs+python → python": (["README.md", "agent/x.py"], _lanes(python=True, scan=True)),
-    "mixed docs+frontend → frontend": (["README.md", "apps/x.tsx"], _lanes(frontend=True)),
+    "mixed docs+frontend → frontend": (["README.md", "packages/web-ui/x.tsx"], _lanes(frontend=True)),
     # tests-only diffs: pytest lanes stay ON, product jobs (Desktop E2E,
     # Docker) gate on python_prod and skip.
     "tests-only → python without python_prod": (
@@ -100,23 +98,15 @@ CASES = {
     ),
     # CI-sensitive files require explicit review label.
     "eslint config → ci_review": (
-        ["apps/desktop/eslint.config.mjs"],
+        ["packages/web-ui/eslint.config.js"],
         _lanes(frontend=True, ci_review=True),
     ),
     "shared eslint config → ci_review": (
         ["eslint.config.shared.mjs"],
         _lanes(python=True, ci_review=True),
     ),
-    "ui-tui eslint config → ci_review": (
-        ["ui-tui/eslint.config.mjs"],
-        _lanes(frontend=True, ci_review=True),
-    ),
-    "web eslint config → ci_review": (
-        ["web/eslint.config.js"],
-        _lanes(frontend=True, ci_review=True),
-    ),
     "shared package eslint config → ci_review": (
-        ["apps/shared/eslint.config.mjs"],
+        ["packages/shared/eslint.config.mjs"],
         _lanes(frontend=True, ci_review=True),
     ),
     "prettier config → ci_review": (
@@ -131,9 +121,9 @@ CASES = {
         [".github/actions/retry/action.yml"],
         DEFAULT,
     ),
-    # Normal desktop source doesn't trigger ci_review.
-    "desktop src → no ci_review": (
-        ["apps/desktop/src/app.tsx"],
+    # Normal package source doesn't trigger ci_review.
+    "package src → no ci_review": (
+        ["packages/web-ui/src/app.tsx"],
         _lanes(frontend=True),
     ),
     # Fail open: CI-config / empty / blank diffs run everything.
@@ -151,11 +141,11 @@ def test_classify(files, expected):
 
 def test_ci_review_files_returns_only_sensitive_paths_sorted_and_unique():
     assert ci_review_files([
-        "apps/desktop/src/app.tsx",
+        "packages/web-ui/src/app.tsx",
         ".github/workflows/ci.yml",
-        "apps/desktop/eslint.config.mjs",
+        "packages/web-ui/eslint.config.js",
         ".github/workflows/ci.yml",
     ]) == [
         ".github/workflows/ci.yml",
-        "apps/desktop/eslint.config.mjs",
+        "packages/web-ui/eslint.config.js",
     ]

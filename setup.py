@@ -2,9 +2,9 @@
 setup.py — wheel/sdist build guard.
 
 pip/PyPI and Homebrew are no longer supported distribution methods for
-Hermes Agent (see website/docs/getting-started/platform-support.md). The
+Hermes Agent; Docker Compose is supported production deployment. The
 wheel would ship without bundled assets (locales, skills, optional-mcps,
-web_dist, tui_dist, plugin manifests) since those are resolved at runtime
+web_dist and plugin manifests) since those are resolved at runtime
 via environment-variable overrides or the source-checkout layout.
 
 This file overrides the ``bdist_wheel`` and ``sdist`` setuptools commands

@@ -15,6 +15,11 @@ export type TextContentPart = {
   text: string;
 };
 
+export type ReasoningContentPart = {
+  type: "reasoning";
+  text: string;
+};
+
 export type ImageContentPart = {
   type: "image";
   url: string;
@@ -40,12 +45,29 @@ export type AudioContentPart = {
   mimeType?: string;
 };
 
+export type ToolCallContentPart = {
+  type: "tool-call";
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+export type ToolResultContentPart = {
+  type: "tool-result";
+  toolCallId: string;
+  content: MessageContent;
+  isError?: boolean;
+};
+
 export type ContentPart =
   | TextContentPart
+  | ReasoningContentPart
   | ImageContentPart
   | ImageUrlContentPart
   | FileContentPart
-  | AudioContentPart;
+  | AudioContentPart
+  | ToolCallContentPart
+  | ToolResultContentPart;
 
 export type MessageContent = string | readonly ContentPart[];
 export type StructuredContent = MessageContent;
@@ -301,6 +323,7 @@ function isChatRole(value: unknown): value is ChatRole {
 function isContentPart(value: unknown): value is ContentPart {
   if (!isRecord(value) || typeof value.type !== "string") return false;
   if (value.type === "text") return typeof value.text === "string";
+  if (value.type === "reasoning") return typeof value.text === "string";
   if (value.type === "image" || value.type === "file") {
     return typeof value.url === "string" &&
       (value.mimeType === undefined || typeof value.mimeType === "string") &&
@@ -317,6 +340,16 @@ function isContentPart(value: unknown): value is ContentPart {
       (value.imageUrl.detail === undefined ||
         value.imageUrl.detail === "auto" || value.imageUrl.detail === "low" ||
         value.imageUrl.detail === "high");
+  }
+  if (value.type === "tool-call") {
+    return typeof value.id === "string" && value.id.length > 0 &&
+      typeof value.name === "string" && value.name.length > 0 &&
+      typeof value.arguments === "string";
+  }
+  if (value.type === "tool-result") {
+    return typeof value.toolCallId === "string" && value.toolCallId.length > 0 &&
+      isMessageContent(value.content) &&
+      (value.isError === undefined || typeof value.isError === "boolean");
   }
   return false;
 }

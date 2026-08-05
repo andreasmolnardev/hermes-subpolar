@@ -267,8 +267,8 @@ export type HarnessRecoveredToolCall = {
 export type HarnessRecoveryMetadata = {
   readonly turnId: string;
   readonly status: "running" | "interrupted" | "recoverable";
-  readonly startedAt?: string;
-  readonly updatedAt?: string;
+  readonly startedAt: string;
+  readonly updatedAt: string;
   readonly checkpointId?: string;
   readonly pendingToolCallIds?: readonly string[];
   readonly completedToolCallIds?: readonly string[];

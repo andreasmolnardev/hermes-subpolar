@@ -3,6 +3,7 @@ import { test } from "bun:test";
 
 import {
   clearPinnedRuntime,
+  createGateway,
   executeRequest,
   normalizeGatewayRequest
 } from "../src/index.ts";
@@ -184,4 +185,109 @@ test("unsupported harness descriptor retains explicit Python fallback without du
 
   assert.equal(calls, 1);
   assert.equal(result.message.content, "safe");
+});
+
+test("gateway instances reload runtime selection from a shared store", async () => {
+  const selections = new Map<string, "harness" | "python">();
+  const store = {
+    load: (sessionId: string) => selections.get(sessionId),
+    save: (sessionId: string, runtime: "harness" | "python") => selections.set(sessionId, runtime)
+  };
+  const firstGateway = createGateway({ runtimeSelectionStore: store });
+  const reloadedGateway = createGateway({ runtimeSelectionStore: store });
+  const requestShapes: boolean[] = [];
+  const provider = {
+    async complete(request: ProviderRequest) {
+      requestShapes.push(request.signal !== undefined);
+      return completion;
+    }
+  };
+
+  await firstGateway.executeRequest({
+    model: "fake",
+    sessionId: "shared-session",
+    runtime: "harness",
+    messages: [{ role: "user", content: "one" }],
+    toolPolicies: []
+  }, provider);
+  await reloadedGateway.executeRequest({
+    model: "fake",
+    sessionId: "shared-session",
+    runtime: "python",
+    messages: [{ role: "user", content: "two" }],
+    toolPolicies: []
+  }, provider);
+
+  assert.equal(selections.get("shared-session"), "harness");
+  assert.deepEqual(requestShapes, [true, true]);
+});
+
+test("runtime selection is immutable while a turn is executing", async () => {
+  const selections = new Map<string, "harness" | "python">();
+  const store = {
+    load: (sessionId: string) => selections.get(sessionId),
+    save: (sessionId: string, runtime: "harness" | "python") => selections.set(sessionId, runtime)
+  };
+  const gateway = createGateway({ runtimeSelectionStore: store });
+  let releaseProvider: (() => void) | undefined;
+  const provider = {
+    async complete(request: ProviderRequest) {
+      assert.equal(request.signal !== undefined, true);
+      await new Promise<void>(resolve => { releaseProvider = resolve; });
+      return completion;
+    }
+  };
+
+  const turn = gateway.executeRequest({
+    model: "fake",
+    sessionId: "immutable-session",
+    runtime: "harness",
+    messages: [{ role: "user", content: "one" }],
+    toolPolicies: []
+  }, provider);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await store.save("immutable-session", "python");
+  releaseProvider?.();
+  await turn;
+
+  assert.equal(selections.get("immutable-session"), "python");
+});
+
+test("injected gateway uses explicit fallback once when selected runtime is unsupported", async () => {
+  const selections = new Map<string, "harness" | "python">();
+  const store = {
+    load: (sessionId: string) => selections.get(sessionId),
+    save: (sessionId: string, runtime: "harness" | "python") => selections.set(sessionId, runtime)
+  };
+  const gateway = createGateway({ runtimeSelectionStore: store });
+  let calls = 0;
+  await gateway.executeRequest({
+    model: "fake",
+    sessionId: "injected-fallback-session",
+    runtime: "harness",
+    runtimeFallback: {
+      runtime: "python",
+      supports: () => true,
+      async execute(request, provider) {
+        calls += 1;
+        return await provider.complete({
+          model: request.model,
+          messages: request.messages.map(message => ({ role: message.role, content: message.content as string })),
+          tools: []
+        });
+      }
+    },
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: [{
+      name: "boolean-schema",
+      description: "legacy",
+      inputSchema: true,
+      source: "python",
+      executable: { reference: "python:boolean-schema" },
+      policy: "allow"
+    }]
+  }, { async complete() { return completion; } });
+
+  assert.equal(calls, 1);
+  assert.equal(selections.get("injected-fallback-session"), "python");
 });

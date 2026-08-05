@@ -129,16 +129,51 @@ export class GatewayRuntimeUnsupportedError extends Error {
   }
 }
 
-type PinnedRuntime = {
-  readonly runtime: GatewayRuntimeName;
-  readonly adapter: GatewayRuntimeAdapter;
+export type GatewayRuntimeSelectionStore = {
+  load(sessionId: string): GatewayRuntimeName | undefined | Promise<GatewayRuntimeName | undefined>;
+  save(sessionId: string, runtime: GatewayRuntimeName): void | Promise<void>;
+  clear?(sessionId?: string): void | Promise<void>;
 };
 
-const runtimePins = new Map<string, PinnedRuntime>();
+export type GatewayOptions = {
+  readonly runtimeSelectionStore?: GatewayRuntimeSelectionStore;
+  readonly runtimeAdapters?: Partial<Record<GatewayRuntimeName, GatewayRuntimeAdapter>>;
+};
+
+export type Gateway = {
+  executeRequest(request: GatewayExecutionRequest, provider: ChatProvider): Promise<HarnessResult>;
+  clearPinnedRuntime(sessionId?: string): Promise<void>;
+};
+
+class MemoryRuntimeSelectionStore implements GatewayRuntimeSelectionStore {
+  private readonly selections = new Map<string, GatewayRuntimeName>();
+
+  load(sessionId: string): GatewayRuntimeName | undefined {
+    return this.selections.get(sessionId);
+  }
+
+  save(sessionId: string, runtime: GatewayRuntimeName): void {
+    this.selections.set(sessionId, runtime);
+  }
+
+  clear(sessionId?: string): void {
+    if (sessionId === undefined) this.selections.clear();
+    else this.selections.delete(sessionId);
+  }
+}
+
+const legacyRuntimeSelectionStore = new MemoryRuntimeSelectionStore();
 let nextRequestId = 0;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateRuntimeName(value: unknown): GatewayRuntimeName {
+  if (value !== "harness" && value !== "python") {
+    throw new TypeError("Gateway runtime selection is invalid");
+  }
+  return value;
 }
 
 function isPolicy(value: unknown): value is ToolPolicy {
@@ -463,22 +498,41 @@ export const legacyPythonRuntimeAdapter: GatewayRuntimeAdapter = {
   }
 };
 
-function selectRuntime(
+async function selectRuntime(
   request: GatewayNormalizedRequest,
   selection: GatewayRuntimeSelection | undefined,
-  fallback: GatewayRuntimeAdapter | undefined
-): { adapter: GatewayRuntimeAdapter; fallback: GatewayRuntimeAdapter } {
+  fallback: GatewayRuntimeAdapter | undefined,
+  store: GatewayRuntimeSelectionStore,
+  adapters: Map<GatewayRuntimeName, GatewayRuntimeAdapter>
+): Promise<{
+  adapter: GatewayRuntimeAdapter;
+  fallback: GatewayRuntimeAdapter;
+  persistedRuntime: GatewayRuntimeName | undefined;
+}> {
   const selected = selection === undefined
     ? { runtime: "python" as const }
     : typeof selection === "string" ? { runtime: selection } : selection;
-  const pinned = runtimePins.get(request.sessionId);
-  const adapter = pinned?.adapter ?? selected.adapter ?? (selected.runtime === "harness"
-    ? harnessRuntimeAdapter
-    : legacyPythonRuntimeAdapter);
-  const selectedFallback = pinned === undefined
+  const selectedRuntime = validateRuntimeName(selected.runtime);
+  const persistedRuntime = await store.load(request.sessionId);
+  if (persistedRuntime !== undefined) validateRuntimeName(persistedRuntime);
+  if (persistedRuntime === undefined && selected.adapter !== undefined) {
+    adapters.set(selectedRuntime, selected.adapter);
+  }
+  if (persistedRuntime === undefined && selected.fallback !== undefined) {
+    validateRuntimeName(selected.fallback.runtime);
+    adapters.set(selected.fallback.runtime, selected.fallback);
+  }
+  if (persistedRuntime === undefined && fallback !== undefined) {
+    validateRuntimeName(fallback.runtime);
+    adapters.set(fallback.runtime, fallback);
+  }
+  const adapter = persistedRuntime === undefined
+    ? selected.adapter ?? adapters.get(selectedRuntime)!
+    : adapters.get(persistedRuntime)!;
+  const selectedFallback = persistedRuntime === undefined
     ? selected.fallback ?? fallback ?? legacyPythonRuntimeAdapter
     : fallback ?? legacyPythonRuntimeAdapter;
-  return { adapter, fallback: selectedFallback };
+  return { adapter, fallback: selectedFallback, persistedRuntime };
 }
 
 function safeHarnessEventSink(
@@ -495,33 +549,61 @@ function safeHarnessEventSink(
   };
 }
 
+export function createGateway(options: GatewayOptions = {}): Gateway {
+  const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
+  const adapters = new Map<GatewayRuntimeName, GatewayRuntimeAdapter>([
+    ["harness", harnessRuntimeAdapter],
+    ["python", legacyPythonRuntimeAdapter]
+  ]);
+  for (const adapter of Object.values(options.runtimeAdapters ?? {})) {
+    if (adapter !== undefined) {
+      validateRuntimeName(adapter.runtime);
+      adapters.set(adapter.runtime, adapter);
+    }
+  }
+
+  return {
+    async executeRequest(request, provider): Promise<HarnessResult> {
+      const normalized = normalizeGatewayRequest(request);
+      const selection = await selectRuntime(
+        normalized,
+        request.runtime,
+        request.runtimeFallback,
+        store,
+        adapters
+      );
+      let adapter = selection.adapter;
+      const validateAdapter = (candidate: GatewayRuntimeAdapter): void => {
+        validateRuntimeName(candidate.runtime);
+      };
+      validateAdapter(adapter);
+      if (!adapter.supports(normalized)) {
+        adapter = selection.fallback;
+        validateAdapter(adapter);
+        if (!adapter.supports(normalized)) throw new GatewayRuntimeUnsupportedError(adapter.runtime);
+      }
+      if (selection.persistedRuntime === undefined && request.runtime !== undefined) {
+        await store.save(normalized.sessionId, adapter.runtime);
+      }
+      return adapter.execute(normalized, provider, safeHarnessEventSink(request));
+    },
+    async clearPinnedRuntime(sessionId): Promise<void> {
+      await store.clear?.(sessionId);
+    }
+  };
+}
+
+const legacyGateway = createGateway({ runtimeSelectionStore: legacyRuntimeSelectionStore });
+
 export function clearPinnedRuntime(sessionId?: string): void {
-  if (sessionId === undefined) runtimePins.clear();
-  else runtimePins.delete(sessionId);
+  legacyRuntimeSelectionStore.clear(sessionId);
 }
 
 export async function executeRequest(
   request: GatewayExecutionRequest,
   provider: ChatProvider
 ): Promise<HarnessResult> {
-  const normalized = normalizeGatewayRequest(request);
-  const selection = selectRuntime(normalized, request.runtime, request.runtimeFallback);
-  let adapter = selection.adapter;
-  const validateAdapter = (candidate: GatewayRuntimeAdapter): void => {
-    if (candidate.runtime !== "harness" && candidate.runtime !== "python") {
-      throw new TypeError("Gateway runtime adapter has invalid runtime");
-    }
-  };
-  validateAdapter(adapter);
-  if (!adapter.supports(normalized)) {
-    adapter = selection.fallback;
-    validateAdapter(adapter);
-    if (!adapter.supports(normalized)) throw new GatewayRuntimeUnsupportedError(adapter.runtime);
-  }
-  if (request.runtime !== undefined || runtimePins.has(normalized.sessionId)) {
-    runtimePins.set(normalized.sessionId, { runtime: adapter.runtime, adapter });
-  }
-  return adapter.execute(normalized, provider, safeHarnessEventSink(request));
+  return legacyGateway.executeRequest(request, provider);
 }
 
 export type { GatewayClientEvent, GatewayProtocolEvent };

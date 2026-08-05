@@ -105,6 +105,7 @@ export const PERSISTENCE_SCHEMA_VERSION = 1 as const;
 export const CURRENT_SCHEMA_VERSION = PERSISTENCE_SCHEMA_VERSION;
 export type PersistenceSchemaVersion = typeof PERSISTENCE_SCHEMA_VERSION;
 export type SchemaVersion = PersistenceSchemaVersion;
+export const CHECKPOINT_FORMAT_VERSION = 1 as const;
 
 export type RuntimeMigrationMetadata = {
   runtimeVersion: string;
@@ -151,6 +152,19 @@ export type MigrationStateRecord = {
   sessionId: string;
   updatedAt: string;
   runtime: RuntimeMigrationMetadata;
+  recovery?: TurnRecoveryState;
+};
+
+export type TurnRecoveryStatus = "running" | "interrupted" | "recoverable";
+
+/** Durable evidence used to avoid replaying an interrupted tool blindly. */
+export type TurnRecoveryState = {
+  turnId: string;
+  status: TurnRecoveryStatus;
+  startedAt: string;
+  updatedAt: string;
+  checkpointId?: string;
+  pendingToolCallIds?: readonly string[];
 };
 
 export type SessionMessage = {
@@ -185,6 +199,8 @@ export type CheckpointRecord = {
   reason: CheckpointReason;
   runtime: RuntimeMigrationMetadata;
   snapshot: JsonObject;
+  /** Optional on input for compatibility; new writes persist the current format. */
+  formatVersion?: number;
   label?: string;
 };
 
@@ -199,6 +215,15 @@ export type AppendMessagesResult = {
   lastSequence: number | null;
 };
 
+export type AtomicTurnWrite = {
+  sessionId: string;
+  messages: readonly SessionMessageDraft[];
+  expectedNextSequence?: number;
+  usage?: UsageRecord | readonly UsageRecord[];
+  checkpoint?: CheckpointRecord;
+  migrationState?: MigrationStateRecord;
+};
+
 /** Implementations must commit all messages, or commit none of them. */
 export interface SessionRepositoryTransaction {
   appendMessages(
@@ -210,10 +235,12 @@ export interface SessionRepositoryTransaction {
   listMessages(sessionId: string): Promise<readonly SessionMessage[]>;
   listToolCalls(sessionId: string): Promise<readonly ToolCallRecord[]>;
   listToolResults(sessionId: string): Promise<readonly ToolResultRecord[]>;
+  listUsage(sessionId: string): Promise<readonly UsageRecord[]>;
   recordUsage(usage: UsageRecord): Promise<void>;
   getMigrationState(sessionId: string): Promise<MigrationStateRecord | null>;
   saveMigrationState(state: MigrationStateRecord): Promise<void>;
   saveCheckpoint(checkpoint: CheckpointRecord): Promise<void>;
+  commitTurn(write: AtomicTurnWrite): Promise<AppendMessagesResult>;
 }
 
 export interface SessionRepository extends SessionRepositoryTransaction {
@@ -349,6 +376,8 @@ function isCheckpointRecord(value: unknown): value is CheckpointRecord {
     typeof messageSequence === "number" && Number.isSafeInteger(messageSequence) && messageSequence >= 0 &&
     typeof value.createdAt === "string" && isCheckpointReason(value.reason) &&
     isRuntimeMigrationMetadata(value.runtime) && isJsonObject(value.snapshot) &&
+    (value.formatVersion === undefined ||
+      value.formatVersion === CHECKPOINT_FORMAT_VERSION) &&
     (value.label === undefined || typeof value.label === "string");
 }
 

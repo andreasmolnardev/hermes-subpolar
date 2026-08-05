@@ -163,6 +163,104 @@ describe("InMemorySessionRepository", () => {
     assert.deepEqual((await repository.listCheckpoints("session-1")).map(({ id }) => id), ["checkpoint-1"]);
   });
 
+  test("commits assistant, tool, usage, checkpoint, and recovery metadata atomically", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+    const checkpoint = {
+      schemaVersion: PERSISTENCE_SCHEMA_VERSION,
+      id: "checkpoint-turn-1",
+      sessionId: "session-1",
+      messageSequence: 2,
+      createdAt: "2026-01-01T00:00:02.000Z",
+      reason: "turn" as const,
+      runtime,
+      snapshot: { next: "resume" },
+    };
+
+    await repository.commitTurn({
+      sessionId: "session-1",
+      messages: [{
+        ...message("calling"),
+        role: "assistant",
+        toolCalls: [{ id: "call-atomic", name: "lookup", arguments: { q: "x" } }],
+      }, {
+        ...message("answer"),
+        role: "tool",
+        toolCallId: "call-atomic",
+        toolResult: { toolCallId: "call-atomic", content: "answer", isError: false },
+      }],
+      usage: { schemaVersion: 1, sessionId: "session-1", recordedAt: "2026-01-01T00:00:02.000Z", usage: {
+        inputTokens: 3, outputTokens: 2,
+      } },
+      checkpoint,
+      migrationState: {
+        schemaVersion: 1,
+        sessionId: "session-1",
+        updatedAt: "2026-01-01T00:00:02.000Z",
+        runtime,
+        recovery: {
+          turnId: "turn-1",
+          status: "running",
+          startedAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:02.000Z",
+        },
+      },
+    });
+
+    assert.equal((await repository.listMessages("session-1")).length, 2);
+    assert.equal((await repository.listToolCalls("session-1"))[0]?.id, "call-atomic");
+    assert.equal((await repository.listToolResults("session-1"))[0]?.toolCallId, "call-atomic");
+    assert.equal((await repository.listUsage("session-1"))[0]?.usage.totalTokens, undefined);
+    assert.equal((await repository.getCheckpoint("session-1", "checkpoint-turn-1"))?.formatVersion, 1);
+    assert.equal((await repository.getMigrationState("session-1"))?.recovery?.status, "running");
+  });
+
+  test("rolls back an interrupted-turn write set when recovery metadata is invalid", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+
+    await assert.rejects(repository.commitTurn({
+      sessionId: "session-1",
+      messages: [{
+        ...message("pending"),
+        role: "assistant",
+        toolCalls: [{ id: "call-pending", name: "terminal", arguments: "{}" }],
+      }],
+      usage: { schemaVersion: 1, sessionId: "session-1", recordedAt: "2026-01-01T00:00:02.000Z", usage: {
+        inputTokens: 1, outputTokens: 1,
+      } },
+      checkpoint: {
+        schemaVersion: 1,
+        id: "checkpoint-pending",
+        sessionId: "session-1",
+        messageSequence: 0,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        reason: "before-tool",
+        runtime,
+        snapshot: { pending: true },
+      },
+      migrationState: {
+        schemaVersion: 1,
+        sessionId: "session-1",
+        updatedAt: "2026-01-01T00:00:02.000Z",
+        runtime,
+        recovery: {
+          turnId: "turn-invalid",
+          status: "interrupted",
+          startedAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:02.000Z",
+          checkpointId: "checkpoint-pending",
+          pendingToolCallIds: ["call-missing"],
+        },
+      },
+    }), /unknown tool call/);
+
+    assert.deepEqual(await repository.listMessages("session-1"), []);
+    assert.deepEqual(await repository.listUsage("session-1"), []);
+    assert.deepEqual(await repository.listCheckpoints("session-1"), []);
+    assert.equal(await repository.getMigrationState("session-1"), null);
+  });
+
   test("round-trips Python-compatible structured content", async () => {
     const repository = new InMemorySessionRepository();
     await repository.createSession(session());

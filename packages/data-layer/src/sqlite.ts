@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database, type Statement } from "bun:sqlite";
 import {
+  CHECKPOINT_FORMAT_VERSION,
   PERSISTENCE_SCHEMA_VERSION,
   assertSupportedSchemaVersion,
   assertValidSessionMessages,
@@ -10,6 +11,7 @@ import {
 import type {
   AppendMessagesOptions,
   AppendMessagesResult,
+  AtomicTurnWrite,
   CheckpointRecord,
   JsonObject,
   JsonValue,
@@ -82,6 +84,19 @@ function isUsage(value: unknown): value is Usage {
     (value.totalTokens === undefined || nonNegative(value.totalTokens)) &&
     (value.cachedInputTokens === undefined || nonNegative(value.cachedInputTokens)) &&
     (value.reasoningTokens === undefined || nonNegative(value.reasoningTokens));
+}
+
+function isRecovery(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.turnId !== "string" || value.turnId.length === 0 ||
+      (value.status !== "running" && value.status !== "interrupted" && value.status !== "recoverable") ||
+      typeof value.startedAt !== "string" || Number.isNaN(Date.parse(value.startedAt)) ||
+      typeof value.updatedAt !== "string" || Number.isNaN(Date.parse(value.updatedAt))) return false;
+  if (value.checkpointId !== undefined &&
+      (typeof value.checkpointId !== "string" || value.checkpointId.length === 0)) return false;
+  if (value.pendingToolCallIds !== undefined &&
+      (!Array.isArray(value.pendingToolCallIds) ||
+       !value.pendingToolCallIds.every((id) => typeof id === "string" && id.length > 0))) return false;
+  return value.status === "running" || value.checkpointId !== undefined;
 }
 
 function isRuntime(value: unknown): value is RuntimeMigrationMetadata {
@@ -232,7 +247,8 @@ CREATE TABLE IF NOT EXISTS migration (
   session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   schema_version INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
-  runtime_json TEXT NOT NULL
+  runtime_json TEXT NOT NULL,
+  recovery_json TEXT
 );
 CREATE TABLE IF NOT EXISTS checkpoints (
   id TEXT PRIMARY KEY,
@@ -243,6 +259,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   reason TEXT NOT NULL,
   runtime_json TEXT NOT NULL,
   snapshot_json TEXT NOT NULL,
+  format_version INTEGER NOT NULL DEFAULT 1,
   label TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_data_layer_tool_calls_session_sequence
@@ -333,6 +350,7 @@ export class SQLiteSessionRepository implements SessionRepository {
         throw new UnsupportedSchemaError(`persistence schema version ${String(version)}`);
       }
       this.db.exec(AUXILIARY_SCHEMA);
+      this.ensureAuxiliaryColumns();
       if (version === null) {
         this.db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
         this.run("INSERT INTO schema_version (version) VALUES (?)", PERSISTENCE_SCHEMA_VERSION);
@@ -356,6 +374,7 @@ export class SQLiteSessionRepository implements SessionRepository {
     // Never alter legacy sessions/messages. These tables are read-only compatibility input.
     this.db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
     this.db.exec(AUXILIARY_SCHEMA);
+    this.ensureAuxiliaryColumns();
     return "legacy";
   }
 
@@ -371,6 +390,17 @@ export class SQLiteSessionRepository implements SessionRepository {
       throw new UnsupportedSchemaError(
         "Python sessions/messages are readable only; contract-native writes require a migrated database",
       );
+    }
+  }
+
+  private ensureAuxiliaryColumns(): void {
+    const columns = (table: "migration" | "checkpoints"): Set<string> =>
+      new Set(this.query<{ name: string }>(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+    if (!columns("migration").has("recovery_json")) {
+      this.db.exec("ALTER TABLE migration ADD COLUMN recovery_json TEXT");
+    }
+    if (!columns("checkpoints").has("format_version")) {
+      this.db.exec("ALTER TABLE checkpoints ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1");
     }
   }
 
@@ -551,10 +581,12 @@ export class SQLiteSessionRepository implements SessionRepository {
       listMessages: async (sessionId) => this.listMessagesNow(sessionId),
       listToolCalls: async (sessionId) => this.listToolCallsNow(sessionId),
       listToolResults: async (sessionId) => this.listToolResultsNow(sessionId),
+      listUsage: async (sessionId) => this.listUsageNow(sessionId),
       recordUsage: async (usage) => this.recordUsageNow(usage),
       getMigrationState: async (sessionId) => this.getMigrationStateNow(sessionId),
       saveMigrationState: async (state) => this.saveMigrationStateNow(state),
       saveCheckpoint: async (checkpoint) => this.saveCheckpointNow(checkpoint),
+      commitTurn: async (write) => this.commitTurnNow(write),
     };
   }
 
@@ -563,7 +595,7 @@ export class SQLiteSessionRepository implements SessionRepository {
     drafts: readonly SessionMessageDraft[],
     options?: AppendMessagesOptions,
   ): AppendMessagesResult {
-    this.assertWritable();
+    if (drafts.length > 0) this.assertWritable();
     this.requireSession(sessionId);
     const existing = this.listMessagesNow(sessionId);
     assertValidSessionMessages(existing, sessionId);
@@ -623,6 +655,47 @@ export class SQLiteSessionRepository implements SessionRepository {
     }
     return { messages: appended, firstSequence: appended[0]?.sequence ?? null,
       lastSequence: appended[appended.length - 1]?.sequence ?? null };
+  }
+
+  private commitTurnNow(write: AtomicTurnWrite): AppendMessagesResult {
+    if (write.sessionId.length === 0) throw new Error("Turn session id must not be empty");
+    const result = this.appendToDatabase(write.sessionId, write.messages, {
+      ...(write.expectedNextSequence === undefined ? {} : {
+        expectedNextSequence: write.expectedNextSequence,
+      }),
+    });
+    const usages = write.usage === undefined ? [] :
+      (Array.isArray(write.usage) ? write.usage : [write.usage]);
+    for (const usage of usages) {
+      if (usage.sessionId !== write.sessionId) throw new Error("Usage session mismatch");
+      this.recordUsageNow(usage);
+    }
+    if (write.checkpoint !== undefined) {
+      if (write.checkpoint.sessionId !== write.sessionId) {
+        throw new Error("Checkpoint session mismatch");
+      }
+      this.saveCheckpointNow(write.checkpoint);
+    }
+    if (write.migrationState !== undefined) {
+      if (write.migrationState.sessionId !== write.sessionId) {
+        throw new Error("Migration state session mismatch");
+      }
+      const recovery = write.migrationState.recovery;
+      if (recovery?.checkpointId !== undefined && write.checkpoint !== undefined &&
+          recovery.checkpointId !== write.checkpoint.id) {
+        throw new Error("Recovery checkpoint mismatch");
+      }
+      if (recovery?.pendingToolCallIds !== undefined) {
+        const calls = new Set(this.listToolCallsNow(write.sessionId).map(({ id }) => id));
+        const results = new Set(this.listToolResultsNow(write.sessionId).map(({ toolCallId }) => toolCallId));
+        for (const id of recovery.pendingToolCallIds) {
+          if (!calls.has(id)) throw new Error(`Recovery references unknown tool call: ${id}`);
+          if (results.has(id)) throw new Error(`Recovery references completed tool call: ${id}`);
+        }
+      }
+      this.saveMigrationStateNow(write.migrationState);
+    }
+    return result;
   }
 
   private getSessionNow(sessionId: string): SessionRecord | null {
@@ -703,10 +776,30 @@ export class SQLiteSessionRepository implements SessionRepository {
     });
   }
 
+  private listUsageNow(sessionId: string): readonly UsageRecord[] {
+    const rows = this.query<SqlRow>(
+      "SELECT * FROM usages WHERE session_id = ? ORDER BY recorded_at ASC, id ASC",
+    ).all(sessionId);
+    return rows.map((row) => {
+      const usage = parseJson(row.usage_json, "usages.usage_json");
+      if (!isUsage(usage)) throw new UnsupportedSchemaError("usages.usage_json is invalid");
+      const record: UsageRecord = {
+        schemaVersion: Number(row.schema_version) as UsageRecord["schemaVersion"],
+        sessionId: requiredString(row, "session_id", "usages"),
+        recordedAt: requiredString(row, "recorded_at", "usages"),
+        usage,
+      };
+      assertSupportedSchemaVersion(record.schemaVersion);
+      const messageId = optionalString(row, "message_id", "usages");
+      if (messageId !== undefined) record.messageId = messageId;
+      return record;
+    });
+  }
+
   private recordUsageNow(usage: UsageRecord): void {
-    this.assertWritable();
     this.requireSession(usage.sessionId);
     assertSupportedSchemaVersion(usage.schemaVersion);
+    if (!isUsage(usage.usage)) throw new Error("Invalid usage record");
     this.run(
       "INSERT INTO usages (schema_version, session_id, recorded_at, usage_json, message_id) VALUES (?, ?, ?, ?, ?)",
       usage.schemaVersion, usage.sessionId, usage.recordedAt, json(usage.usage), usage.messageId ?? null,
@@ -714,49 +807,73 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   private getMigrationStateNow(sessionId: string): MigrationStateRecord | null {
-    if (this.mode === "legacy") return null;
     const row = this.query<SqlRow>("SELECT * FROM migration WHERE session_id = ?").get(sessionId);
     if (row === null) return null;
-    return {
+    const state: MigrationStateRecord = {
       schemaVersion: Number(row.schema_version) as MigrationStateRecord["schemaVersion"],
       sessionId: requiredString(row, "session_id", "migration"), updatedAt: requiredString(row, "updated_at", "migration"),
       runtime: this.jsonRuntime(row.runtime_json, "migration.runtime_json"),
     };
+    assertSupportedSchemaVersion(state.schemaVersion);
+    if (row.recovery_json !== null && row.recovery_json !== undefined) {
+      const recovery = parseJson(row.recovery_json, "migration.recovery_json");
+      if (!isRecovery(recovery)) throw new UnsupportedSchemaError("migration.recovery_json is invalid");
+      state.recovery = recovery as NonNullable<MigrationStateRecord["recovery"]>;
+    }
+    return state;
   }
 
   private saveMigrationStateNow(state: MigrationStateRecord): void {
-    this.assertWritable();
     this.requireSession(state.sessionId);
     assertSupportedSchemaVersion(state.schemaVersion);
     if (!isRuntime(state.runtime)) throw new Error("Invalid migration runtime metadata");
+    if (state.recovery !== undefined && !isRecovery(state.recovery)) {
+      throw new Error("Invalid turn recovery state");
+    }
     this.run(
-      `INSERT INTO migration (session_id, schema_version, updated_at, runtime_json) VALUES (?, ?, ?, ?)
+      `INSERT INTO migration (session_id, schema_version, updated_at, runtime_json, recovery_json) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET schema_version = excluded.schema_version,
-       updated_at = excluded.updated_at, runtime_json = excluded.runtime_json`,
+       updated_at = excluded.updated_at, runtime_json = excluded.runtime_json,
+       recovery_json = excluded.recovery_json`,
       state.sessionId, state.schemaVersion, state.updatedAt, json(state.runtime),
+      state.recovery === undefined ? null : json(state.recovery),
     );
   }
 
   private saveCheckpointNow(checkpoint: CheckpointRecord): void {
-    this.assertWritable();
     this.requireSession(checkpoint.sessionId);
     assertSupportedSchemaVersion(checkpoint.schemaVersion);
     if (!isRuntime(checkpoint.runtime)) throw new Error("Invalid checkpoint runtime metadata");
+    if (!isJsonObject(checkpoint.snapshot)) throw new Error("Invalid checkpoint snapshot");
+    if (!Number.isSafeInteger(checkpoint.messageSequence) || checkpoint.messageSequence < 0 ||
+        (checkpoint.reason !== "manual" && checkpoint.reason !== "turn" &&
+         checkpoint.reason !== "before-tool" && checkpoint.reason !== "migration")) {
+      throw new Error("Invalid checkpoint");
+    }
+    if (checkpoint.formatVersion !== undefined &&
+        checkpoint.formatVersion !== CHECKPOINT_FORMAT_VERSION) {
+      throw new Error("Invalid checkpoint format version");
+    }
+    if (checkpoint.messageSequence > this.listMessagesNow(checkpoint.sessionId).length) {
+      throw new Error("Checkpoint references a future message sequence");
+    }
     this.run(
       `INSERT INTO checkpoints
-        (id, session_id, schema_version, message_sequence, created_at, reason, runtime_json, snapshot_json, label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, session_id, schema_version, message_sequence, created_at, reason, runtime_json, snapshot_json,
+         format_version, label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id,
        schema_version = excluded.schema_version, message_sequence = excluded.message_sequence,
        created_at = excluded.created_at, reason = excluded.reason, runtime_json = excluded.runtime_json,
-       snapshot_json = excluded.snapshot_json, label = excluded.label`,
+       snapshot_json = excluded.snapshot_json, format_version = excluded.format_version,
+       label = excluded.label`,
       checkpoint.id, checkpoint.sessionId, checkpoint.schemaVersion, checkpoint.messageSequence,
-      checkpoint.createdAt, checkpoint.reason, json(checkpoint.runtime), json(checkpoint.snapshot), checkpoint.label ?? null,
+      checkpoint.createdAt, checkpoint.reason, json(checkpoint.runtime), json(checkpoint.snapshot),
+      checkpoint.formatVersion ?? CHECKPOINT_FORMAT_VERSION, checkpoint.label ?? null,
     );
   }
 
   private beginTransaction(): void {
-    this.assertWritable();
     this.db.exec("BEGIN IMMEDIATE");
   }
 
@@ -797,6 +914,10 @@ export class SQLiteSessionRepository implements SessionRepository {
     return this.listToolResultsNow(sessionId);
   }
 
+  async listUsage(sessionId: string): Promise<readonly UsageRecord[]> {
+    return this.listUsageNow(sessionId);
+  }
+
   async recordUsage(usage: UsageRecord): Promise<void> {
     await this.transaction(async (transaction) => transaction.recordUsage(usage));
   }
@@ -813,8 +934,11 @@ export class SQLiteSessionRepository implements SessionRepository {
     await this.transaction(async (transaction) => transaction.saveCheckpoint(checkpoint));
   }
 
+  async commitTurn(write: AtomicTurnWrite): Promise<AppendMessagesResult> {
+    return this.transaction((transaction) => transaction.commitTurn(write));
+  }
+
   async getCheckpoint(sessionId: string, checkpointId: string): Promise<CheckpointRecord | null> {
-    if (this.mode === "legacy") return null;
     const row = this.query<SqlRow>(
       "SELECT * FROM checkpoints WHERE session_id = ? AND id = ?",
     ).get(sessionId, checkpointId);
@@ -828,13 +952,21 @@ export class SQLiteSessionRepository implements SessionRepository {
       reason: requiredString(row, "reason", "checkpoints") as CheckpointRecord["reason"],
       runtime: this.jsonRuntime(row.runtime_json, "checkpoints.runtime_json"), snapshot,
     };
+    assertSupportedSchemaVersion(checkpoint.schemaVersion);
+    if (!Number.isSafeInteger(checkpoint.messageSequence) || checkpoint.messageSequence < 0) {
+      throw new UnsupportedSchemaError("checkpoints.message_sequence is invalid");
+    }
+    const formatVersion = Number(row.format_version);
+    if (formatVersion !== CHECKPOINT_FORMAT_VERSION) {
+      throw new UnsupportedSchemaError("checkpoints.format_version is invalid");
+    }
+    checkpoint.formatVersion = formatVersion;
     const label = optionalString(row, "label", "checkpoints");
     if (label !== undefined) checkpoint.label = label;
     return checkpoint;
   }
 
   async listCheckpoints(sessionId: string): Promise<readonly CheckpointRecord[]> {
-    if (this.mode === "legacy") return [];
     const rows = this.query<SqlRow>(
       "SELECT * FROM checkpoints WHERE session_id = ? ORDER BY created_at ASC, id ASC",
     ).all(sessionId);

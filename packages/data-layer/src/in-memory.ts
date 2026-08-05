@@ -1,4 +1,5 @@
 import {
+  CHECKPOINT_FORMAT_VERSION,
   PERSISTENCE_SCHEMA_VERSION,
   assertSupportedSchemaVersion,
   assertValidSessionMessages,
@@ -7,6 +8,7 @@ import type {
   AppendMessagesOptions,
   AppendMessagesResult,
   CheckpointRecord,
+  AtomicTurnWrite,
   MigrationStateRecord,
   SessionMessage,
   SessionMessageDraft,
@@ -78,6 +80,42 @@ function validateRuntimeSchema(runtime: { schemaVersion: number }): void {
   assertSupportedSchemaVersion(runtime.schemaVersion);
 }
 
+function validateCheckpointFormat(checkpoint: CheckpointRecord): void {
+  if (!Number.isSafeInteger(checkpoint.messageSequence) || checkpoint.messageSequence < 0 ||
+      (checkpoint.reason !== "manual" && checkpoint.reason !== "turn" &&
+       checkpoint.reason !== "before-tool" && checkpoint.reason !== "migration")) {
+    throw new Error("Invalid checkpoint");
+  }
+  if (checkpoint.formatVersion !== undefined &&
+      checkpoint.formatVersion !== CHECKPOINT_FORMAT_VERSION) {
+    throw new Error("Invalid checkpoint format version");
+  }
+}
+
+function validateRecoveryState(recovery: NonNullable<MigrationStateRecord["recovery"]>): void {
+  if (recovery.turnId.length === 0 ||
+      (recovery.status !== "running" && recovery.status !== "interrupted" && recovery.status !== "recoverable") ||
+      Number.isNaN(Date.parse(recovery.startedAt)) || Number.isNaN(Date.parse(recovery.updatedAt)) ||
+      (recovery.checkpointId !== undefined && recovery.checkpointId.length === 0) ||
+      (recovery.pendingToolCallIds !== undefined &&
+       recovery.pendingToolCallIds.some((id) => id.length === 0))) {
+    throw new Error("Invalid turn recovery state");
+  }
+  if (recovery.status !== "running" && recovery.checkpointId === undefined) {
+    throw new Error("Interrupted recovery state requires a checkpoint");
+  }
+}
+
+function usageRecords(value: AtomicTurnWrite["usage"]): readonly UsageRecord[] {
+  if (value === undefined) return [];
+  if (isUsageRecord(value)) return [value];
+  return value;
+}
+
+function isUsageRecord(value: AtomicTurnWrite["usage"]): value is UsageRecord {
+  return value !== undefined && !Array.isArray(value);
+}
+
 export class InMemorySessionRepository implements SessionRepository {
   private state = emptyState();
   private queue = Promise.resolve();
@@ -103,9 +141,13 @@ export class InMemorySessionRepository implements SessionRepository {
       listMessages: async (sessionId) => copy(state.messages.get(sessionId) ?? []),
       listToolCalls: async (sessionId) => copy(state.toolCalls.get(sessionId) ?? []),
       listToolResults: async (sessionId) => copy(state.toolResults.get(sessionId) ?? []),
+      listUsage: async (sessionId) => copy(state.usages.get(sessionId) ?? []),
       recordUsage: async (usage) => {
         requireSession(state, usage.sessionId);
         assertSupportedSchemaVersion(usage.schemaVersion);
+        if (usage.usage.inputTokens < 0 || usage.usage.outputTokens < 0) {
+          throw new Error("Invalid usage record");
+        }
         const records = state.usages.get(usage.sessionId) ?? [];
         records.push(copy(usage));
         state.usages.set(usage.sessionId, records);
@@ -118,17 +160,66 @@ export class InMemorySessionRepository implements SessionRepository {
         requireSession(state, migration.sessionId);
         assertSupportedSchemaVersion(migration.schemaVersion);
         validateRuntimeSchema(migration.runtime);
+        if (migration.recovery !== undefined) validateRecoveryState(migration.recovery);
         state.migrationStates.set(migration.sessionId, copy(migration));
       },
       saveCheckpoint: async (checkpoint) => {
         requireSession(state, checkpoint.sessionId);
         assertSupportedSchemaVersion(checkpoint.schemaVersion);
         validateRuntimeSchema(checkpoint.runtime);
+        validateCheckpointFormat(checkpoint);
+        if (checkpoint.messageSequence > (state.messages.get(checkpoint.sessionId) ?? []).length) {
+          throw new Error("Checkpoint references a future message sequence");
+        }
+        const stored = copy({
+          ...checkpoint,
+          formatVersion: checkpoint.formatVersion ?? CHECKPOINT_FORMAT_VERSION,
+        });
         const checkpoints = state.checkpoints.get(checkpoint.sessionId) ?? [];
         const index = checkpoints.findIndex(({ id }) => id === checkpoint.id);
-        if (index === -1) checkpoints.push(copy(checkpoint));
-        else checkpoints[index] = copy(checkpoint);
+        if (index === -1) checkpoints.push(stored);
+        else checkpoints[index] = stored;
         state.checkpoints.set(checkpoint.sessionId, checkpoints);
+      },
+      commitTurn: async (write) => {
+        if (write.sessionId.length === 0) throw new Error("Turn session id must not be empty");
+        const usages = usageRecords(write.usage);
+        const result = await this.appendToState(
+          state,
+          write.sessionId,
+          write.messages,
+          write.expectedNextSequence === undefined ? undefined : {
+            expectedNextSequence: write.expectedNextSequence,
+          },
+        );
+        for (const usage of usages) await this.transactionFor(state).recordUsage(usage);
+        if (write.checkpoint !== undefined) {
+          if (write.checkpoint.sessionId !== write.sessionId) {
+            throw new Error("Checkpoint session mismatch");
+          }
+          await this.transactionFor(state).saveCheckpoint(write.checkpoint);
+        }
+        if (write.migrationState !== undefined) {
+          if (write.migrationState.sessionId !== write.sessionId) {
+            throw new Error("Migration state session mismatch");
+          }
+          const recovery = write.migrationState.recovery;
+          if (recovery !== undefined) validateRecoveryState(recovery);
+          if (recovery?.checkpointId !== undefined && write.checkpoint !== undefined &&
+              recovery.checkpointId !== write.checkpoint.id) {
+            throw new Error("Recovery checkpoint mismatch");
+          }
+          if (recovery?.pendingToolCallIds !== undefined) {
+            const calls = new Set((state.toolCalls.get(write.sessionId) ?? []).map(({ id }) => id));
+            const results = new Set((state.toolResults.get(write.sessionId) ?? []).map(({ toolCallId }) => toolCallId));
+            for (const id of recovery.pendingToolCallIds) {
+              if (!calls.has(id)) throw new Error(`Recovery references unknown tool call: ${id}`);
+              if (results.has(id)) throw new Error(`Recovery references completed tool call: ${id}`);
+            }
+          }
+          await this.transactionFor(state).saveMigrationState(write.migrationState);
+        }
+        return result;
       },
     };
   }
@@ -254,6 +345,10 @@ export class InMemorySessionRepository implements SessionRepository {
     return this.runExclusive(() => copy(this.state.toolResults.get(sessionId) ?? []));
   }
 
+  async listUsage(sessionId: string): Promise<readonly UsageRecord[]> {
+    return this.runExclusive(() => copy(this.state.usages.get(sessionId) ?? []));
+  }
+
   async recordUsage(usage: UsageRecord): Promise<void> {
     const value = copy(usage);
     await this.transaction((transaction) => transaction.recordUsage(value));
@@ -274,6 +369,11 @@ export class InMemorySessionRepository implements SessionRepository {
   async saveCheckpoint(checkpoint: CheckpointRecord): Promise<void> {
     const value = copy(checkpoint);
     await this.transaction((transaction) => transaction.saveCheckpoint(value));
+  }
+
+  async commitTurn(write: AtomicTurnWrite): Promise<AppendMessagesResult> {
+    const value = copy(write);
+    return this.transaction((transaction) => transaction.commitTurn(value));
   }
 
   async getCheckpoint(sessionId: string, checkpointId: string): Promise<CheckpointRecord | null> {

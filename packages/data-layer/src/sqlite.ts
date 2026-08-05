@@ -95,6 +95,7 @@ function isRecovery(value: unknown): boolean {
       (typeof value.checkpointId !== "string" || value.checkpointId.length === 0)) return false;
   if (value.pendingToolCallIds !== undefined &&
       (!Array.isArray(value.pendingToolCallIds) ||
+       new Set(value.pendingToolCallIds).size !== value.pendingToolCallIds.length ||
        !value.pendingToolCallIds.every((id) => typeof id === "string" && id.length > 0))) return false;
   return value.status === "running" || value.checkpointId !== undefined;
 }
@@ -169,8 +170,25 @@ function legacyContent(row: SqlRow): MessageContent {
 function legacyToolCalls(row: SqlRow): readonly ToolCall[] | undefined {
   const decoded = legacyJson(row.tool_calls);
   if (!Array.isArray(decoded)) return undefined;
-  const calls = decoded.filter(isToolCall);
-  return calls.length === decoded.length ? calls : undefined;
+  const calls = decoded.map((value): ToolCall | null => {
+    if (isToolCall(value)) return value;
+    if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0 ||
+        !isRecord(value.function) || typeof value.function.name !== "string" ||
+        value.function.name.length === 0 ||
+        (typeof value.function.arguments !== "string" && !isJsonObject(value.function.arguments))) {
+      return null;
+    }
+    return {
+      id: value.id,
+      name: value.function.name,
+      arguments: value.function.arguments,
+    };
+  });
+  return calls.every((call): call is ToolCall => call !== null) ? calls : undefined;
+}
+
+function isCheckpointReason(value: unknown): value is CheckpointRecord["reason"] {
+  return value === "manual" || value === "turn" || value === "before-tool" || value === "migration";
 }
 
 function legacyFinishReason(value: SqlValue): SessionMessage["finishReason"] | undefined {
@@ -341,7 +359,7 @@ export class SQLiteSessionRepository implements SessionRepository {
     const messageColumns = this.columns("messages");
     const canonical = ["schema_version", "workspace_id", "status", "created_at", "updated_at", "runtime_json"]
       .every((column) => sessionColumns.has(column)) &&
-      ["schema_version", "sequence", "content_json", "created_at", "tool_calls_json", "tool_result_json"]
+      ["schema_version", "sequence", "content_json", "created_at"]
         .every((column) => messageColumns.has(column));
 
     if (canonical) {
@@ -349,6 +367,7 @@ export class SQLiteSessionRepository implements SessionRepository {
       if (version !== null && version !== PERSISTENCE_SCHEMA_VERSION) {
         throw new UnsupportedSchemaError(`persistence schema version ${String(version)}`);
       }
+      this.ensureCanonicalColumns();
       this.db.exec(AUXILIARY_SCHEMA);
       this.ensureAuxiliaryColumns();
       if (version === null) {
@@ -401,6 +420,33 @@ export class SQLiteSessionRepository implements SessionRepository {
     }
     if (!columns("checkpoints").has("format_version")) {
       this.db.exec("ALTER TABLE checkpoints ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1");
+    }
+  }
+
+  private ensureCanonicalColumns(): void {
+    const columns = (table: "sessions" | "messages"): Set<string> => this.columns(table);
+    const additions: readonly ["sessions" | "messages", string, string][] = [
+      ["sessions", "title", "TEXT"],
+      ["sessions", "model", "TEXT"],
+      ["sessions", "provider", "TEXT"],
+      ["sessions", "metadata_json", "TEXT"],
+      ["messages", "name", "TEXT"],
+      ["messages", "tool_calls_json", "TEXT"],
+      ["messages", "tool_call_id", "TEXT"],
+      ["messages", "tool_result_json", "TEXT"],
+      ["messages", "finish_reason", "TEXT"],
+      ["messages", "usage_json", "TEXT"],
+    ];
+    const known = new Map<"sessions" | "messages", Set<string>>([
+      ["sessions", columns("sessions")],
+      ["messages", columns("messages")],
+    ]);
+    for (const [table, column, definition] of additions) {
+      const tableColumns = known.get(table);
+      if (tableColumns !== undefined && !tableColumns.has(column)) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        tableColumns.add(column);
+      }
     }
   }
 
@@ -710,7 +756,7 @@ export class SQLiteSessionRepository implements SessionRepository {
   private listMessagesNow(sessionId: string): readonly SessionMessage[] {
     if (this.mode === "legacy") {
       const rows = this.query<SqlRow>(
-        "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC, id ASC",
+        "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC",
       ).all(sessionId);
       const messages = rows.map((row, index) => this.legacyMessage(row, sessionId, index))
         .filter((message): message is SessionMessage => message !== null);
@@ -830,6 +876,10 @@ export class SQLiteSessionRepository implements SessionRepository {
     if (state.recovery !== undefined && !isRecovery(state.recovery)) {
       throw new Error("Invalid turn recovery state");
     }
+    if (state.recovery?.checkpointId !== undefined &&
+        this.getCheckpointNow(state.sessionId, state.recovery.checkpointId) === null) {
+      throw new Error(`Recovery references unknown checkpoint: ${state.recovery.checkpointId}`);
+    }
     this.run(
       `INSERT INTO migration (session_id, schema_version, updated_at, runtime_json, recovery_json) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET schema_version = excluded.schema_version,
@@ -843,6 +893,9 @@ export class SQLiteSessionRepository implements SessionRepository {
   private saveCheckpointNow(checkpoint: CheckpointRecord): void {
     this.requireSession(checkpoint.sessionId);
     assertSupportedSchemaVersion(checkpoint.schemaVersion);
+    if (checkpoint.id.length === 0 || Number.isNaN(Date.parse(checkpoint.createdAt))) {
+      throw new Error("Invalid checkpoint metadata");
+    }
     if (!isRuntime(checkpoint.runtime)) throw new Error("Invalid checkpoint runtime metadata");
     if (!isJsonObject(checkpoint.snapshot)) throw new Error("Invalid checkpoint snapshot");
     if (!Number.isSafeInteger(checkpoint.messageSequence) || checkpoint.messageSequence < 0 ||
@@ -895,7 +948,7 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   async getSession(sessionId: string): Promise<SessionRecord | null> {
-    return this.getSessionNow(sessionId);
+    return this.runExclusive(() => this.getSessionNow(sessionId));
   }
 
   async appendMessages(sessionId: string, messages: readonly SessionMessageDraft[], options?: AppendMessagesOptions): Promise<AppendMessagesResult> {
@@ -903,19 +956,19 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   async listMessages(sessionId: string): Promise<readonly SessionMessage[]> {
-    return this.listMessagesNow(sessionId);
+    return this.runExclusive(() => this.listMessagesNow(sessionId));
   }
 
   async listToolCalls(sessionId: string): Promise<readonly ToolCallRecord[]> {
-    return this.listToolCallsNow(sessionId);
+    return this.runExclusive(() => this.listToolCallsNow(sessionId));
   }
 
   async listToolResults(sessionId: string): Promise<readonly ToolResultRecord[]> {
-    return this.listToolResultsNow(sessionId);
+    return this.runExclusive(() => this.listToolResultsNow(sessionId));
   }
 
   async listUsage(sessionId: string): Promise<readonly UsageRecord[]> {
-    return this.listUsageNow(sessionId);
+    return this.runExclusive(() => this.listUsageNow(sessionId));
   }
 
   async recordUsage(usage: UsageRecord): Promise<void> {
@@ -923,7 +976,7 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   async getMigrationState(sessionId: string): Promise<MigrationStateRecord | null> {
-    return this.getMigrationStateNow(sessionId);
+    return this.runExclusive(() => this.getMigrationStateNow(sessionId));
   }
 
   async saveMigrationState(state: MigrationStateRecord): Promise<void> {
@@ -938,7 +991,7 @@ export class SQLiteSessionRepository implements SessionRepository {
     return this.transaction((transaction) => transaction.commitTurn(write));
   }
 
-  async getCheckpoint(sessionId: string, checkpointId: string): Promise<CheckpointRecord | null> {
+  private getCheckpointNow(sessionId: string, checkpointId: string): CheckpointRecord | null {
     const row = this.query<SqlRow>(
       "SELECT * FROM checkpoints WHERE session_id = ? AND id = ?",
     ).get(sessionId, checkpointId);
@@ -956,6 +1009,13 @@ export class SQLiteSessionRepository implements SessionRepository {
     if (!Number.isSafeInteger(checkpoint.messageSequence) || checkpoint.messageSequence < 0) {
       throw new UnsupportedSchemaError("checkpoints.message_sequence is invalid");
     }
+    if (Number.isNaN(Date.parse(checkpoint.createdAt)) ||
+        checkpoint.messageSequence > this.listMessagesNow(sessionId).length) {
+      throw new UnsupportedSchemaError("checkpoints metadata is invalid");
+    }
+    if (!isCheckpointReason(checkpoint.reason)) {
+      throw new UnsupportedSchemaError("checkpoints.reason is invalid");
+    }
     const formatVersion = Number(row.format_version);
     if (formatVersion !== CHECKPOINT_FORMAT_VERSION) {
       throw new UnsupportedSchemaError("checkpoints.format_version is invalid");
@@ -966,16 +1026,22 @@ export class SQLiteSessionRepository implements SessionRepository {
     return checkpoint;
   }
 
+  async getCheckpoint(sessionId: string, checkpointId: string): Promise<CheckpointRecord | null> {
+    return this.runExclusive(() => this.getCheckpointNow(sessionId, checkpointId));
+  }
+
   async listCheckpoints(sessionId: string): Promise<readonly CheckpointRecord[]> {
-    const rows = this.query<SqlRow>(
-      "SELECT * FROM checkpoints WHERE session_id = ? ORDER BY created_at ASC, id ASC",
-    ).all(sessionId);
-    const result: CheckpointRecord[] = [];
-    for (const row of rows) {
-      const checkpoint = await this.getCheckpoint(sessionId, requiredString(row, "id", "checkpoints"));
-      if (checkpoint !== null) result.push(checkpoint);
-    }
-    return result;
+    return this.runExclusive(() => {
+      const rows = this.query<SqlRow>(
+        "SELECT * FROM checkpoints WHERE session_id = ? ORDER BY created_at ASC, id ASC",
+      ).all(sessionId);
+      return rows.map((row) => {
+        const id = requiredString(row, "id", "checkpoints");
+        const checkpoint = this.getCheckpointNow(sessionId, id);
+        if (checkpoint === null) throw new UnsupportedSchemaError("checkpoint disappeared during read");
+        return checkpoint;
+      });
+    });
   }
 
   async transaction<T>(operation: (transaction: SessionRepositoryTransaction) => Promise<T>): Promise<T> {

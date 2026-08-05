@@ -250,6 +250,125 @@ test("SQLite reads supported Python-shaped sessions and messages without rewriti
   }
 });
 
+test("SQLite preserves Python insertion order and normalizes persisted tool calls", async () => {
+  const paths = homePath();
+  const database = new Database(paths.database);
+  database.exec(`
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    INSERT INTO schema_version VALUES (25);
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL
+    );
+    CREATE TABLE messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+      role TEXT NOT NULL, content TEXT, tool_call_id TEXT, tool_calls TEXT,
+      tool_name TEXT, timestamp REAL NOT NULL
+    );
+    INSERT INTO sessions VALUES ('legacy-1', 'cli', 1785888000);
+    INSERT INTO messages (session_id, role, content, tool_calls, timestamp)
+      VALUES ('legacy-1', 'assistant', 'working',
+        '[{"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":\\"hermes\\"}"}}]',
+        1785888003);
+    INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp)
+      VALUES ('legacy-1', 'tool', 'done', 'call-1', 'lookup', 1785888002);
+  `);
+  database.close();
+
+  const repo = new SQLiteSessionRepository(paths.database);
+  try {
+    expect((await repo.listMessages("legacy-1")).map(({ id }) => id)).toEqual(["1", "2"]);
+    expect(await repo.listToolCalls("legacy-1")).toMatchObject([{
+      id: "call-1", name: "lookup", arguments: '{"q":"hermes"}', sequence: 0,
+    }]);
+    expect(await repo.listToolResults("legacy-1")).toMatchObject([{
+      toolCallId: "call-1", toolName: "lookup", sequence: 1,
+    }]);
+  } finally {
+    repo.close();
+    rmSync(paths.home, { recursive: true, force: true });
+  }
+});
+
+test("SQLite adds missing contract metadata columns without rewriting an older database", async () => {
+  const paths = homePath();
+  const database = new Database(paths.database);
+  database.exec(`
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    INSERT INTO schema_version VALUES (1);
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, workspace_id TEXT NOT NULL,
+      status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      runtime_json TEXT NOT NULL
+    );
+    CREATE TABLE messages (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, schema_version INTEGER NOT NULL,
+      sequence INTEGER NOT NULL, role TEXT NOT NULL, content_json TEXT NOT NULL,
+      created_at TEXT NOT NULL, UNIQUE(session_id, sequence)
+    );
+    CREATE TABLE migration (
+      session_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL,
+      updated_at TEXT NOT NULL, runtime_json TEXT NOT NULL
+    );
+    CREATE TABLE checkpoints (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, schema_version INTEGER NOT NULL,
+      message_sequence INTEGER NOT NULL, created_at TEXT NOT NULL, reason TEXT NOT NULL,
+      runtime_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, label TEXT
+    );
+    INSERT INTO sessions VALUES (
+      'old-1', 1, 'workspace-1', 'active',
+      '2026-08-05T00:00:00.000Z', '2026-08-05T00:00:00.000Z',
+      '{"runtimeVersion":"old","schemaVersion":1}'
+    );
+    INSERT INTO messages VALUES (
+      'old-message', 'old-1', 1, 0, 'user', '"hello"', '2026-08-05T00:00:01.000Z'
+    );
+  `);
+  database.close();
+
+  const repo = new SQLiteSessionRepository(paths.database);
+  try {
+    await repo.appendMessages("old-1", [message("reply", { role: "assistant" })]);
+    await repo.saveCheckpoint({
+      schemaVersion: 1, id: "old-checkpoint", sessionId: "old-1", messageSequence: 2,
+      createdAt: "2026-08-05T00:00:02.000Z", reason: "migration",
+      runtime: { runtimeVersion: "typescript", schemaVersion: 1 }, snapshot: { old: true },
+    });
+    await repo.saveMigrationState({
+      schemaVersion: 1, sessionId: "old-1", updatedAt: "2026-08-05T00:00:02.000Z",
+      runtime: { runtimeVersion: "typescript", schemaVersion: 1 },
+      recovery: {
+        turnId: "turn-1", status: "interrupted", startedAt: "2026-08-05T00:00:01.000Z",
+        updatedAt: "2026-08-05T00:00:02.000Z", checkpointId: "old-checkpoint",
+      },
+    });
+    expect((await repo.listMessages("old-1")).map(({ content }) => content)).toEqual(["hello", "reply"]);
+    expect((await repo.getCheckpoint("old-1", "old-checkpoint"))?.formatVersion).toBe(1);
+    expect((await repo.getMigrationState("old-1"))?.recovery?.checkpointId).toBe("old-checkpoint");
+  } finally {
+    repo.close();
+    rmSync(paths.home, { recursive: true, force: true });
+  }
+});
+
+test("SQLite rejects orphan recovery checkpoints and rolls back the attempted metadata write", async () => {
+  await withRepo(async (repo) => {
+    await repo.createSession(session());
+    await expect(repo.transaction(async (transaction) => {
+      await transaction.appendMessages("session-1", [message("pending")]);
+      await transaction.saveMigrationState({
+        schemaVersion: 1, sessionId: "session-1", updatedAt: "2026-08-05T00:00:02.000Z",
+        runtime: { runtimeVersion: "typescript", schemaVersion: 1 },
+        recovery: {
+          turnId: "turn-1", status: "interrupted", startedAt: "2026-08-05T00:00:01.000Z",
+          updatedAt: "2026-08-05T00:00:02.000Z", checkpointId: "missing-checkpoint",
+        },
+      });
+    })).rejects.toThrow("unknown checkpoint");
+    expect(await repo.listMessages("session-1")).toEqual([]);
+    expect(await repo.getMigrationState("session-1")).toBeNull();
+  });
+});
+
 test("SQLite writes additive metadata for legacy sessions without rewriting transcripts", async () => {
   const paths = homePath();
   const database = new Database(paths.database);
@@ -297,6 +416,16 @@ test("SQLite writes additive metadata for legacy sessions without rewriting tran
     expect((await repo.getMigrationState("legacy-1"))?.runtime.migratedFromSchemaVersion).toBe(25);
     await expect(repo.appendMessages("legacy-1", [message("must not rewrite legacy")])).rejects.toThrow();
     expect((await repo.listMessages("legacy-1"))[0]?.content).toBe("hello");
+
+    const verification = new Database(paths.database);
+    try {
+      expect(verification.query("SELECT content FROM messages WHERE id = 1").get()).toEqual({ content: "hello" });
+      expect(verification.query("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 1 });
+      expect(verification.query("PRAGMA table_info(sessions)").all().map((row) => row.name))
+        .toEqual(["id", "source", "started_at"]);
+    } finally {
+      verification.close();
+    }
   } finally {
     repo.close();
     rmSync(paths.home, { recursive: true, force: true });

@@ -78,8 +78,14 @@ export type PythonRuntimeBridgeEvent = {
     | { readonly type: "tool-call.delta"; readonly id?: string; readonly name?: string; readonly arguments?: string }
     | { readonly type: "tool-call"; readonly id: string; readonly name: string; readonly arguments: string }
     | { readonly type: "tool-result"; readonly toolCallId: string; readonly content: ProviderContent; readonly isError?: boolean }
-    | { readonly type: "usage"; readonly usage: ProviderResult["usage"] }
-    | { readonly type: "finished"; readonly usage?: ProviderResult["usage"] }
+     | { readonly type: "usage"; readonly usage: ProviderResult["usage"]; readonly metadata?: ProviderResult["metadata"] }
+     | {
+       readonly type: "finished";
+       readonly usage?: ProviderResult["usage"];
+       readonly finishReason?: ProviderResult["finishReason"];
+       readonly metadata?: ProviderResult["metadata"];
+       readonly requestId?: string;
+     }
     | { readonly type: "failed"; readonly category?: string };
 };
 
@@ -203,6 +209,7 @@ function isRuntimeEvent(value: unknown): value is PythonRuntimeBridgeEvent {
     }
   }
   if (event.type === "usage") {
+    if (event.metadata !== undefined && !isJsonValue(event.metadata)) return false;
     try {
       validateProviderStreamEvent(event as ProviderStreamEvent);
       return true;
@@ -211,6 +218,9 @@ function isRuntimeEvent(value: unknown): value is PythonRuntimeBridgeEvent {
     }
   }
   if (event.type === "finished") {
+    if (event.requestId !== undefined && !isSafeIdentifier(event.requestId)) return false;
+    if (event.finishReason !== undefined && typeof event.finishReason !== "string") return false;
+    if (event.metadata !== undefined && !isJsonValue(event.metadata)) return false;
     if (event.usage === undefined) return true;
     try {
       validateProviderStreamEvent({ type: "finish", finishReason: "stop", usage: event.usage });

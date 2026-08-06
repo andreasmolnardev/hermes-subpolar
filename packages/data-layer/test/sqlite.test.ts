@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { SQLiteSessionRepository } from "../src/sqlite.js";
+import {
+  createDefaultRuntimeSelectionStore,
+  getHermesStateDatabasePath,
+  SQLiteRuntimeSelectionStore
+} from "../src/runtime-selection.js";
 import type { SessionRecord, SessionMessageDraft } from "../src/contracts.js";
 
 function homePath(): { home: string; database: string } {
@@ -59,6 +64,46 @@ test("SQLite repository orders messages and correlates tools", async () => {
   });
 });
 
+test("SQLite runtime selection survives store recreation and remains validated", async () => {
+  const paths = homePath();
+  const first = new SQLiteRuntimeSelectionStore(paths.database);
+  try {
+    await first.save("session-runtime", "harness");
+    expect(await first.load("session-runtime")).toBe("harness");
+  } finally {
+    first.close();
+  }
+
+  const restarted = new SQLiteRuntimeSelectionStore(paths.database);
+  try {
+    expect(await restarted.load("session-runtime")).toBe("harness");
+    await expect(restarted.load(" ")).rejects.toThrow("session id");
+    await expect(restarted.save("session-runtime", "invalid" as never)).rejects.toThrow("invalid");
+    await restarted.clear("session-runtime");
+    expect(await restarted.load("session-runtime")).toBeUndefined();
+  } finally {
+    restarted.close();
+    rmSync(paths.home, { recursive: true, force: true });
+  }
+});
+
+test("default runtime selection store follows HERMES_HOME state.db", async () => {
+  const home = mkdtempSync(join(tmpdir(), "hermes-runtime-home-"));
+  const previous = process.env.HERMES_HOME;
+  process.env.HERMES_HOME = home;
+  const store = createDefaultRuntimeSelectionStore();
+  try {
+    expect(getHermesStateDatabasePath()).toBe(join(home, "state.db"));
+    await store.save("default-runtime-session", "harness");
+    expect(await store.load("default-runtime-session")).toBe("harness");
+  } finally {
+    store.close();
+    if (previous === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("SQLite round-trips structured content and every message sidecar exactly", async () => {
   await withRepo(async (repo) => {
     await repo.createSession(session());
@@ -73,6 +118,17 @@ test("SQLite round-trips structured content and every message sidecar exactly", 
       displayMetadata: { reason: "retry", count: 2 },
       synthetic: true,
       context: { source: "gateway", values: [1, true, null] },
+      reasoning: "provider reasoning",
+      metadata: { provider: "recorded", cache: "hit" },
+      usage: {
+        inputTokens: 8,
+        outputTokens: 3,
+        totalTokens: 11,
+        cachedInputTokens: 2,
+        reasoningTokens: 1,
+        cacheCreationInputTokens: 4,
+        cacheReadInputTokens: 5,
+      },
       createdAt: "2026-08-05T00:00:01.000Z",
     };
 
@@ -94,6 +150,9 @@ test("SQLite round-trips structured content and every message sidecar exactly", 
       displayMetadata: message.displayMetadata,
       synthetic: true,
       context: message.context,
+      reasoning: message.reasoning,
+      metadata: message.metadata,
+      usage: message.usage,
       createdAt: message.createdAt,
     }]);
   });

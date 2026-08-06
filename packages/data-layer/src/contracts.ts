@@ -109,6 +109,10 @@ export type TransportMessage = {
   toolCalls?: readonly ToolCall[];
   toolCallId?: string;
   toolResult?: ToolResult;
+  finishReason?: "stop" | "length" | "tool_calls" | "content_filter" | "error";
+  reasoning?: string;
+  metadata?: JsonObject;
+  usage?: Usage;
 };
 
 export type WorkspaceSummary = {
@@ -159,6 +163,8 @@ export type Usage = {
   totalTokens?: number;
   cachedInputTokens?: number;
   reasoningTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
 };
 
 export type UsageRecord = {
@@ -209,6 +215,8 @@ export type SessionMessage = {
   toolCallId?: string;
   toolResult?: ToolResult;
   finishReason?: "stop" | "length" | "tool_calls" | "content_filter" | "error";
+  reasoning?: string;
+  metadata?: JsonObject;
   usage?: Usage;
 };
 
@@ -281,6 +289,15 @@ export interface SessionRepository extends SessionRepositoryTransaction {
   ): Promise<T>;
 }
 
+/** Durable per-session runtime pin used by gateway adapters. */
+export type RuntimeSelection = "harness" | "python";
+
+export interface RuntimeSelectionStore {
+  load(sessionId: string): Promise<RuntimeSelection | undefined>;
+  save(sessionId: string, runtime: RuntimeSelection): Promise<void>;
+  clear?(sessionId?: string): Promise<void>;
+}
+
 export type PersistenceRepository = SessionRepository;
 
 export type TransportEvent =
@@ -291,7 +308,14 @@ export type TransportEvent =
   | { type: "tool.call"; sessionId: string; messageId: string; call: ToolCall }
   | { type: "tool.result"; sessionId: string; messageId: string; result: ToolResult }
   | { type: "checkpoint.created"; sessionId: string; checkpoint: CheckpointRecord }
-  | { type: "usage.updated"; sessionId: string; usage: Usage }
+  | {
+    type: "usage.updated";
+    sessionId: string;
+    usage: Usage;
+    reasoning?: string;
+    finishReason?: "stop" | "length" | "tool_calls" | "content_filter" | "error";
+    metadata?: JsonObject;
+  }
   | { type: "error"; code: string; message: string };
 
 export type HarnessEvent = TransportEvent;
@@ -392,7 +416,9 @@ function isUsage(value: unknown): value is Usage {
     isNonNegativeNumber(value.outputTokens) &&
     (value.totalTokens === undefined || isNonNegativeNumber(value.totalTokens)) &&
     (value.cachedInputTokens === undefined || isNonNegativeNumber(value.cachedInputTokens)) &&
-    (value.reasoningTokens === undefined || isNonNegativeNumber(value.reasoningTokens));
+    (value.reasoningTokens === undefined || isNonNegativeNumber(value.reasoningTokens)) &&
+    (value.cacheCreationInputTokens === undefined || isNonNegativeNumber(value.cacheCreationInputTokens)) &&
+    (value.cacheReadInputTokens === undefined || isNonNegativeNumber(value.cacheReadInputTokens));
 }
 
 function isRuntimeMigrationMetadata(value: unknown): value is RuntimeMigrationMetadata {

@@ -5,7 +5,8 @@ import {
   createOpenAICompatibleProvider,
   ProviderError,
   type OpenAICompatibleFetch,
-  type ProviderRequest
+  type ProviderRequest,
+  type ProviderStreamEvent
 } from "../src/index.ts";
 
 type RecordedFixture = {
@@ -96,6 +97,8 @@ test("OpenAI-compatible adapter serializes provider requests and normalizes tool
     headers: { "x-request-id": "server-request-id" },
     body: {
       id: "completion-1",
+      model: "fixture-model",
+      system_fingerprint: "fingerprint-1",
       choices: [{
         finish_reason: "tool_calls",
         message: {
@@ -113,7 +116,7 @@ test("OpenAI-compatible adapter serializes provider requests and normalizes tool
         prompt_tokens: 10,
         completion_tokens: 6,
         total_tokens: 16,
-        prompt_tokens_details: { cached_tokens: 3 },
+        prompt_tokens_details: { cached_tokens: 3, cache_creation_input_tokens: 4, cache_read_input_tokens: 5 },
         completion_tokens_details: { reasoning_tokens: 2 }
       }
     }
@@ -161,11 +164,37 @@ test("OpenAI-compatible adapter serializes provider requests and normalizes tool
     outputTokens: 6,
     totalTokens: 16,
     cachedInputTokens: 3,
+    cacheCreationInputTokens: 4,
+    cacheReadInputTokens: 5,
     reasoningTokens: 2
   });
   assert.equal(result.finishReason, "tool_call");
   assert.equal(result.requestId, "request-1");
   assert.deepEqual(result.identity, { requestId: "request-1", attempt: 2, parentRequestId: "parent-1" });
+  assert.deepEqual(result.metadata, {
+    id: "completion-1",
+    model: "fixture-model",
+    system_fingerprint: "fingerprint-1"
+  });
+});
+
+test("OpenAI-compatible adapter exposes ordered streaming deltas", async () => {
+  const { provider, recorded } = providerWith({
+    rawBody: [
+      'data: {"id":"stream-1","choices":[{"delta":{"role":"assistant","content":"hel"}}]}',
+      'data: {"choices":[{"delta":{"content":"lo","reasoning_content":"brief"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n"),
+  });
+  const events: ProviderStreamEvent[] = [];
+  for await (const event of provider.stream!(request())) events.push(event);
+  assert.equal(JSON.parse(String(recorded.calls[0]?.init?.body)).stream, true);
+  assert.deepEqual(events.map(event => event.type), ["start", "text-delta", "text-delta", "reasoning-delta", "finish", "usage"]);
+  assert.equal(events[1]?.text, "hel");
+  assert.equal(events[2]?.text, "lo");
+  assert.equal(events[4]?.finishReason, "stop");
 });
 
 test("OpenAI-compatible adapter serializes injected multimodal data without fetching it", async () => {
@@ -206,6 +235,9 @@ test("OpenAI-compatible adapter serializes injected multimodal data without fetc
       { type: "file", file: { file_data: "data:application/pdf;base64,REVG", filename: "notes.pdf" } }
     ]
   }]);
+  assert.deepEqual(JSON.parse(firstBody).metadata, {
+    hermes_cache: { key: "stable", read: true, write: true }
+  });
 });
 
 test("OpenAI-compatible adapter rejects malformed media before fetch", async () => {

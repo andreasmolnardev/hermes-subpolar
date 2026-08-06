@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { test } from "bun:test";
 
 import {
@@ -323,4 +326,73 @@ test("runtime subprocess transport always kills the one-turn worker", async () =
   });
   assert.equal(JSON.parse(received).credentialHandles.length, 0);
   assert.equal(killed, true);
+});
+
+test("runtime subprocess transport integrates with the Python worker", async () => {
+  const home = mkdtempSync(join(tmpdir(), "hermes-runtime-bridge-"));
+  const workspace = join(home, "workspace");
+  const previousHome = process.env.HERMES_HOME;
+  const python = Bun.which("python3");
+  assert(python !== null, "a system Python executable is required");
+  mkdirSync(workspace);
+  process.env.HERMES_HOME = home;
+
+  try {
+    const transport = createPythonRuntimeBridgeSubprocessTransport((command, options) => {
+      const child = Bun.spawn([...command], {
+        cwd: options.cwd,
+        env: options.env,
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "ignore"
+      });
+      if (child.stdin === null || typeof child.stdin === "number" || child.stdout === null) {
+        throw new Error("Python worker pipes were not created");
+      }
+      return {
+        stdin: child.stdin,
+        stdout: child.stdout,
+        kill() { child.kill(); }
+      };
+    }, [python, resolve(import.meta.dir, "../../../hermes_cli/migration/python_runtime_bridge_worker.py")]);
+    const bridge = new PythonRuntimeBridge(transport);
+    const call = {
+      requestId: "runtime-subprocess-request",
+      sessionId: "runtime-subprocess-session",
+      messages: [{ role: "user" as const, content: "hello" }],
+      tools: [],
+      policies: [],
+      cwd: workspace,
+      environment: {},
+      credentialHandles: [],
+      deadline: Date.now() + 10_000,
+      cancellation: { requested: false as const }
+    };
+
+    assert.deepEqual(await bridge.execute({ ...call, model: "test:deterministic" }), {
+      message: { role: "assistant", content: "deterministic test response" },
+      usage: { inputTokens: 0, outputTokens: 0 },
+      finishReason: "stop"
+    });
+
+    const productionModel = "production-model-must-not-leak";
+    await assert.rejects(bridge.execute({
+      ...call,
+      requestId: "runtime-production-request",
+      sessionId: "runtime-production-session",
+      model: productionModel,
+      deadline: Date.now() + 10_000
+    }), error => {
+      assert(error instanceof PythonRuntimeBridgeError);
+      assert.equal(error.code, "worker_error");
+      assert.equal(error.requestId, "runtime-production-request");
+      assert.equal(error.sessionId, "runtime-production-session");
+      assert.equal(error.message.includes(productionModel), false);
+      return true;
+    });
+  } finally {
+    if (previousHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

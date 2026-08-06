@@ -2,11 +2,21 @@ import type {
   HarnessEvent,
   HarnessToolCall,
   HarnessToolResult,
-  HarnessUsage
+  HarnessUsage,
+  HarnessFinishReason,
+  HarnessProviderMetadata
 } from "harness";
 import type { TransportEvent, WorkspaceSummary } from "data-layer/contracts";
 
-type GatewayUsage = { inputTokens: number; outputTokens: number; totalTokens?: number };
+type GatewayUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens?: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+};
 
 export type GatewayClientRequest = {
   workspaceId: WorkspaceSummary["id"];
@@ -19,7 +29,14 @@ export type GatewayProtocolEvent =
   | { type: "message.delta"; session_id: string; payload: { text: string } }
   | { type: "message.complete"; session_id: string; payload: { outcome: "completed" } }
   | { type: "reasoning.delta"; session_id: string; payload: { text: string } }
-  | { type: "status.update"; session_id: string; payload: { phase: string; usage?: GatewayUsage } }
+  | { type: "status.update"; session_id: string; payload: {
+    phase: string;
+    usage?: GatewayUsage;
+    finish_reason?: HarnessFinishReason;
+    reasoning?: string;
+    provider_request_id?: string;
+    metadata?: HarnessProviderMetadata;
+  } }
   | { type: "approval.request"; session_id: string; payload: { call_id: string; name: string } }
   | { type: "tool.start"; session_id: string; payload: { call_id: string; name: string } }
   | { type: "tool.generating"; session_id: string; payload: { call_id: string; name: string; arguments?: string } }
@@ -46,8 +63,14 @@ export type GatewayProviderProjectionEvent = GatewayProjectionBase & (
   | { readonly type: "provider.tool-call.delta"; readonly callId?: string; readonly name?: string; readonly arguments?: string }
   | { readonly type: "provider.tool-call"; readonly call: HarnessToolCall }
   | { readonly type: "provider.tool-result"; readonly callId: string; readonly result: HarnessToolResult }
-  | { readonly type: "provider.usage"; readonly usage: HarnessUsage }
-  | { readonly type: "provider.finished"; readonly usage?: HarnessUsage }
+  | { readonly type: "provider.usage"; readonly usage: HarnessUsage; readonly metadata?: HarnessProviderMetadata }
+  | {
+    readonly type: "provider.finished";
+    readonly usage?: HarnessUsage;
+    readonly finishReason?: HarnessFinishReason;
+    readonly metadata?: HarnessProviderMetadata;
+    readonly providerRequestId?: string;
+  }
 );
 
 export type GatewayDeltaProjectionEvent = GatewayProjectionBase & (
@@ -61,8 +84,19 @@ function usage(value: HarnessUsage): GatewayUsage {
   return {
     inputTokens: value.inputTokens,
     outputTokens: value.outputTokens,
-    ...(value.totalTokens === undefined ? {} : { totalTokens: value.totalTokens })
+    ...(value.totalTokens === undefined ? {} : { totalTokens: value.totalTokens }),
+    ...(value.cachedInputTokens === undefined ? {} : { cachedInputTokens: value.cachedInputTokens }),
+    ...(value.reasoningTokens === undefined ? {} : { reasoningTokens: value.reasoningTokens }),
+    ...(value.cacheCreationInputTokens === undefined ? {} : { cacheCreationInputTokens: value.cacheCreationInputTokens }),
+    ...(value.cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens: value.cacheReadInputTokens })
   };
+}
+
+function transportFinishReason(
+  value: HarnessFinishReason
+): "stop" | "length" | "tool_calls" | "content_filter" | "error" | undefined {
+  if (value === "unknown" || value === "cancelled") return value === "cancelled" ? "error" : undefined;
+  return value === "tool_call" ? "tool_calls" : value;
 }
 
 function generatingEvent(
@@ -102,7 +136,14 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       return {
         type: "status.update",
         session_id: event.sessionId,
-        payload: { phase: "provider.completed", usage: usage(event.usage) }
+        payload: {
+          phase: "provider.completed",
+          usage: usage(event.usage),
+          ...(event.finishReason === undefined ? {} : { finish_reason: event.finishReason }),
+          ...(event.reasoning === undefined ? {} : { reasoning: event.reasoning }),
+          ...(event.providerRequestId === undefined ? {} : { provider_request_id: event.providerRequestId }),
+          ...(event.metadata === undefined ? {} : { metadata: event.metadata })
+        }
       };
     case "provider.failed":
       return {
@@ -130,7 +171,11 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       return {
         type: "status.update",
         session_id: event.sessionId,
-        payload: { phase: "provider.usage", usage: usage(event.usage) }
+        payload: {
+          phase: "provider.usage",
+          usage: usage(event.usage),
+          ...(event.metadata === undefined ? {} : { metadata: event.metadata })
+        }
       };
     case "provider.finished":
       return {
@@ -138,7 +183,10 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
         session_id: event.sessionId,
         payload: {
           phase: "provider.finished",
-          ...(event.usage === undefined ? {} : { usage: usage(event.usage) })
+          ...(event.usage === undefined ? {} : { usage: usage(event.usage) }),
+          ...(event.finishReason === undefined ? {} : { finish_reason: event.finishReason }),
+          ...(event.providerRequestId === undefined ? {} : { provider_request_id: event.providerRequestId }),
+          ...(event.metadata === undefined ? {} : { metadata: event.metadata })
         }
       };
     case "approval.requested":
@@ -203,11 +251,25 @@ export function mapHarnessEventToTransportEvent(event: GatewayEventProjectionInp
     case "request.started":
       return { type: "session.started", sessionId: event.sessionId };
     case "provider.completed":
+      {
+        const finishReason = event.finishReason === undefined
+          ? undefined
+          : transportFinishReason(event.finishReason);
+        return {
+          type: "usage.updated",
+          sessionId: event.sessionId,
+          usage: usage(event.usage),
+          ...(event.reasoning === undefined ? {} : { reasoning: event.reasoning }),
+          ...(finishReason === undefined ? {} : { finishReason }),
+          ...(event.metadata === undefined ? {} : { metadata: event.metadata })
+        };
+      }
     case "provider.usage":
       return {
         type: "usage.updated",
         sessionId: event.sessionId,
-        usage: usage(event.usage)
+        usage: usage(event.usage),
+        ...(event.metadata === undefined ? {} : { metadata: event.metadata })
       };
     case "provider.text.delta":
     case "message.delta":

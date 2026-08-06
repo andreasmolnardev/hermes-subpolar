@@ -93,7 +93,9 @@ function isUsage(value: unknown): value is Usage {
   return nonNegative(value.inputTokens) && nonNegative(value.outputTokens) &&
     (value.totalTokens === undefined || nonNegative(value.totalTokens)) &&
     (value.cachedInputTokens === undefined || nonNegative(value.cachedInputTokens)) &&
-    (value.reasoningTokens === undefined || nonNegative(value.reasoningTokens));
+    (value.reasoningTokens === undefined || nonNegative(value.reasoningTokens)) &&
+    (value.cacheCreationInputTokens === undefined || nonNegative(value.cacheCreationInputTokens)) &&
+    (value.cacheReadInputTokens === undefined || nonNegative(value.cacheReadInputTokens));
 }
 
 function isRecovery(value: unknown): boolean {
@@ -260,6 +262,8 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_result_json TEXT,
   finish_reason TEXT,
   usage_json TEXT,
+  reasoning TEXT,
+  metadata_json TEXT,
   api_content_json TEXT,
   display_kind TEXT,
   display_metadata_json TEXT,
@@ -476,6 +480,8 @@ export class SQLiteSessionRepository implements SessionRepository {
       ["messages", "tool_result_json", "TEXT"],
       ["messages", "finish_reason", "TEXT"],
       ["messages", "usage_json", "TEXT"],
+      ["messages", "reasoning", "TEXT"],
+      ["messages", "metadata_json", "TEXT"],
       ["messages", "api_content_json", "TEXT"],
       ["messages", "display_kind", "TEXT"],
       ["messages", "display_metadata_json", "TEXT"],
@@ -596,6 +602,13 @@ export class SQLiteSessionRepository implements SessionRepository {
       const value = legacyFinishReason(finishReason);
       if (value === undefined) throw new UnsupportedSchemaError("messages.finish_reason is invalid");
       message.finishReason = value;
+    }
+    const reasoning = optionalString(row, "reasoning", "messages");
+    if (reasoning !== undefined) message.reasoning = reasoning;
+    if (row.metadata_json !== null && row.metadata_json !== undefined) {
+      const metadata = parseJson(row.metadata_json, "messages.metadata_json");
+      if (!isJsonObject(metadata)) throw new UnsupportedSchemaError("messages.metadata_json is invalid");
+      message.metadata = metadata;
     }
     if (row.tool_calls_json !== null && row.tool_calls_json !== undefined) {
       const calls = parseJson(row.tool_calls_json, "messages.tool_calls_json");
@@ -745,13 +758,14 @@ export class SQLiteSessionRepository implements SessionRepository {
       this.run(
         `INSERT INTO messages
           (id, session_id, schema_version, sequence, role, content_json, created_at, name,
-           tool_calls_json, tool_call_id, tool_result_json, finish_reason, usage_json,
-           api_content_json, display_kind, display_metadata_json, synthetic, context_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            tool_calls_json, tool_call_id, tool_result_json, finish_reason, usage_json,
+            reasoning, metadata_json, api_content_json, display_kind, display_metadata_json, synthetic, context_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         message.id, message.sessionId, message.schemaVersion, message.sequence, message.role,
         json(message.content), message.createdAt, message.name ?? null,
         optionalJson(message.toolCalls), message.toolCallId ?? null, optionalJson(message.toolResult),
-        message.finishReason ?? null, optionalJson(message.usage), optionalJson(message.apiContent),
+         message.finishReason ?? null, optionalJson(message.usage), message.reasoning ?? null,
+         optionalJson(message.metadata), optionalJson(message.apiContent),
         message.displayKind ?? null, optionalJson(message.displayMetadata),
         message.synthetic === undefined ? null : message.synthetic ? 1 : 0,
         optionalJson(message.context),

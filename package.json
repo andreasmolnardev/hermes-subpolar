@@ -9,13 +9,15 @@
     "tests-js"
   ],
   "scripts": {
-    "postinstall": "echo '✅ Browser tools ready. Run: python run_agent.py --help'",
+    "postinstall": "echo 'Subpolar TypeScript runtime ready. Run: bun run serve'",
     "check:boundaries": "bun scripts/check-package-boundaries.mjs",
     "test:boundaries": "bun test scripts/check-package-boundaries.test.mjs",
     "check:runtime": "bun run --filter './packages/*' check",
     "check:monorepo": "bun run check:boundaries && bun run test:boundaries && bun run check:runtime",
     "typecheck:runtime": "bun run --filter './packages/*' typecheck",
     "test": "bun run --filter './packages/*' test",
+    "build:web": "bun run --filter web-ui build",
+    "serve": "bun run --filter subpolar-server serve",
     "test:python": "scripts/run_tests.sh",
     "check:legacy": "npm run --ws check",
     "install:root": "npm install --workspaces=false",

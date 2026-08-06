@@ -520,10 +520,6 @@ function applyUniqueIds(normalized: NormalizedMessage, used: Set<string>): Norma
   };
 }
 
-function normalizeHarnessMessage(value: unknown, index: number): ProviderMessage {
-  return applyUniqueIds(normalizedMessage(value, index), new Set()).message;
-}
-
 export function normalizeHarnessMessages(values: readonly ProviderMessage[]): readonly (ProviderMessage & {
   readonly apiContent?: ProviderContent;
   readonly displayKind?: string;

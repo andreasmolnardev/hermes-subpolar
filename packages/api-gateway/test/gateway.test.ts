@@ -24,6 +24,10 @@ import {
 } from "../src/client.ts";
 import type { ProviderRequest, ProviderResult } from "chat-provider-interface";
 import { HarnessProviderError, type HarnessAtomicTurnWrite } from "harness";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SQLiteRuntimeSelectionStore } from "data-layer";
 
 const completion = {
   message: { role: "assistant" as const, content: "safe" },
@@ -81,6 +85,85 @@ test("gateway preserves legacy ChatMessage and policy snapshot inputs", async ()
   });
 
   assert.equal(result.message.content, "safe");
+});
+
+test("runtime config keeps Python authoritative when the migration flag is disabled", async () => {
+  let harnessCalls = 0;
+  let pythonCalls = 0;
+  const result = await createGateway({
+    runtimeConfig: { typescriptEnabled: false, defaultRuntime: "harness" },
+    runtimeAdapters: {
+      harness: {
+        runtime: "harness",
+        supports: () => true,
+        async execute() {
+          harnessCalls += 1;
+          return completion;
+        }
+      },
+      python: {
+        runtime: "python",
+        supports: () => true,
+        async execute() {
+          pythonCalls += 1;
+          return completion;
+        }
+      }
+    }
+  }).executeRequest({
+    model: "fake",
+    sessionId: "disabled-runtime-session",
+    runtime: "harness",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: []
+  }, { async complete() { return completion; } });
+
+  assert.deepEqual(result, completion);
+  assert.equal(harnessCalls, 0);
+  assert.equal(pythonCalls, 1);
+});
+
+test("runtime policy overrides an existing TypeScript pin without changing the pin", async () => {
+  const selections = new Map<string, "harness" | "python">([["policy-session", "harness"]]);
+  let harnessCalls = 0;
+  let pythonCalls = 0;
+  const gateway = createGateway({
+    runtimeConfig: { typescriptEnabled: false },
+    runtimeSelectionStore: {
+      load: sessionId => selections.get(sessionId),
+      save: (sessionId, runtime) => { selections.set(sessionId, runtime); }
+    },
+    runtimeAdapters: {
+      harness: {
+        runtime: "harness",
+        supports: () => true,
+        async execute() {
+          harnessCalls += 1;
+          return completion;
+        }
+      },
+      python: {
+        runtime: "python",
+        supports: () => true,
+        async execute() {
+          pythonCalls += 1;
+          return completion;
+        }
+      }
+    }
+  });
+
+  await gateway.executeRequest({
+    model: "fake",
+    sessionId: "policy-session",
+    runtime: "harness",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: []
+  }, { async complete() { return completion; } });
+
+  assert.equal(harnessCalls, 0);
+  assert.equal(pythonCalls, 1);
+  assert.equal(selections.get("policy-session"), "harness");
 });
 
 test("gateway validates and normalizes request boundaries", () => {
@@ -501,6 +584,53 @@ test("runtime selection remains pinned for session", async () => {
     { signal: true, cancellation: true },
     { signal: true, cancellation: true }
   ]);
+});
+
+test("SQLite runtime selection survives gateway recreation", async () => {
+  const home = mkdtempSync(join(tmpdir(), "gateway-runtime-selection-"));
+  const database = join(home, "state", "sessions.db");
+  const firstStore = new SQLiteRuntimeSelectionStore(database);
+  const provider = { async complete() { return completion; } };
+  try {
+    await createGateway({ runtimeSelectionStore: firstStore }).executeRequest({
+      model: "fake",
+      sessionId: "durable-runtime-session",
+      runtime: "harness",
+      messages: [{ role: "user", content: "first" }],
+      toolPolicies: []
+    }, provider);
+  } finally {
+    firstStore.close();
+  }
+
+  const restartedStore = new SQLiteRuntimeSelectionStore(database);
+  try {
+    let pythonCalls = 0;
+    await createGateway({
+      runtimeSelectionStore: restartedStore,
+      runtimeAdapters: {
+        python: {
+          runtime: "python",
+          supports: () => true,
+          async execute() {
+            pythonCalls += 1;
+            return completion;
+          }
+        }
+      }
+    }).executeRequest({
+      model: "fake",
+      sessionId: "durable-runtime-session",
+      runtime: "python",
+      messages: [{ role: "user", content: "second" }],
+      toolPolicies: []
+    }, provider);
+    assert.equal(pythonCalls, 0);
+    assert.equal(await restartedStore.load("durable-runtime-session"), "harness");
+  } finally {
+    restartedStore.close();
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("unsupported harness descriptor retains explicit Python fallback without duplicate call", async () => {
@@ -1083,7 +1213,7 @@ test("provider deltas project in order and terminal output is deduplicated", asy
       yield { type: "text-delta" as const, text: "hello" };
       yield { type: "reasoning-delta" as const, text: "because" };
       yield { type: "usage" as const, usage: { inputTokens: 1, outputTokens: 1 } };
-      yield { type: "finish" as const, finishReason: "stop" as const };
+      yield { type: "finish" as const, finishReason: "stop" as const, requestId: "provider-projection-request" };
     },
     async complete() {
       throw new Error("stream should be selected");
@@ -1107,6 +1237,13 @@ test("provider deltas project in order and terminal output is deduplicated", asy
     "usage.updated",
     "usage.updated"
   ]);
+  const finished = gatewayEvents.find(event =>
+    event.type === "status.update" && event.payload.phase === "provider.finished"
+  );
+  assert.equal(finished?.type, "status.update");
+  if (finished?.type === "status.update") {
+    assert.equal(finished.payload.provider_request_id, "provider-projection-request");
+  }
 
   const projectedTerminalEvents: GatewayProtocolEvent[] = [];
   const map = createGatewayEventMapper(event => projectedTerminalEvents.push(event));

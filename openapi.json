@@ -6,6 +6,34 @@
     "description": "Authenticated owner-scoped browser API for self-hosted Subpolar."
   },
   "paths": {
+    "/api/health": { "get": { "summary": "Return liveness status" } },
+    "/api/ready": { "get": { "summary": "Return readiness status" } },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Execute one TypeScript-owned chat completion",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" } } } },
+        "responses": { "200": { "description": "Completion result" }, "400": { "$ref": "#/components/responses/InvalidRequest" } }
+      }
+    },
+    "/v1/ws": { "get": { "summary": "Upgrade to the authenticated Subpolar event stream", "x-websocket": true } },
+    "/v1/auth/bootstrap": {
+      "get": { "summary": "Return whether first-user bootstrap is required" },
+      "post": { "summary": "Create the first local administrator and session" }
+    },
+    "/v1/auth/login": { "post": { "summary": "Create an authenticated browser session" } },
+    "/v1/auth/logout": { "post": { "summary": "Revoke the current browser session" } },
+    "/v1/auth/password": { "post": { "summary": "Rotate the authenticated user password and session" } },
+    "/v1/me": { "get": { "summary": "Return the authenticated user" } },
+    "/v1/projects": {
+      "get": { "summary": "List projects owned by the authenticated user" },
+      "post": { "summary": "Create a project owned by the authenticated user" }
+    },
+    "/v1/agents": {
+      "get": { "summary": "List agents owned by the authenticated user" },
+      "post": { "summary": "Create an agent owned by the authenticated user" }
+    },
+    "/v1/sessions": { "get": { "summary": "List sessions owned by the authenticated user" } },
+    "/v1/sessions/{sessionId}": { "get": { "summary": "Read an owned session transcript" } },
     "/api/auth/bootstrap": {
       "get": { "summary": "Return first-user bootstrap status" }
     },
@@ -98,5 +126,26 @@
     "/api/subpolar/source-control/commit": { "post": { "summary": "Commit workspace changes" } },
     "/api/subpolar/sessions": { "get": { "summary": "List owned conversations" } },
     "/api/subpolar/sessions/{session_id}/messages": { "get": { "summary": "Read owned transcript" } }
+  },
+  "components": {
+    "schemas": {
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": ["model", "messages"],
+        "additionalProperties": false,
+        "properties": {
+          "model": { "type": "string", "minLength": 1 },
+          "messages": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["role", "content"], "additionalProperties": false, "properties": { "role": { "enum": ["system", "user", "assistant"] }, "content": { "type": "string" } } } },
+          "stream": { "type": "boolean" },
+          "sessionId": { "type": "string" },
+          "projectId": { "type": "string" },
+          "agentId": { "type": "string" },
+          "requestId": { "type": "string" }
+        }
+      }
+    },
+    "responses": {
+      "InvalidRequest": { "description": "The request was rejected before provider execution" }
+    }
   }
 }

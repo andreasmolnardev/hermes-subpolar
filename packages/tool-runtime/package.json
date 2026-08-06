@@ -1,18 +1,10 @@
 {
-  "name": "api-gateway",
+  "name": "tool-runtime",
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts",
-    "./client": "./src/client.ts"
-  },
-  "dependencies": {
-    "harness": "0.0.0",
-    "tool-resolver": "0.0.0",
-    "chat-provider-interface": "0.0.0",
-    "data-layer": "0.0.0"
-  },
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "tool-resolver": "0.0.0" },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test test",

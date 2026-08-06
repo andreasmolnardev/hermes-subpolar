@@ -11,6 +11,7 @@ import {
   type HarnessAtomicTurnWrite,
   type HarnessEvent,
   type HarnessMessage,
+  type HarnessContextRouting,
   type HarnessProvider,
   type HarnessProviderRequest,
   type HarnessProviderResult,
@@ -75,6 +76,48 @@ test("text-only loop emits one terminal event in order", async () => {
   assert.equal(result.outcome, "completed");
   assert.deepEqual(events.map(event => event.type), ["request.started", "provider.requested", "provider.completed", "terminal"]);
   assert.equal(events.filter(event => event.type === "terminal").length, 1);
+});
+
+test("context source routes unsupported context before persistence, provider, or tool effects", async () => {
+  const events: HarnessEvent[] = [];
+  const effects: string[] = [];
+  const routing: HarnessContextRouting = {
+    outcome: "fallback",
+    fallback: {
+      runtime: "python",
+      reason: "unsupported-context-source",
+      sourceKind: "memory"
+    }
+  };
+  const result = await executeHarness(request({
+    async complete() {
+      effects.push("provider");
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, {
+    eventSink: event => events.push(event),
+    contextSource: async context => {
+      effects.push("context");
+      assert.equal(context.messages[0]?.content, "hello");
+      return routing;
+    },
+    persistence: {
+      async ensureSession() {
+        effects.push("session");
+      }
+    },
+    tools: [{ name: "write", policy: "allow" }],
+    toolExecutor: async () => {
+      effects.push("tool");
+      return { content: "must not run" };
+    }
+  }));
+
+  assert.equal(result.outcome, "fallback");
+  if (result.outcome === "fallback") assert.deepEqual(result.fallback, routing.fallback);
+  assert.deepEqual(effects, ["context"]);
+  assert.deepEqual(events.map(event => event.type), ["request.started", "terminal"]);
+  assert.equal(events[1]?.outcome, "fallback");
 });
 
 test("one tool call executes with parsed arguments, then completes", async () => {
@@ -311,6 +354,79 @@ test("atomic writes preserve structured assistant and tool sidecars", async () =
   assert.equal(writes[0]?.messages[1]?.usage?.reasoningTokens, 3);
   const usage = writes[0]?.usage;
   assert.equal((Array.isArray(usage) ? usage[0] : usage)?.usage.cacheReadInputTokens, 3);
+});
+
+test("api content replaces display content only in provider tool-loop requests", async () => {
+  const writes: HarnessAtomicTurnWrite[] = [];
+  let providerCalls = 0;
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      providerCalls += 1;
+      assert.equal("apiContent" in providerRequest.messages[0]!, false);
+      assert.equal(providerRequest.messages[0]?.content, "api request");
+      if (providerCalls === 1) {
+        return response({
+          role: "assistant",
+          content: "display tool request",
+          apiContent: "api tool request",
+          toolCalls: [{ id: "api-call", name: "lookup", arguments: "{}" }]
+        } as HarnessMessage);
+      }
+      assert.equal(providerRequest.messages[1]?.content, "api tool request");
+      assert.equal(providerRequest.messages[2]?.content, "api result");
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    messages: [{ role: "user", content: "display request", apiContent: "api request" }],
+    tools: [{ name: "lookup", policy: "allow" }],
+    toolExecutor: async () => ({ content: "display result", apiContent: "api result" }),
+    persistence: { async commitTurn(write) { writes.push(write); } }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(providerCalls, 2);
+  assert.equal(writes[0]?.messages[0]?.content, "display request");
+  assert.equal(writes[0]?.messages[0]?.apiContent, "api request");
+  assert.equal(writes[0]?.messages[1]?.content, "display tool request");
+  assert.equal(writes[0]?.messages[1]?.apiContent, "api tool request");
+  assert.equal(writes[0]?.messages[2]?.content, "display result");
+  assert.equal(writes[0]?.messages[2]?.apiContent, "api result");
+});
+
+test("context assembly runs once for retries and once for each tool-loop turn", async () => {
+  let providerCalls = 0;
+  let assemblies = 0;
+  const seenPrompts: string[] = [];
+  const result = await executeHarness(request({
+    async complete(providerRequest) {
+      providerCalls += 1;
+      seenPrompts.push(String(providerRequest.messages[0]?.content));
+      if (providerCalls === 1) {
+        throw new HarnessProviderError("busy", { category: "overloaded" });
+      }
+      if (providerCalls === 2) {
+        return response({
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "assemble-call", name: "lookup", arguments: "{}" }]
+        });
+      }
+      return response({ role: "assistant", content: "done" });
+    }
+  }, {
+    retryPolicy: { maxAttempts: 2 },
+    tools: [{ name: "lookup", policy: "allow" }],
+    toolExecutor: async () => ({ content: "result" }),
+    contextAssembler: async context => {
+      assemblies += 1;
+      return [{ role: "system", content: `injected-${assemblies}` }, ...context.messages];
+    }
+  }));
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(providerCalls, 3);
+  assert.equal(assemblies, 2);
+  assert.deepEqual(seenPrompts, ["injected-1", "injected-1", "injected-2"]);
 });
 
 test("final atomic write carries runtime, checkpoint, and recovery metadata", async () => {
@@ -909,6 +1025,62 @@ test("abort signal propagates and produces cancelled terminal", async () => {
 
   const result = await resultPromise;
   assert.equal(result.outcome, "cancelled");
+});
+
+test("cancellation while approval is pending emits cancellation, not approval rejection", async () => {
+  const abort = new AbortController();
+  const events: HarnessEvent[] = [];
+  let executed = false;
+  const resultPromise = executeHarness(request({
+    async complete() {
+      return response({ role: "assistant", content: "", toolCalls: [{ id: "approval-race", name: "write", arguments: "{}" }] });
+    }
+  }, {
+    signal: abort.signal,
+    eventSink: event => events.push(event),
+    tools: [{ name: "write", policy: "ask" }],
+    approvalPolicy: async () => await new Promise<"allow">(resolve => {
+      abort.abort();
+      setTimeout(() => resolve("allow"), 1);
+    }),
+    toolExecutor: async () => {
+      executed = true;
+      return { content: "must not execute" };
+    }
+  }));
+
+  const result = await resultPromise;
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(executed, false);
+  assert.equal(events.filter(event => event.type === "terminal").length, 1);
+});
+
+test("provider completion racing cancellation cannot continue to tools or emit twice", async () => {
+  const abort = new AbortController();
+  const events: HarnessEvent[] = [];
+  let toolCalls = 0;
+  const resultPromise = executeHarness(request({
+    async complete() {
+      return new Promise<HarnessProviderResult>(resolve => {
+        setTimeout(() => {
+          abort.abort();
+          resolve(response({ role: "assistant", content: "late", toolCalls: [{ id: "late", name: "write", arguments: "{}" }] }));
+        }, 0);
+      });
+    }
+  }, {
+    signal: abort.signal,
+    eventSink: event => events.push(event),
+    tools: [{ name: "write", policy: "allow" }],
+    toolExecutor: async () => {
+      toolCalls += 1;
+      return { content: "must not execute" };
+    }
+  }));
+  const result = await resultPromise;
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(toolCalls, 0);
+  assert.equal(events.filter(event => event.type === "terminal").length, 1);
 });
 
 test("deadline and budget stop before provider or tool effects", async () => {

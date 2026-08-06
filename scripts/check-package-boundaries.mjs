@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 export const PACKAGE_NAMES = [
   "web-ui",
   "api-gateway",
+  "subpolar-server",
   "harness",
+  "tool-runtime",
   "tool-resolver",
   "chat-provider-interface",
   "data-layer"
@@ -26,7 +28,9 @@ export const ALLOWED_DEPENDENCIES = {
     "chat-provider-interface",
     "data-layer"
   ]),
+  "subpolar-server": new Set(["api-gateway", "chat-provider-interface", "data-layer"]),
   harness: new Set(["tool-resolver", "chat-provider-interface"]),
+  "tool-runtime": new Set(["tool-resolver"]),
   "tool-resolver": new Set(["data-layer"]),
   "chat-provider-interface": new Set(),
   "data-layer": new Set(),

@@ -53,6 +53,9 @@ import {
   validateJsonSchema
 } from "tool-resolver";
 import {
+  createDefaultRuntimeSelectionStore
+} from "data-layer";
+import {
   createGatewayEventMapper,
   createTransportEventMapper,
   type GatewayEventProjectionInput,
@@ -93,6 +96,14 @@ export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
 export type GatewaySessionRepository = HarnessSessionRepository;
 
 export type GatewayRuntimeName = "harness" | "python";
+
+export type GatewayRuntimeConfig = {
+  /** The migration flag is intentionally opt-in. */
+  readonly typescriptEnabled?: boolean;
+  readonly defaultRuntime?: GatewayRuntimeName;
+  /** Shadow mode never invokes a second provider; it keeps Python authoritative. */
+  readonly shadowMode?: boolean;
+};
 
 export type GatewayRuntimeSelection = GatewayRuntimeName | {
   readonly runtime: GatewayRuntimeName;
@@ -228,6 +239,8 @@ export type GatewayRuntimeSelectionStore = {
 
 export type GatewayOptions = {
   readonly runtimeSelectionStore?: GatewayRuntimeSelectionStore;
+  readonly runtimeConfig?: GatewayRuntimeConfig;
+  readonly sessionRepository?: GatewaySessionRepository;
   readonly sessionCwdStore?: GatewaySessionCwdStore;
   readonly runtimeAdapters?: Partial<Record<GatewayRuntimeName, GatewayRuntimeAdapter>>;
   readonly toolExecutor?: HarnessToolExecutor;
@@ -263,7 +276,6 @@ class MemoryRuntimeSelectionStore implements GatewayRuntimeSelectionStore {
   }
 }
 
-const legacyRuntimeSelectionStore = new MemoryRuntimeSelectionStore();
 const legacySessionCwdStore = new MemoryGatewaySessionCwdStore();
 let nextRequestId = 0;
 
@@ -276,6 +288,18 @@ function validateRuntimeName(value: unknown): GatewayRuntimeName {
     throw new TypeError("Gateway runtime selection is invalid");
   }
   return value;
+}
+
+function validateRuntimeConfig(config: GatewayRuntimeConfig | undefined): GatewayRuntimeConfig | undefined {
+  if (config === undefined) return undefined;
+  if (config.typescriptEnabled !== undefined && typeof config.typescriptEnabled !== "boolean") {
+    throw new TypeError("Gateway runtime config typescriptEnabled must be boolean");
+  }
+  if (config.defaultRuntime !== undefined) validateRuntimeName(config.defaultRuntime);
+  if (config.shadowMode !== undefined && typeof config.shadowMode !== "boolean") {
+    throw new TypeError("Gateway runtime config shadowMode must be boolean");
+  }
+  return config;
 }
 
 function isPolicy(value: unknown): value is ToolPolicy {
@@ -972,7 +996,10 @@ class ProviderHarnessAdapter {
         } else if (event.type === "finish") {
           await adapter.emitProviderEvent({
             type: "provider.finished",
-            ...(event.usage === undefined ? {} : { usage: normalizeProviderUsage(event.usage) })
+            ...(event.usage === undefined ? {} : { usage: normalizeProviderUsage(event.usage) }),
+            finishReason: event.finishReason,
+            ...(event.metadata === undefined ? {} : { metadata: event.metadata }),
+            ...(event.requestId === undefined ? {} : { providerRequestId: event.requestId })
           });
         } else if (event.type === "error") {
           await adapter.emitProviderEvent({ type: "provider.failed", providerIndex: 0, category: event.error.category });
@@ -1119,9 +1146,21 @@ function projectPythonRuntimeEvent(
         result: { content: payload.content, ...(payload.isError === undefined ? {} : { isError: payload.isError }) }
       }));
     case "usage":
-      return Promise.resolve(eventSink({ ...base, type: "provider.usage", usage: payload.usage }));
+      return Promise.resolve(eventSink({
+        ...base,
+        type: "provider.usage",
+        usage: payload.usage,
+        ...(payload.metadata === undefined ? {} : { metadata: payload.metadata })
+      }));
     case "finished":
-      return Promise.resolve(eventSink({ ...base, type: "provider.finished", ...(payload.usage === undefined ? {} : { usage: payload.usage }) }));
+      return Promise.resolve(eventSink({
+        ...base,
+        type: "provider.finished",
+        ...(payload.usage === undefined ? {} : { usage: payload.usage }),
+        ...(payload.finishReason === undefined ? {} : { finishReason: payload.finishReason }),
+        ...(payload.metadata === undefined ? {} : { metadata: payload.metadata }),
+        ...(payload.requestId === undefined ? {} : { providerRequestId: payload.requestId })
+      }));
     case "failed":
       return Promise.resolve(eventSink({ ...base, type: "provider.failed", providerIndex: 0, ...(payload.category === undefined ? {} : { category: payload.category }) }));
   }
@@ -1201,6 +1240,7 @@ async function selectRuntime(
   request: GatewayNormalizedRequest,
   selection: GatewayRuntimeSelection | undefined,
   fallback: GatewayRuntimeAdapter | undefined,
+  config: GatewayRuntimeConfig | undefined,
   store: GatewayRuntimeSelectionStore,
   adapters: Map<GatewayRuntimeName, GatewayRuntimeAdapter>
 ): Promise<{
@@ -1209,13 +1249,17 @@ async function selectRuntime(
   persistedRuntime: GatewayRuntimeName | undefined;
 }> {
   const selected = selection === undefined
-    ? { runtime: "python" as const }
+    ? { runtime: config?.defaultRuntime ?? "python" as const }
     : typeof selection === "string" ? { runtime: selection } : selection;
-  const selectedRuntime = validateRuntimeName(selected.runtime);
+  let selectedRuntime = validateRuntimeName(selected.runtime);
+  const policyForcesPython = config?.shadowMode === true || config?.typescriptEnabled === false;
+  if (policyForcesPython) {
+    selectedRuntime = "python";
+  }
   const defaultPythonAdapter = adapters.get("python") ?? legacyPythonRuntimeAdapter;
   const persistedRuntime = await store.load(request.sessionId);
   if (persistedRuntime !== undefined) validateRuntimeName(persistedRuntime);
-  if (persistedRuntime === undefined && selected.adapter !== undefined) {
+  if (!policyForcesPython && persistedRuntime === undefined && selected.adapter !== undefined) {
     adapters.set(selectedRuntime, selected.adapter);
   }
   if (persistedRuntime === undefined && selected.fallback !== undefined) {
@@ -1226,12 +1270,19 @@ async function selectRuntime(
     validateRuntimeName(fallback.runtime);
     adapters.set(fallback.runtime, fallback);
   }
-  const adapter = persistedRuntime === undefined
-    ? selected.adapter ?? adapters.get(selectedRuntime)!
-    : adapters.get(persistedRuntime)!;
-  const selectedFallback = persistedRuntime === undefined
-    ? selected.fallback ?? fallback ?? defaultPythonAdapter
-    : fallback ?? defaultPythonAdapter;
+  const runtimeToUse = policyForcesPython ? "python" : persistedRuntime ?? selectedRuntime;
+  const adapter = runtimeToUse === "python"
+    ? selectedRuntime === "python" && selected.adapter !== undefined
+      ? selected.adapter
+      : adapters.get("python")!
+    : selected.adapter ?? adapters.get(runtimeToUse)!;
+  const selectedFallback = policyForcesPython
+    ? selected.fallback?.runtime === "python" && selected.fallback.supports(request)
+      ? selected.fallback
+      : defaultPythonAdapter
+    : persistedRuntime === undefined
+      ? selected.fallback ?? fallback ?? defaultPythonAdapter
+      : fallback ?? defaultPythonAdapter;
   return { adapter, fallback: selectedFallback, persistedRuntime };
 }
 
@@ -1257,6 +1308,7 @@ function configureHarnessRequest(
   const toolExecutor = request.toolExecutor ?? options.toolExecutor;
   const bridge = request.pythonToolBridge ?? options.pythonToolBridge;
   const configuredBridgeOptions = request.pythonToolBridgeOptions ?? options.pythonToolBridgeOptions;
+  const sessionRepository = request.sessionRepository ?? options.sessionRepository;
   const bridgeOptions = request.cwd === undefined
     ? configuredBridgeOptions
     : { ...(configuredBridgeOptions ?? {}), cwd: request.cwd };
@@ -1294,11 +1346,13 @@ function configureHarnessRequest(
     ...request,
     ...(toolExecutor === undefined ? {} : { toolExecutor }),
     ...(bridge === undefined ? {} : { pythonToolBridge: bridge }),
-    ...(effectiveBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: effectiveBridgeOptions })
+    ...(effectiveBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: effectiveBridgeOptions }),
+    ...(sessionRepository === undefined ? {} : { sessionRepository })
   };
 }
 
 export function createGateway(options: GatewayOptions = {}): Gateway {
+  const runtimeConfig = validateRuntimeConfig(options.runtimeConfig);
   const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
   const sessionCwdStore = options.sessionCwdStore ?? new MemoryGatewaySessionCwdStore();
   const turnLeases = options.turnLeaseManager ?? new GatewayTurnLeaseManager(options.turnLease);
@@ -1339,6 +1393,7 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
           normalized,
           request.runtime,
           request.runtimeFallback,
+          runtimeConfig,
           store,
           adapters
         );
@@ -1384,7 +1439,7 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   };
 }
 
-const legacyGateway = createGateway({ runtimeSelectionStore: legacyRuntimeSelectionStore });
+const legacyGateway = createGateway({ runtimeSelectionStore: createDefaultRuntimeSelectionStore() });
 
 export async function setSessionCwd(sessionId: string, cwd: string): Promise<void> {
   await legacyGateway.setSessionCwd(sessionId, cwd);
@@ -1395,7 +1450,7 @@ export async function clearSessionCwd(sessionId?: string): Promise<void> {
 }
 
 export function clearPinnedRuntime(sessionId?: string): void {
-  legacyRuntimeSelectionStore.clear(sessionId);
+  void legacyGateway.clearPinnedRuntime(sessionId);
 }
 
 export async function executeRequest(
@@ -1413,6 +1468,7 @@ export type {
   GatewayDeltaProjectionEvent,
   GatewayProtocolEvent
 };
+export { createGatewayEventMapper, createTransportEventMapper } from "./client";
 export {
   GatewayTurnLeaseError,
   GatewayTurnLeaseManager

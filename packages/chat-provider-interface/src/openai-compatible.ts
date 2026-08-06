@@ -20,7 +20,11 @@ import {
   type ProviderToolCall,
   type ProviderErrorCategory,
   type ProviderErrorContext,
-  type ProviderUsageInput
+  type ProviderUsageInput,
+  type ProviderMetadata,
+  type ProviderJsonValue,
+  type ProviderStreamEvent,
+  validateProviderStreamEvent
 } from "./index";
 
 export type OpenAICompatibleCredentials = {
@@ -224,12 +228,18 @@ function serializeResponseFormat(
   };
 }
 
-function serializeRequest(request: ProviderRequest): JsonRecord {
+function serializeRequest(request: ProviderRequest, stream = false): JsonRecord {
   const options = request.options;
+  const cacheMetadata = request.cacheHints === undefined ? undefined : {
+    ...(request.cacheHints.key === undefined ? {} : { key: request.cacheHints.key }),
+    ...(request.cacheHints.ttlMs === undefined ? {} : { ttlMs: request.cacheHints.ttlMs }),
+    ...(request.cacheHints.read === undefined ? {} : { read: request.cacheHints.read }),
+    ...(request.cacheHints.write === undefined ? {} : { write: request.cacheHints.write })
+  };
   return {
     model: request.model,
     messages: request.messages.map(serializeMessage),
-    stream: false,
+    stream,
     ...(request.tools.length === 0 ? {} : { tools: request.tools.map(serializeTool) }),
     ...(options?.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options?.topP === undefined ? {} : { top_p: options.topP }),
@@ -239,8 +249,101 @@ function serializeRequest(request: ProviderRequest): JsonRecord {
     ...(options?.seed === undefined ? {} : { seed: options.seed }),
     ...(options?.reasoningEffort === undefined ? {} : { reasoning_effort: options.reasoningEffort }),
     ...(options?.responseFormat === undefined ? {} : { response_format: serializeResponseFormat(options.responseFormat) }),
-    ...(options?.parallelToolCalls === undefined ? {} : { parallel_tool_calls: options.parallelToolCalls })
+    ...(options?.parallelToolCalls === undefined ? {} : { parallel_tool_calls: options.parallelToolCalls }),
+    ...(request.metadata === undefined && cacheMetadata === undefined ? {} : {
+      metadata: {
+        ...(request.metadata ?? {}),
+        ...(cacheMetadata === undefined ? {} : { hermes_cache: cacheMetadata })
+      }
+    })
   };
+}
+
+function streamChunkEvents(
+  chunk: unknown,
+  requestId: string | undefined,
+  identity: ProviderRequest["identity"],
+  metadata: ProviderMetadata | undefined,
+): ProviderStreamEvent[] {
+  if (!isRecord(chunk)) throw malformed("stream chunk", requestId);
+  const events: ProviderStreamEvent[] = [];
+  const chunkMetadata = responseMetadata(chunk) ?? metadata;
+  const choices = chunk.choices;
+  if (Array.isArray(choices)) {
+    const choice = choices[0];
+    if (isRecord(choice)) {
+      const delta = isRecord(choice.delta) ? choice.delta : {};
+      if (typeof delta.content === "string") events.push({ type: "text-delta", text: delta.content });
+      if (typeof delta.reasoning_content === "string") events.push({ type: "reasoning-delta", text: delta.reasoning_content });
+      if (Array.isArray(delta.tool_calls)) {
+        for (const candidate of delta.tool_calls) {
+          if (!isRecord(candidate)) throw malformed("stream tool call", requestId);
+          const fn = isRecord(candidate.function) ? candidate.function : {};
+          events.push({ type: "tool-call-delta", ...(typeof candidate.id === "string" ? { id: candidate.id } : {}), ...(typeof candidate.index === "number" ? { index: candidate.index } : {}), ...(typeof fn.name === "string" ? { name: fn.name } : {}), ...(typeof fn.arguments === "string" ? { arguments: fn.arguments } : {}) });
+        }
+      }
+      if (typeof choice.finish_reason === "string") events.push({ type: "finish", finishReason: normalizeProviderFinishReason(choice.finish_reason), ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }), ...(chunkMetadata === undefined ? {} : { metadata: chunkMetadata }) });
+    }
+  }
+  if (chunk.usage !== undefined) events.push({ type: "usage", usage: responseUsage(chunk.usage, requestId), ...(chunkMetadata === undefined ? {} : { metadata: chunkMetadata }) });
+  return events;
+}
+
+async function* streamOpenAIResponse(
+  response: Response,
+  requestId: string | undefined,
+  identity: ProviderRequest["identity"],
+  signal: AbortSignal,
+): AsyncIterable<ProviderStreamEvent> {
+  if (response.body === null) throw malformed("body", requestId);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finished = false;
+  const emit = (event: ProviderStreamEvent): ProviderStreamEvent => {
+    validateProviderStreamEvent(event);
+    return event;
+  };
+  try {
+    yield emit({ type: "start", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) });
+    while (true) {
+      if (signal.aborted) throw new ProviderError("OpenAI-compatible request cancelled", { category: "cancelled", ...(requestId === undefined ? {} : { requestId }) });
+      const next = await reader.read();
+      buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+        if (data === "[DONE]") {
+          if (!finished) { finished = true; yield emit({ type: "finish", finishReason: "stop", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) }); }
+          return;
+        }
+        const chunk = JSON.parse(data) as unknown;
+        for (const event of streamChunkEvents(chunk, requestId, identity, undefined)) {
+          if (event.type === "finish") finished = true;
+          yield emit(event);
+        }
+      }
+      if (next.done) break;
+    }
+    if (!finished) yield emit({ type: "finish", finishReason: "stop", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) });
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function responseMetadata(value: JsonRecord): ProviderMetadata | undefined {
+  const metadata: Record<string, ProviderJsonValue> = {};
+  for (const key of ["id", "model", "system_fingerprint", "service_tier"] as const) {
+    const candidate = value[key];
+    if (typeof candidate === "string" || typeof candidate === "number" ||
+        typeof candidate === "boolean" || candidate === null) {
+      metadata[key] = candidate;
+    }
+  }
+  return Object.keys(metadata).length === 0 ? undefined : metadata;
 }
 
 function responseUsage(value: unknown, requestId: string | undefined): ProviderUsageInput {
@@ -259,12 +362,20 @@ function responseUsage(value: unknown, requestId: string | undefined): ProviderU
   const reasoningTokens = completionDetails === undefined
     ? undefined
     : optionalNumber(completionDetails, "reasoning_tokens", "usage.completion_tokens_details", requestId);
+  const cacheCreationInputTokens = promptDetails === undefined
+    ? undefined
+    : optionalNumber(promptDetails, "cache_creation_input_tokens", "usage.prompt_tokens_details", requestId);
+  const cacheReadInputTokens = promptDetails === undefined
+    ? undefined
+    : optionalNumber(promptDetails, "cache_read_input_tokens", "usage.prompt_tokens_details", requestId);
   return {
     inputTokens: optionalNumber(value, "prompt_tokens", "usage", requestId) ?? 0,
     outputTokens: optionalNumber(value, "completion_tokens", "usage", requestId) ?? 0,
     ...(totalTokens === undefined ? {} : { totalTokens }),
     ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
-    ...(reasoningTokens === undefined ? {} : { reasoningTokens })
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+    ...(cacheCreationInputTokens === undefined ? {} : { cacheCreationInputTokens }),
+    ...(cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens })
   };
 }
 
@@ -309,6 +420,7 @@ function parseResponse(
     throw malformed("choices[0].message.reasoning_content", requestId);
   }
   const content: ProviderContent = message.content === null ? [] : message.content;
+  const metadata = responseMetadata(value);
   const result: ProviderResult = {
     message: {
       role: "assistant",
@@ -320,7 +432,8 @@ function parseResponse(
     finishReason: normalizeProviderFinishReason(choice.finish_reason === null ? undefined : choice.finish_reason),
     ...(reasoning === undefined ? {} : { reasoning }),
     ...(requestId === undefined ? {} : { requestId }),
-    ...(identity === undefined ? {} : { identity })
+    ...(identity === undefined ? {} : { identity }),
+    ...(metadata === undefined ? {} : { metadata })
   };
   validateProviderResult(result);
   return result;
@@ -460,6 +573,45 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
       } finally {
         context.dispose();
       }
+    },
+    stream(request: ProviderRequest): AsyncIterable<ProviderStreamEvent> {
+      validateProviderRequest(request);
+      const context = createProviderRequestContext(request);
+      const requestId = context.requestId;
+      return (async function* (): AsyncIterable<ProviderStreamEvent> {
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+          authorization: `Bearer ${options.credentials.apiKey}`,
+          ...options.headers,
+        };
+        if (options.credentials.organization !== undefined) headers["OpenAI-Organization"] = options.credentials.organization;
+        if (options.credentials.project !== undefined) headers["OpenAI-Project"] = options.credentials.project;
+        if (requestId !== undefined) headers["X-Request-ID"] = requestId;
+        try {
+          if (context.signal.aborted) throw abortRequestError(context);
+          const response = await options.fetch(endpointFor(options.baseUrl), {
+            method: "POST",
+            headers,
+            body: JSON.stringify(serializeRequest(request, true)),
+            signal: context.signal,
+          });
+          if (!response.ok) {
+            const responseId = requestIdFromResponse(response, requestId);
+            throw classifiedRequestError(
+              `OpenAI-compatible request failed with status ${response.status}`,
+              new Error("OpenAI-compatible provider request failed"),
+              { ...(responseId === undefined ? {} : { requestId: responseId }), statusCode: response.status },
+            );
+          }
+          yield* streamOpenAIResponse(response, requestIdFromResponse(response, requestId), request.identity, context.signal);
+        } catch (error) {
+          if (error instanceof ProviderError) throw error;
+          if (context.signal.aborted) throw abortRequestError(context);
+          throw classifiedRequestError("OpenAI-compatible streaming request failed", error, { ...(requestId === undefined ? {} : { requestId }) });
+        } finally {
+          context.dispose();
+        }
+      })();
     }
   };
 }

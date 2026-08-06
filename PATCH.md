@@ -60,6 +60,47 @@
   complete sidecar persistence, additive SQLite compatibility, and a real
   versioned whole-turn Python bridge. Unsupported integrations remain
   Python-authoritative before side effects.
+- Added additive provider metadata and cache-usage propagation through harness
+  lifecycle events and SQLite message/usage records, plus cache-hint forwarding
+  for the OpenAI-compatible adapter.
+- Added SQLite-backed per-session runtime selection and gateway runtime policy
+  seams. Runtime selection remains opt-in and disabled configuration keeps the
+  Python whole-turn fallback authoritative; cancellation/approval/provider race
+  coverage now asserts one terminal outcome and no post-cancel tool effect.
+- Default gateway runtime pins now use the shared `$HERMES_HOME/state.db`
+  location instead of a process-local map, and disabled/shadow policy cannot be
+  bypassed by a previously persisted TypeScript pin. Gateway completion events
+  retain provider request identity through the public projection.
+- Added fail-closed migration prerequisites: provider-facing API sidecars,
+  stable per-turn context assembly, typed unsupported-context fallback,
+  validated disabled-by-default `config.yaml` settings, deterministic JSONL
+  bridge-worker conformance, and a stateless first-cut eligibility gate. These
+  controls do not enable production TypeScript dispatch or relax Python
+  fallback/deletion gates.
+- Added `requirements.md`, a concise target-state architecture and feature
+  reference for TypeScript runtime ownership, retained Python concerns, and the
+  required parity, rollout, and deletion gates.
+- Began the clean-break TypeScript-only rewrite with the `tool-runtime` package.
+  It supplies native MCP tool handles, fixed-origin OpenAPI operation tools, and
+  verified argv-based shell execution with deny-by-default allowlists. Existing
+  Python compatibility, data migration, TUI, ACP, and cron behavior are not
+  targets of this new runtime contract.
+- Added the first Bun server delivery slice: strict `subpolar` argument parsing,
+  strict YAML/JSON config validation, liveness/readiness responses, traversal-safe static
+  asset serving, immutable hashed-asset caching, HTML-only SPA fallback, and
+  package-local web output at `packages/web-ui/dist`. Removed the Python Vite
+  dev proxy and token-injection plugin.
+- Hardened native tools with byte-bounded shell output, cancellation race
+  handling, fixed-origin OpenAPI 3.1 validation, local-reference and credential
+  header rejection, bounded response reads, and redacted MCP call failures.
+- Added authenticated TypeScript browser transport: first-user bootstrap,
+  password sessions, HttpOnly/CSRF cookies, same-origin checks, user-owned
+  projects, agents, and conversation sessions, provider streaming, SSE chat,
+  and an ordered authenticated `/v1/ws` event stream with cancellation.
+- Replaced the active `SubpolarApp` browser entry with the versioned Bun client:
+  login/bootstrap, private project and agent management, owned session loading,
+  live streamed chat rendering, model selection, mobile navigation, and stop
+  response controls. The old TUI/admin page sources are no longer imported by
+  the active browser entry.
 
-Deferred product items remain listed in `TODO.md` and are not reintroduced by
-this patch.
+Remaining rewrite work is tracked in `.plans/02-python-ts-migration.md`.

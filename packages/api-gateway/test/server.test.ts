@@ -83,7 +83,14 @@ test("server completes first-run provider and agent setup before dispatch", asyn
     const cookies = sessionCookies(bootstrap);
     const headers = { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin };
     assert.deepEqual(await (await fetch(`${server.url}v1/setup`, { headers: { cookie: cookies } })).json(), { complete: false, providerConfigured: false });
-    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ baseUrl: "http://127.0.0.1:11434/v1", apiKey: "local-key", model: "local-model" }) });
+    const providerCatalog = await fetch(`${server.url}v1/setup/providers`, { headers: { cookie: cookies } });
+    assert.equal(providerCatalog.status, 200);
+    const catalog = await providerCatalog.json() as { providers: readonly { slug: string }[] };
+    assert.ok(catalog.providers.some(provider => provider.slug === "openrouter"));
+    assert.ok(catalog.providers.some(provider => provider.slug === "anthropic"));
+    const invalidProvider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "not-a-hermes-provider", baseUrl: "https://example.test/v1", apiKey: "key", model: "model" }) });
+    assert.equal(invalidProvider.status, 400);
+    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "openrouter", baseUrl: "http://127.0.0.1:11434/v1", apiKey: "local-key", model: "local-model" }) });
     assert.equal(provider.status, 200);
     const agents = await fetch(`${server.url}v1/setup/agents`, { method: "POST", headers, body: JSON.stringify({ templates: ["research"] }) });
     assert.equal(agents.status, 201);

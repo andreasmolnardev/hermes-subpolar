@@ -1,5 +1,9 @@
 # Subpolar Patch Notes
 
+- Added shared Hermes model-provider catalog and authenticated setup catalog
+  endpoint. First-run setup now lists same provider universe as provider
+  settings and persists selected provider alongside connection credentials.
+
 ## Current Revamp
 
 - Added Bun migration foundation with six explicitly named runtime packages,

@@ -44,6 +44,12 @@ export {
   JsonRpcGatewayClient,
   type WebSocketLike
 } from './json-rpc-gateway'
+export {
+  MODEL_PROVIDER_CATALOG,
+  modelProvider,
+  type ModelProviderAuthType,
+  type ModelProviderDefinition
+} from './model-providers'
 export { skillInvocationText } from './skill-scaffold'
 export {
   type HermesSkin,

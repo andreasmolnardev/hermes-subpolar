@@ -1,3 +1,5 @@
+import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
+
 export type SubpolarUser = { readonly id: string; readonly username: string };
 export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly createdAt: string };
 export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly instructions: string; readonly createdAt: string };
@@ -59,8 +61,12 @@ export function setupStatus(): Promise<SubpolarSetupStatus> {
   return subpolarRequest("/v1/setup");
 }
 
-export function configureProvider(baseUrl: string, apiKey: string, model: string): Promise<{ readonly configured: true }> {
-  return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ baseUrl, apiKey, model }) });
+export function setupProviders(): Promise<{ readonly providers: readonly ModelProviderDefinition[] }> {
+  return subpolarRequest("/v1/setup/providers");
+}
+
+export function configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): Promise<{ readonly configured: true }> {
+  return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ provider, baseUrl, apiKey, model }) });
 }
 
 export function createInitialAgents(templates: readonly string[]): Promise<{ readonly project: SubpolarProject; readonly agents: readonly SubpolarAgent[] }> {

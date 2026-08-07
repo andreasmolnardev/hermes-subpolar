@@ -14,6 +14,7 @@ import {
   type SessionRecord,
 } from "data-layer";
 import { serveStatic } from "./static";
+import { MODEL_PROVIDER_CATALOG, modelProvider } from "@hermes/shared/model-providers";
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
@@ -273,12 +274,19 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
         return auth instanceof Response ? auth : json(identity.setupStatus(auth.principal.id));
       }
 
+      if (url.pathname === "/v1/setup/providers" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        return auth instanceof Response ? auth : json({ providers: MODEL_PROVIDER_CATALOG });
+      }
+
       if (url.pathname === "/v1/setup/provider" && request.method === "POST") {
         const auth = authenticated(request, identity, true);
         if (auth instanceof Response) return auth;
         try {
           const value = await body(request, maxRequestBytes);
-          identity.configureProvider(String(value.baseUrl ?? ""), String(value.apiKey ?? ""), String(value.model ?? ""));
+          const provider = String(value.provider ?? "openai-api");
+          if (modelProvider(provider) === undefined) throw new Error("provider is invalid");
+          identity.configureProvider(provider, String(value.baseUrl ?? ""), String(value.apiKey ?? ""), String(value.model ?? ""));
           return json({ configured: true });
         } catch { return json({ error: "invalid_provider" }, 400); }
       }

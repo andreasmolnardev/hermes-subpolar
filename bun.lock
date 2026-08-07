@@ -23,6 +23,7 @@
       "name": "api-gateway",
       "version": "0.0.0",
       "dependencies": {
+        "@hermes/shared": "0.0.0",
         "chat-provider-interface": "0.0.0",
         "data-layer": "0.0.0",
         "harness": "0.0.0",

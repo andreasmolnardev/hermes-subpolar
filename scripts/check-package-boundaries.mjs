@@ -25,7 +25,8 @@ export const ALLOWED_DEPENDENCIES = {
     "harness",
     "tool-resolver",
     "chat-provider-interface",
-    "data-layer"
+    "data-layer",
+    "shared"
   ]),
   harness: new Set(["tool-resolver", "chat-provider-interface"]),
   "tool-runtime": new Set(["tool-resolver"]),

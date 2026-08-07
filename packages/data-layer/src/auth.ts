@@ -42,6 +42,7 @@ export type OwnedSessionRecord = {
 };
 
 export type ProviderConnection = {
+  readonly provider: string;
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
@@ -121,6 +122,7 @@ CREATE TABLE IF NOT EXISTS session_owners (
 CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(owner_id, created_at);
 CREATE TABLE IF NOT EXISTS provider_connections (
   id INTEGER PRIMARY KEY CHECK (id = 1),
+  provider TEXT NOT NULL DEFAULT 'openai-api',
   base_url TEXT NOT NULL,
   api_key TEXT NOT NULL,
   model TEXT NOT NULL,
@@ -153,6 +155,11 @@ export class SQLiteIdentityRepository {
     this.db = new Database(path);
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     this.db.exec(AUTH_SCHEMA);
+    try {
+      this.db.exec("ALTER TABLE provider_connections ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai-api'");
+    } catch {
+      // Existing databases already have provider column.
+    }
   }
 
   close(): void {
@@ -309,20 +316,21 @@ export class SQLiteIdentityRepository {
   }
 
   providerConnection(): ProviderConnection | null {
-    const row = this.db.query<{ base_url: string; api_key: string; model: string }, []>(
-      "SELECT base_url, api_key, model FROM provider_connections WHERE id = 1",
+    const row = this.db.query<{ provider: string; base_url: string; api_key: string; model: string }, []>(
+      "SELECT provider, base_url, api_key, model FROM provider_connections WHERE id = 1",
     ).get();
-    return row === null ? null : { baseUrl: row.base_url, apiKey: row.api_key, model: row.model };
+    return row === null ? null : { provider: row.provider, baseUrl: row.base_url, apiKey: row.api_key, model: row.model };
   }
 
-  configureProvider(baseUrl: string, apiKey: string, model: string): void {
+  configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): void {
+    if (!provider.trim() || provider.length > 128) throw new Error("provider is invalid");
     let parsed: URL;
     try { parsed = new URL(baseUrl); } catch { throw new Error("provider URL is invalid"); }
     if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname))) throw new Error("provider URL must use HTTPS");
     if (!apiKey.trim() || !model.trim() || model.length > 256) throw new Error("provider configuration is invalid");
     this.db.run(
-      "INSERT INTO provider_connections (id, base_url, api_key, model, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url, api_key = excluded.api_key, model = excluded.model, updated_at = excluded.updated_at",
-      [parsed.toString().replace(/\/$/, ""), apiKey, model.trim(), now()],
+      "INSERT INTO provider_connections (id, provider, base_url, api_key, model, updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, api_key = excluded.api_key, model = excluded.model, updated_at = excluded.updated_at",
+      [provider.trim(), parsed.toString().replace(/\/$/, ""), apiKey, model.trim(), now()],
     );
   }
 

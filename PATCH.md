@@ -102,5 +102,10 @@
   live streamed chat rendering, model selection, mobile navigation, and stop
   response controls. The old TUI/admin page sources are no longer imported by
   the active browser entry.
+- Replaced the production Docker runtime with a Bun-only image and made
+  `bun run serve` start without preconfigured provider environment variables.
+  First visit now creates the administrator, stores an OpenAI-compatible
+  provider connection server-side, and creates the mandatory `master` agent
+  with an optional `research` specialist.
 
 Remaining rewrite work is tracked in `.plans/02-python-ts-migration.md`.

@@ -75,6 +75,26 @@ test("server authenticates users before dispatching owned chat turns", async () 
   }
 });
 
+test("server completes first-run provider and agent setup before dispatch", async () => {
+  const server = startSubpolarServer({ port: 0 });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ username: "operator", password: "correct horse" }) });
+    const cookies = sessionCookies(bootstrap);
+    const headers = { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin };
+    assert.deepEqual(await (await fetch(`${server.url}v1/setup`, { headers: { cookie: cookies } })).json(), { complete: false, providerConfigured: false });
+    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ baseUrl: "http://127.0.0.1:11434/v1", apiKey: "local-key", model: "local-model" }) });
+    assert.equal(provider.status, 200);
+    const agents = await fetch(`${server.url}v1/setup/agents`, { method: "POST", headers, body: JSON.stringify({ templates: ["research"] }) });
+    assert.equal(agents.status, 201);
+    const created = await agents.json() as { agents: readonly { name: string }[] };
+    assert.deepEqual(created.agents.map(agent => agent.name), ["master", "research"]);
+    assert.deepEqual(await (await fetch(`${server.url}v1/setup`, { headers: { cookie: cookies } })).json(), { complete: true, providerConfigured: true });
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("server exposes provider deltas as an authenticated SSE stream", async () => {
   const server = startSubpolarServer({
     port: 0,

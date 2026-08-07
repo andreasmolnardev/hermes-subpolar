@@ -24,6 +24,9 @@
     "/v1/auth/logout": { "post": { "summary": "Revoke the current browser session" } },
     "/v1/auth/password": { "post": { "summary": "Rotate the authenticated user password and session" } },
     "/v1/me": { "get": { "summary": "Return the authenticated user" } },
+    "/v1/setup": { "get": { "summary": "Return authenticated first-run setup status" } },
+    "/v1/setup/provider": { "post": { "summary": "Store the authenticated administrator's OpenAI-compatible provider connection" } },
+    "/v1/setup/agents": { "post": { "summary": "Create the mandatory master agent and selected initial templates" } },
     "/v1/projects": {
       "get": { "summary": "List projects owned by the authenticated user" },
       "post": { "summary": "Create a project owned by the authenticated user" }

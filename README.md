@@ -6,9 +6,11 @@ Hermes Subpolar transforms Hermes Agent into a graphical, self-hostable AI devel
 
 Whether running locally or as a Docker deployment in your homelab, Subpolar aims to provide an environment where humans and AI collaborate inside the same workspace rather than through an isolated chat window.
 
-## Supported Deployment
+## Start Locally
 
-Production deployment uses Docker Compose only. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+After `bun install`, run `bun run serve`, then open `http://127.0.0.1:8080`.
+The command builds the browser and starts the server. The first visit creates the administrator, connects
+an OpenAI-compatible model provider, and selects initial agent templates.
 
 ---
 

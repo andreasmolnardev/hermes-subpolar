@@ -5,13 +5,16 @@ import {
   bootstrap,
   bootstrapStatus,
   createAgent,
+  createInitialAgents,
   createProject,
+  configureProvider,
   currentUser,
   login,
   logout,
   projects,
   sessionTranscript,
   sessions,
+  setupStatus,
   SubpolarApiError,
   type SubpolarAgent,
   type SubpolarMessage,
@@ -77,6 +80,30 @@ function AuthScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
       </form>
     </main>
   );
+}
+
+function SetupScreen({ onComplete }: { onComplete: () => void }) {
+  const [step, setStep] = useState<"provider" | "agents">("provider");
+  const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("gpt-4.1-mini");
+  const [research, setResearch] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submitProvider(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    setBusy(true); setError(null);
+    try { await configureProvider(baseUrl, apiKey, model); setStep("agents"); } catch { setError("Could not save that provider connection. Check the URL, API key, and model."); } finally { setBusy(false); }
+  }
+
+  async function finish(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    setBusy(true); setError(null);
+    try { await createInitialAgents(research ? ["research"] : []); onComplete(); } catch { setError("Could not create the selected agents."); } finally { setBusy(false); }
+  }
+
+  return <main className="flex min-h-screen items-center justify-center bg-[#041c1c] px-5 text-[#ffe6cb]"><form onSubmit={step === "provider" ? submitProvider : finish} className="w-full max-w-xl rounded-2xl border border-[#ffe6cb]/15 bg-[#102b2d] p-8 shadow-2xl shadow-black/30"><div className="mb-8 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#f0c9a5] text-[#102b2d]"><Sparkles size={21} /></div><div><p className="text-xs uppercase tracking-[0.24em] text-[#91aaa0]">Subpolar setup</p><h1 className="text-2xl font-semibold">{step === "provider" ? "Connect a model provider" : "Choose your agent team"}</h1></div></div>{step === "provider" ? <><p className="mb-6 text-sm leading-6 text-[#b9c7bd]">Connect an OpenAI-compatible provider. Your API key stays on this server and is never sent back to the browser.</p><label className="mb-4 block text-xs uppercase tracking-[0.14em] text-[#91aaa0]">Base URL<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} type="url" required className="mt-2 w-full rounded-lg border border-[#ffe6cb]/15 bg-[#0b2224] px-3 py-3 text-sm normal-case tracking-normal text-[#ffe6cb] outline-none focus:border-[#f0c9a5]" /></label><label className="mb-4 block text-xs uppercase tracking-[0.14em] text-[#91aaa0]">API key<input value={apiKey} onChange={event => setApiKey(event.target.value)} type="password" autoComplete="off" required className="mt-2 w-full rounded-lg border border-[#ffe6cb]/15 bg-[#0b2224] px-3 py-3 text-sm normal-case tracking-normal text-[#ffe6cb] outline-none focus:border-[#f0c9a5]" /></label><label className="mb-5 block text-xs uppercase tracking-[0.14em] text-[#91aaa0]">Default model<input value={model} onChange={event => setModel(event.target.value)} required className="mt-2 w-full rounded-lg border border-[#ffe6cb]/15 bg-[#0b2224] px-3 py-3 text-sm normal-case tracking-normal text-[#ffe6cb] outline-none focus:border-[#f0c9a5]" /></label></> : <><p className="mb-6 text-sm leading-6 text-[#b9c7bd]">Every workspace includes <strong className="text-[#ffe6cb]">master</strong>, your primary agent. Add specialists now; you can manage them later.</p><label className="mb-5 flex cursor-pointer gap-3 rounded-xl border border-[#ffe6cb]/15 bg-[#0b2224] p-4"><input checked={research} onChange={event => setResearch(event.target.checked)} type="checkbox" className="mt-1 accent-[#f0c9a5]" /><span><span className="block font-medium">Research</span><span className="mt-1 block text-sm leading-5 text-[#91aaa0]">Investigates questions and returns concise findings for master.</span></span></label></>}{error !== null ? <p role="alert" className="mb-4 rounded-lg border border-red-300/20 bg-red-950/30 p-3 text-sm text-red-100">{error}</p> : null}<button disabled={busy} className="w-full rounded-lg bg-[#f0c9a5] px-4 py-3 text-sm font-semibold text-[#102b2d] transition hover:bg-[#ffe6cb] disabled:opacity-50">{busy ? "Working…" : step === "provider" ? "Continue" : "Open workspace"}</button></form></main>;
 }
 
 function Sidebar({
@@ -212,9 +239,11 @@ function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => voi
 export default function SubpolarApp() {
   const [user, setUser] = useState<SubpolarUser | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [setupComplete, setSetupComplete] = useState(false);
   const [loading, setLoading] = useState(true);
-  useEffect(() => { void currentUser().then(result => setUser(result.user)).catch(async reason => { if (!(reason instanceof SubpolarApiError) || reason.status !== 401) return; try { setAuthMode((await bootstrapStatus()).required ? "bootstrap" : "login"); } catch { setAuthMode("login"); } }).finally(() => setLoading(false)); }, []);
+  useEffect(() => { void currentUser().then(async result => { setUser(result.user); setSetupComplete((await setupStatus()).complete); }).catch(async reason => { if (!(reason instanceof SubpolarApiError) || reason.status !== 401) return; try { setAuthMode((await bootstrapStatus()).required ? "bootstrap" : "login"); } catch { setAuthMode("login"); } }).finally(() => setLoading(false)); }, []);
   if (loading) return <main className="flex min-h-screen items-center justify-center bg-[#041c1c] text-sm text-[#91aaa0]">Loading private workspace…</main>;
-  if (user === null) return <AuthScreen mode={authMode} onAuthenticated={setUser} />;
+  if (user === null) return <AuthScreen mode={authMode} onAuthenticated={async authenticated => { setUser(authenticated); setSetupComplete((await setupStatus()).complete); }} />;
+  if (!setupComplete) return <SetupScreen onComplete={() => setSetupComplete(true)} />;
   return <Workspace user={user} onLogout={() => { void logout().finally(() => setUser(null)); }} />;
 }

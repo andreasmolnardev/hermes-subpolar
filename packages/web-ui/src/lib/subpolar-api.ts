@@ -3,6 +3,7 @@ export type SubpolarProject = { readonly id: string; readonly ownerId: string; r
 export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly instructions: string; readonly createdAt: string };
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
+export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
 
 export class SubpolarApiError extends Error {
   readonly status: number;
@@ -52,6 +53,18 @@ export function logout(): Promise<{ readonly ok: true }> {
 
 export function currentUser(): Promise<{ readonly user: SubpolarUser }> {
   return subpolarRequest("/v1/me");
+}
+
+export function setupStatus(): Promise<SubpolarSetupStatus> {
+  return subpolarRequest("/v1/setup");
+}
+
+export function configureProvider(baseUrl: string, apiKey: string, model: string): Promise<{ readonly configured: true }> {
+  return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ baseUrl, apiKey, model }) });
+}
+
+export function createInitialAgents(templates: readonly string[]): Promise<{ readonly project: SubpolarProject; readonly agents: readonly SubpolarAgent[] }> {
+  return subpolarRequest("/v1/setup/agents", { method: "POST", body: JSON.stringify({ templates }) });
 }
 
 export function projects(): Promise<{ readonly projects: readonly SubpolarProject[] }> {

@@ -1,12 +1,8 @@
 # Subpolar self-hosted browser deployment.
 # Docker Compose is the supported production entry point.
 #
-# Optional explicit credentials before first start:
-#   export HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
-#   export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH='scrypt$...'
-#   export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)"
-# Or leave these unset and complete first-user bootstrap from the dashboard
-# when binding Subpolar through a protected reverse proxy.
+# Complete first-user bootstrap, provider connection, and agent selection in
+# the browser after the first start.
 #   docker compose up -d --build
 #
 # Put TLS and public authentication policy in a reverse proxy. Forward
@@ -19,27 +15,13 @@ services:
     container_name: hermes-subpolar
     restart: unless-stopped
     ports:
-      - '${SUBPOLAR_BIND:-127.0.0.1}:9119:9119'
+      - '${SUBPOLAR_BIND:-127.0.0.1}:8080:8080'
     volumes:
       - subpolar_data:/opt/data
     environment:
-      HERMES_HOME: /opt/data
-      HERMES_UID: '${HERMES_UID:-10000}'
-      HERMES_GID: '${HERMES_GID:-10000}'
-      HERMES_DASHBOARD: '1'
-      HERMES_DASHBOARD_HOST: 0.0.0.0
-      HERMES_DASHBOARD_PORT: '9119'
-      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: '${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}'
-      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH: '${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}'
-      HERMES_DASHBOARD_BASIC_AUTH_SECRET: '${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}'
-      HERMES_DASHBOARD_BASIC_AUTH_RESET_TOKEN: '${HERMES_DASHBOARD_BASIC_AUTH_RESET_TOKEN:-}'
-      HERMES_DASHBOARD_BASIC_AUTH_ALLOW_REGISTRATION: '${HERMES_DASHBOARD_BASIC_AUTH_ALLOW_REGISTRATION:-1}'
-      HERMES_DASHBOARD_PUBLIC_URL: '${HERMES_DASHBOARD_PUBLIC_URL:-}'
-      HERMES_SUBPOLAR_ONLY: '1'
-      SUBPOLAR_ALLOWED_ROOTS: '${SUBPOLAR_ALLOWED_ROOTS:-/opt/data/workspaces}'
-    command: ['gateway', 'run']
+    command: ['bun', 'packages/subpolar-server/src/cli.ts', '--host', '0.0.0.0', '--data-dir', '/opt/data']
     healthcheck:
-      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:9119/api/health >/dev/null']
+      test: ['CMD', 'bun', '-e', "fetch('http://127.0.0.1:8080/api/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12

@@ -1,4 +1,3 @@
-import { createOpenAICompatibleProvider } from "chat-provider-interface";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { startSubpolarServer } from "./server";
@@ -78,13 +77,12 @@ async function loadConfig(path: string | undefined): Promise<SubpolarConfig> {
 export async function runSubpolar(args: readonly string[] = process.argv.slice(2)): Promise<void> {
   const cli = parseSubpolarArgs(args);
   const config = await loadConfig(cli.configPath);
-  const baseUrl = config.providerBaseUrl;
-  const apiKey = process.env.SUBPOLAR_OPENAI_API_KEY;
-  if (!baseUrl || !apiKey) throw new Error("providerBaseUrl in --config and SUBPOLAR_OPENAI_API_KEY are required");
   const port = config.port ?? cli.port;
   if (config.port !== undefined) positivePort(String(config.port));
   startSubpolarServer({
-    provider: createOpenAICompatibleProvider({ baseUrl, credentials: { apiKey }, fetch }),
+    ...(config.providerBaseUrl !== undefined && process.env.SUBPOLAR_OPENAI_API_KEY !== undefined ? {
+      provider: (await import("chat-provider-interface")).createOpenAICompatibleProvider({ baseUrl: config.providerBaseUrl, credentials: { apiKey: process.env.SUBPOLAR_OPENAI_API_KEY }, fetch }),
+    } : {}),
     hostname: config.host ?? cli.host,
     port,
     staticRoot: config.staticRoot ?? resolve(process.cwd(), "packages/web-ui/dist"),

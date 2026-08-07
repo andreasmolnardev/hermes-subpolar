@@ -41,6 +41,17 @@ export type OwnedSessionRecord = {
   readonly createdAt: string;
 };
 
+export type ProviderConnection = {
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly model: string;
+};
+
+export type SetupStatus = {
+  readonly complete: boolean;
+  readonly providerConfigured: boolean;
+};
+
 export class AuthenticationError extends Error {
   constructor(message = "Authentication required") {
     super(message);
@@ -108,6 +119,13 @@ CREATE TABLE IF NOT EXISTS session_owners (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(owner_id, created_at);
+CREATE TABLE IF NOT EXISTS provider_connections (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  base_url TEXT NOT NULL,
+  api_key TEXT NOT NULL,
+  model TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 function hashToken(token: string): string {
@@ -280,5 +298,50 @@ export class SQLiteIdentityRepository {
       ...(row.agent_id === null ? {} : { agentId: row.agent_id }),
       createdAt: required(row.created_at, "session createdAt"),
     }));
+  }
+
+  setupStatus(userId: string): SetupStatus {
+    const providerConfigured = this.providerConnection() !== null;
+    const complete = providerConfigured && this.db.query<{ count: number }, [string]>(
+      "SELECT COUNT(*) AS count FROM agents WHERE owner_id = ? AND name = 'master'",
+    ).get(userId)?.count === 1;
+    return { complete, providerConfigured };
+  }
+
+  providerConnection(): ProviderConnection | null {
+    const row = this.db.query<{ base_url: string; api_key: string; model: string }, []>(
+      "SELECT base_url, api_key, model FROM provider_connections WHERE id = 1",
+    ).get();
+    return row === null ? null : { baseUrl: row.base_url, apiKey: row.api_key, model: row.model };
+  }
+
+  configureProvider(baseUrl: string, apiKey: string, model: string): void {
+    let parsed: URL;
+    try { parsed = new URL(baseUrl); } catch { throw new Error("provider URL is invalid"); }
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname))) throw new Error("provider URL must use HTTPS");
+    if (!apiKey.trim() || !model.trim() || model.length > 256) throw new Error("provider configuration is invalid");
+    this.db.run(
+      "INSERT INTO provider_connections (id, base_url, api_key, model, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url, api_key = excluded.api_key, model = excluded.model, updated_at = excluded.updated_at",
+      [parsed.toString().replace(/\/$/, ""), apiKey, model.trim(), now()],
+    );
+  }
+
+  createInitialAgents(userId: string, templates: readonly string[]): { project: ProjectRecord; agents: readonly AgentRecord[] } {
+    const allowed = new Set(["research"]);
+    if (templates.some(template => !allowed.has(template))) throw new Error("agent template is invalid");
+    this.db.run("BEGIN IMMEDIATE");
+    try {
+      let project = this.listProjects(userId)[0];
+      if (project === undefined) project = this.createProject(userId, "My workspace");
+      const existing = this.listAgents(userId, project.id);
+      const created: AgentRecord[] = [];
+      if (!existing.some(agent => agent.name === "master")) created.push(this.createAgent(userId, project.id, "master", "You are the primary Subpolar agent. Coordinate the selected specialist agents when useful."));
+      if (templates.includes("research") && !existing.some(agent => agent.name === "research")) created.push(this.createAgent(userId, project.id, "research", "Research thoroughly, cite uncertainty, and return concise findings to the master agent."));
+      this.db.run("COMMIT");
+      return { project, agents: created };
+    } catch (error) {
+      this.db.run("ROLLBACK");
+      throw error;
+    }
   }
 }

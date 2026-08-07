@@ -1,6 +1,5 @@
 # Windows Docker Desktop override for the same single Subpolar service.
-# Configure auth variables in .env or the invoking shell before starting.
 services:
   subpolar:
     ports:
-      - "127.0.0.1:9119:9119"
+      - "127.0.0.1:8080:8080"

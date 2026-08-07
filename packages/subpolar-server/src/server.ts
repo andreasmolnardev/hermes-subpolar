@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGateway, type GatewayProtocolEvent } from "api-gateway";
-import type { ChatProvider, ProviderMessage } from "chat-provider-interface";
+import { createOpenAICompatibleProvider, type ChatProvider, type ProviderMessage } from "chat-provider-interface";
 import {
   AuthenticationError,
   OwnershipError,
@@ -16,7 +16,7 @@ import {
 import { serveStatic } from "./static";
 
 export type SubpolarServerOptions = {
-  readonly provider: ChatProvider;
+  readonly provider?: ChatProvider;
   readonly hostname?: string;
   readonly port?: number;
   readonly staticRoot?: string;
@@ -190,8 +190,10 @@ export function startSubpolarServer(options: SubpolarServerOptions): ReturnType<
     emit: (event: GatewayProtocolEvent) => void | Promise<void>,
   ): Promise<unknown> => {
     const prepared = await prepareTurn(principal, input);
+    const connection = options.provider === undefined ? identity.providerConnection() : null;
+    if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
     return gateway.executeRequest({
-      model: prepared.input.model,
+      model: prepared.input.model === "default" && connection !== null ? connection.model : prepared.input.model,
       messages: prepared.input.messages,
       toolPolicies: [],
       runtime: "harness",
@@ -199,7 +201,11 @@ export function startSubpolarServer(options: SubpolarServerOptions): ReturnType<
       requestId: prepared.input.requestId ?? randomUUID(),
       signal,
       eventSink: emit,
-    }, options.provider);
+    }, options.provider ?? (() => {
+      // The connection has been validated above and is never returned to clients.
+      const configured = connection as NonNullable<typeof connection>;
+      return createOpenAICompatibleProvider({ baseUrl: configured.baseUrl, credentials: { apiKey: configured.apiKey }, fetch });
+    })());
   };
 
   const server = Bun.serve<WebSocketData>({
@@ -260,6 +266,31 @@ export function startSubpolarServer(options: SubpolarServerOptions): ReturnType<
       if (url.pathname === "/v1/me" && request.method === "GET") {
         const auth = authenticated(request, identity);
         return auth instanceof Response ? auth : json({ user: auth.principal });
+      }
+
+      if (url.pathname === "/v1/setup" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        return auth instanceof Response ? auth : json(identity.setupStatus(auth.principal.id));
+      }
+
+      if (url.pathname === "/v1/setup/provider" && request.method === "POST") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const value = await body(request, maxRequestBytes);
+          identity.configureProvider(String(value.baseUrl ?? ""), String(value.apiKey ?? ""), String(value.model ?? ""));
+          return json({ configured: true });
+        } catch { return json({ error: "invalid_provider" }, 400); }
+      }
+
+      if (url.pathname === "/v1/setup/agents" && request.method === "POST") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const value = await body(request, maxRequestBytes);
+          if (!Array.isArray(value.templates) || value.templates.some(template => typeof template !== "string")) throw new Error("templates are invalid");
+          return json(identity.createInitialAgents(auth.principal.id, value.templates), 201);
+        } catch { return json({ error: "invalid_templates" }, 400); }
       }
 
       if (url.pathname === "/v1/projects") {

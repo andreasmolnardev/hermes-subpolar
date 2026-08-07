@@ -229,7 +229,7 @@ in order unless a dependency is explicitly moved earlier.
 
 - [x] Make `subpolar` accept only `serve`, `--host`, `--port`, `--config`, and
   `--data-dir`; reject unknown positional commands.
-- [ ] Change Vite output to `packages/web-ui/dist`; remove Python build/serve
+- [x] Change Vite output to `packages/web-ui/dist`; remove Python build/serve
   paths and injected token globals.
 - [x] Serve hashed assets with immutable cache headers, HTML with `no-store`,
   safe SPA fallback, and no fallback for `/v1/*` or `/api/*` misses.
@@ -257,7 +257,7 @@ in order unless a dependency is explicitly moved earlier.
 
 ### Exit Gate
 
-- [ ] Clean install builds the UI and `bun run serve` serves it without Python.
+- [x] Clean install builds the UI and `bun run serve` serves it without Python.
 - [ ] Browser E2E covers bootstrap, login, logout, CSRF rejection, static asset
   loading, API 404 behavior, and graceful shutdown.
 - [ ] No source in active runtime packages imports Python paths or launches a
@@ -505,7 +505,10 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
   usage drift.
 - [ ] Run clean install, package build, full Bun tests, browser E2E, API
   contract tests, Docker health/restart tests, and manual live-provider gates.
-- [ ] Delete Python runtime directories and dependencies only after the Bun
+- [x] Delete Python CLI, TUI, server, ACP, packaging, and installer runtime
+  paths after the Bun replacement is available. Remaining Python source is
+  historical and is not reachable from a supported runtime.
+- [ ] Delete remaining Python runtime directories and dependencies only after the Bun
   product has passed the complete TypeScript release matrix. No compatibility
   window or data migration is needed, but the deletion must not happen before a
   functioning replacement exists.

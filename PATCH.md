@@ -85,11 +85,11 @@
   verified argv-based shell execution with deny-by-default allowlists. Existing
   Python compatibility, data migration, TUI, ACP, and cron behavior are not
   targets of this new runtime contract.
-- Added the first Bun server delivery slice: strict `subpolar` argument parsing,
-  strict YAML/JSON config validation, liveness/readiness responses, traversal-safe static
-  asset serving, immutable hashed-asset caching, HTML-only SPA fallback, and
-  package-local web output at `packages/web-ui/dist`. Removed the Python Vite
-  dev proxy and token-injection plugin.
+- Added the first Bun server delivery slice: environment-based server settings,
+  liveness/readiness responses, traversal-safe static asset serving, immutable
+  hashed-asset caching, HTML-only SPA fallback, and package-local web output at
+  `packages/web-ui/dist`. Removed the Python Vite dev proxy and token-injection
+  plugin.
 - Hardened native tools with byte-bounded shell output, cancellation race
   handling, fixed-origin OpenAPI 3.1 validation, local-reference and credential
   header rejection, bounded response reads, and redacted MCP call failures.
@@ -107,9 +107,8 @@
   First visit now creates the administrator, stores an OpenAI-compatible
   provider connection server-side, and creates the mandatory `master` agent
   with an optional `research` specialist.
-- Changed web frontend default theme from Hermes Teal to Tokyo Night while
-  preserving the persisted `default` theme identifier.
-- Reduced frontend border weight to 1px and applied a translucent Tokyo Night
-  blue border treatment across shared and legacy shell styles.
+- Made `api-gateway` the uniform API abstraction layer and Bun server package;
+  moved HTTP/WebSocket transport, auth/session composition, static serving, and
+  server tests into it, then removed redundant `subpolar-server` package.
 
 Remaining rewrite work is tracked in `.plans/02-python-ts-migration.md`.

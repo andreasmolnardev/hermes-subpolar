@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { createGateway, type GatewayProtocolEvent } from "api-gateway";
+import { createGateway, type GatewayProtocolEvent } from "./index";
 import { createOpenAICompatibleProvider, type ChatProvider, type ProviderMessage } from "chat-provider-interface";
 import {
   AuthenticationError,
@@ -15,7 +15,7 @@ import {
 } from "data-layer";
 import { serveStatic } from "./static";
 
-export type SubpolarServerOptions = {
+export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
   readonly hostname?: string;
   readonly port?: number;
@@ -144,7 +144,7 @@ function sessionRecord(sessionId: string, projectId: string | undefined, model: 
     status: "active",
     createdAt: timestamp,
     updatedAt: timestamp,
-    runtime: { runtimeVersion: "subpolar-server", schemaVersion: 1 },
+    runtime: { runtimeVersion: "api-gateway", schemaVersion: 1 },
     model,
   };
 }
@@ -153,10 +153,10 @@ function eventJson(requestId: string, sequence: number, event: GatewayProtocolEv
   return JSON.stringify({ protocol: "subpolar.v1", requestId, sequence, event });
 }
 
-export function startSubpolarServer(options: SubpolarServerOptions): ReturnType<typeof Bun.serve> {
+export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnType<typeof Bun.serve> {
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   if (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1) throw new TypeError("maxRequestBytes must be positive");
-  const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "subpolar-server-"));
+  const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "api-gateway-"));
   const databasePath = join(dataDir, "state.db");
   const sessions = new SQLiteSessionRepository(databasePath);
   const identity = new SQLiteIdentityRepository(databasePath);
@@ -406,4 +406,29 @@ export function startSubpolarServer(options: SubpolarServerOptions): ReturnType<
     },
   });
   return server;
+}
+
+if (import.meta.main) {
+  const port = Number(process.env.SUBPOLAR_PORT ?? "8080");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("SUBPOLAR_PORT must be a valid TCP port");
+  }
+  startApiGatewayServer({
+    hostname: process.env.SUBPOLAR_HOST ?? "127.0.0.1",
+    port,
+    staticRoot: process.env.SUBPOLAR_STATIC_ROOT ?? resolve(process.cwd(), "packages/web-ui/dist"),
+    ...(process.env.SUBPOLAR_DATA_DIR === undefined ? {} : { dataDir: process.env.SUBPOLAR_DATA_DIR }),
+  });
+}
+if (import.meta.main) {
+  const port = Number(process.env.SUBPOLAR_PORT ?? "8080");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("SUBPOLAR_PORT must be a valid TCP port");
+  }
+  startApiGatewayServer({
+    hostname: process.env.SUBPOLAR_HOST ?? "127.0.0.1",
+    port,
+    staticRoot: process.env.SUBPOLAR_STATIC_ROOT ?? resolve(process.cwd(), "packages/web-ui/dist"),
+    ...(process.env.SUBPOLAR_DATA_DIR === undefined ? {} : { dataDir: process.env.SUBPOLAR_DATA_DIR }),
+  });
 }

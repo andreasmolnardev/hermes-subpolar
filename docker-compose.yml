@@ -19,7 +19,9 @@ services:
     volumes:
       - subpolar_data:/opt/data
     environment:
-    command: ['bun', 'packages/subpolar-server/src/cli.ts', '--host', '0.0.0.0', '--data-dir', '/opt/data']
+      SUBPOLAR_HOST: 0.0.0.0
+      SUBPOLAR_DATA_DIR: /opt/data
+    command: ['bun', 'packages/api-gateway/src/server.ts']
     healthcheck:
       test: ['CMD', 'bun', '-e', "fetch('http://127.0.0.1:8080/api/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s

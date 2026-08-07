@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "bun:test";
 
-import { startSubpolarServer } from "../src/server.ts";
+import { startApiGatewayServer } from "../src/server.ts";
 
 function sessionCookies(response: Response): string {
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
@@ -16,7 +16,7 @@ function csrf(cookies: string): string {
 }
 
 test("server authenticates users before dispatching owned chat turns", async () => {
-  const server = startSubpolarServer({
+  const server = startApiGatewayServer({
     port: 0,
     provider: {
       async complete() {
@@ -76,7 +76,7 @@ test("server authenticates users before dispatching owned chat turns", async () 
 });
 
 test("server completes first-run provider and agent setup before dispatch", async () => {
-  const server = startSubpolarServer({ port: 0 });
+  const server = startApiGatewayServer({ port: 0 });
   try {
     const origin = new URL(server.url).origin;
     const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ username: "operator", password: "correct horse" }) });
@@ -96,7 +96,7 @@ test("server completes first-run provider and agent setup before dispatch", asyn
 });
 
 test("server exposes provider deltas as an authenticated SSE stream", async () => {
-  const server = startSubpolarServer({
+  const server = startApiGatewayServer({
     port: 0,
     provider: {
       async complete() {
@@ -133,7 +133,7 @@ test("server exposes provider deltas as an authenticated SSE stream", async () =
 });
 
 test("server upgrades authenticated WebSockets and projects ordered chat events", async () => {
-  const server = startSubpolarServer({
+  const server = startApiGatewayServer({
     port: 0,
     provider: {
       async complete() {

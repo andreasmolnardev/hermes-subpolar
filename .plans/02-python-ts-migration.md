@@ -42,8 +42,7 @@ The product is a self-hosted web agent:
 
 | Package | Owns | Must not own |
 | --- | --- | --- |
-| `packages/subpolar-server` | Bun CLI, HTTP/WebSocket listener, auth/session cookies, static assets, request validation, composition root, shutdown | Agent-loop policy, provider codecs, tool implementations |
-| `packages/api-gateway` | Public API command mapping, gateway event projection, session turn lease, request/response envelopes | Bun listener, provider SDKs, filesystem/process execution |
+| `packages/api-gateway` | Uniform API abstraction, Bun CLI, HTTP/WebSocket listener, auth/session cookies, static assets, request validation, composition root, shutdown, public API command mapping, event projection, session turn lease, request/response envelopes | Agent-loop policy, provider codecs, tool implementations |
 | `packages/harness` | Turn state machine, cancellation, retries, fallback, budgets, tool-call continuation, lifecycle events | Network, filesystem, SQLite, process globals, web types |
 | `packages/chat-provider-interface` | Provider-neutral messages, streams, usage, errors, provider adapters | Harness policy, gateway transport, secret storage |
 | `packages/tool-resolver` | Schema validation, deterministic descriptors, collision checks, restrictive policy calculation | Tool execution, process/network I/O |
@@ -55,17 +54,17 @@ The product is a self-hosted web agent:
 Dependency direction is fixed:
 
 ```text
-subpolar-server -> api-gateway -> harness -> chat-provider-interface
-                  |              |
-                  |              -> tool-resolver
-                  -> tool-runtime -> tool-resolver
-                  -> data-layer
+api-gateway -> harness -> chat-provider-interface
+       |              |
+       |              -> tool-resolver
+       -> tool-runtime -> tool-resolver
+       -> data-layer
 web-ui -> shared, api-gateway/client, data-layer/contracts
 ```
 
-`tool-runtime` may be composed by `subpolar-server` and handed to
-`api-gateway`; it must not be imported by `harness`. Every new edge requires an
-update to `scripts/check-package-boundaries.mjs` and its test.
+`tool-runtime` may be composed by `api-gateway`; it must not be imported by
+`harness`. Every new edge requires an update to
+`scripts/check-package-boundaries.mjs` and its test.
 
 ## Non-Negotiable Engineering Rules
 
@@ -152,9 +151,9 @@ outside their assignment; they report a blocker to the orchestrator instead.
 
 ### Present Implemented Slice
 
-- [x] Workspace package boundary checker includes `subpolar-server` and
+- [x] Workspace package boundary checker includes `api-gateway` and
   `tool-runtime`.
-- [x] `subpolar-server` starts a Bun listener with `/api/health` and a
+- [x] `api-gateway` starts a Bun listener with `/api/health` and a
   non-streaming OpenAI-compatible `/v1/chat/completions` route.
 - [x] The server explicitly selects the `harness` runtime for that route.
 - [x] `tool-runtime` has native handles for MCP discovery/calls, fixed-origin
@@ -250,9 +249,9 @@ in order unless a dependency is explicitly moved earlier.
 
 | Agent | Files | Required tests |
 | --- | --- | --- |
-| Server agent | `packages/subpolar-server/src/server.ts`, `routes.ts`, `static.ts` | static cache, SPA fallback, traversal, API miss isolation |
-| Auth agent | `packages/subpolar-server/src/auth/*`, data-layer auth tables | bootstrap, login, logout, revocation, CSRF, origin negatives |
-| CLI agent | `packages/subpolar-server/src/cli.ts`, root scripts | argument rejection, config path, signal shutdown |
+| Server agent | `packages/api-gateway/src/server.ts`, `routes.ts`, `static.ts` | static cache, SPA fallback, traversal, API miss isolation |
+| Auth agent | `packages/api-gateway/src/auth/*`, data-layer auth tables | bootstrap, login, logout, revocation, CSRF, origin negatives |
+| Server startup agent | `packages/api-gateway/src/server.ts`, root scripts | environment validation, config path, signal shutdown |
 | Web build agent | `packages/web-ui/vite.config.ts`, build tests | local dist output, no Python path/token globals |
 
 ### Exit Gate
@@ -480,7 +479,7 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 | REST client agent | `web-ui/src/lib/api*` | auth, errors, pagination, cancellation |
 | WS client agent | `web-ui/src/lib/gatewayClient*` | ordering, reconnect, disconnect, malformed frames |
 | Chat UI agent | chat components | stream/reasoning/tool/approval accessibility |
-| Server WS agent | `subpolar-server/src/ws*` | ticket/origin/auth/backpressure/cancel integration |
+| Server WS agent | `api-gateway/src/ws*` | ticket/origin/auth/backpressure/cancel integration |
 
 ### Exit Gate
 
@@ -495,7 +494,7 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 
 ### Required Work
 
-- [ ] Make Docker build Bun packages and web assets, then run `subpolar serve`.
+- [ ] Make Docker build Bun packages and web assets, then run `bun run serve`.
 - [ ] Remove Python runtime invocation from Docker, install scripts, root npm
   scripts, CI runtime jobs, and production documentation.
 - [ ] Add structured redacted logs, metrics categories, readiness, liveness,

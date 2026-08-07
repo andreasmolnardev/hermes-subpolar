@@ -18,6 +18,7 @@
     "test": "bun run --filter './packages/*' test",
     "build:web": "bun run --filter web-ui build",
     "serve": "bun run build:web && bun run --filter api-gateway serve",
+    "dev": "bun run --parallel --no-orphans --workspaces --if-present dev",
     "install:root": "npm install --workspaces=false",
     "install:web": "npm install --workspace packages/web-ui",
     "install:shared": "npm install --workspace packages/shared",

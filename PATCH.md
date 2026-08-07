@@ -111,8 +111,18 @@
   First visit now creates the administrator, stores an OpenAI-compatible
   provider connection server-side, and creates the mandatory `master` agent
   with an optional `research` specialist.
+- Added root `bun run dev` orchestration for Vite HMR and Bun server watch mode;
+  Vite proxies API and WebSocket traffic to the local server during development.
 - Made `api-gateway` the uniform API abstraction layer and Bun server package;
   moved HTTP/WebSocket transport, auth/session composition, static serving, and
   server tests into it, then removed redundant `subpolar-server` package.
+- Changed web frontend default theme from Hermes Teal to Tokyo Night while
+  preserving the persisted `default` theme identifier.
+- Reduced frontend border weight to 1px and applied a translucent Tokyo Night
+  blue border treatment across shared and legacy shell styles.
 
 Remaining rewrite work is tracked in `.plans/02-python-ts-migration.md`.
+
+- Added `MIGRATION.md`, an inventory of Python-advertised capabilities, their
+  current Bun owners or gaps, and deletion gates for removing legacy claims and
+  runtime paths.

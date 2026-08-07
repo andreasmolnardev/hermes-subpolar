@@ -28,6 +28,16 @@ DEFAULT_CONFIG = {
     # sessions (no live client) so accumulated agents don't pile up under memory
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
+    # Runtime migration controls are declarative only. The Python runtime remains
+    # authoritative unless a future execution path explicitly consumes this.
+    "runtime_migration": {
+        "typescript": {
+            "enabled": False,
+            "default_runtime": "python",
+            "shadow_mode": False,
+            "allowed_models": [],
+        },
+    },
     "agent": {
         "max_turns": 500,
         # Inactivity timeout for gateway agent execution (seconds).

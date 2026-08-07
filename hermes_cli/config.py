@@ -2033,6 +2033,67 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
             "    base_url: https://...",
         ))
 
+    # ── runtime_migration.typescript: declarative migration controls ──────
+    runtime_migration = config.get("runtime_migration")
+    if runtime_migration is not None:
+        if not isinstance(runtime_migration, dict):
+            issues.append(ConfigIssue(
+                "error",
+                "runtime_migration must be a mapping",
+                "Use: runtime_migration:\n  typescript:\n    enabled: false",
+            ))
+        else:
+            typescript = runtime_migration.get("typescript")
+            if typescript is not None:
+                if not isinstance(typescript, dict):
+                    issues.append(ConfigIssue(
+                        "error",
+                        "runtime_migration.typescript must be a mapping",
+                        "Use enabled, default_runtime, and shadow_mode under typescript.",
+                    ))
+                else:
+                    for key in ("enabled", "shadow_mode"):
+                        if key in typescript and not isinstance(typescript[key], bool):
+                            issues.append(ConfigIssue(
+                                "error",
+                                f"runtime_migration.typescript.{key} must be a boolean",
+                                "Use true or false (without quotes).",
+                            ))
+                    if (
+                        "default_runtime" in typescript
+                        and typescript["default_runtime"] not in {"python", "typescript"}
+                    ):
+                        issues.append(ConfigIssue(
+                            "error",
+                            "runtime_migration.typescript.default_runtime must be 'python' or 'typescript'",
+                            "Use python to preserve the current runtime, or typescript for a future opt-in.",
+                        ))
+                    if (
+                        "allowed_models" in typescript
+                        and (
+                            not isinstance(typescript["allowed_models"], list)
+                            or not all(
+                                isinstance(model, str) and model.strip()
+                                for model in typescript["allowed_models"]
+                            )
+                        )
+                    ):
+                        issues.append(ConfigIssue(
+                            "error",
+                            "runtime_migration.typescript.allowed_models must be a list of non-empty strings",
+                            "List each model explicitly, or use [] to keep migration disabled.",
+                        ))
+                    unknown = set(typescript) - {
+                        "enabled", "default_runtime", "shadow_mode", "allowed_models"
+                    }
+                    if unknown:
+                        issues.append(ConfigIssue(
+                            "warning",
+                            "Unknown runtime_migration.typescript keys: "
+                            + ", ".join(sorted(unknown)),
+                            "Supported keys are enabled, default_runtime, shadow_mode, and allowed_models.",
+                        ))
+
     # ── Root-level keys that look misplaced ──────────────────────────────
     # Only provider-like fields (base_url, api_key, …) are flagged. Arbitrary
     # unknown top-level keys are deliberately NOT warned about: top-level

@@ -7,9 +7,9 @@ workspace. Keep browser UI, API transport, model execution, tool policy, and
 persistence behind explicit boundaries. Replace Python incrementally; do not
 attempt a big-bang rewrite.
 
-The final product is the browser-first Subpolar application described by
-`TODO.md` and `docs/implementation/work-items/000-foundation.md`. Docker
-Compose remains the only supported production deployment.
+The final product direction and implementation tracker are defined by
+`.plans/02-python-ts-migration.md`. Docker Compose remains the only supported
+production deployment.
 
 ## Target Package Graph
 
@@ -280,7 +280,7 @@ Electron preload APIs; production assets and SPA fallback work from Compose.
 - Remove old dashboard routes only after Subpolar routes are authoritative.
 - Remove `apps/desktop/electron`, preload types, installer/release config,
   native dependencies, Nix packaging, and native installers after browser
-  parity, matching `TODO.md`.
+  parity, matching the active rewrite plan.
 - Remove `ui-tui` only when its supported behavior has an explicit replacement
   or is out of product scope.
 - Delete Python modules one package at a time after import, test, packaging,

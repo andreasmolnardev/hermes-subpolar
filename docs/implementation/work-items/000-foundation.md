@@ -7,8 +7,8 @@ workspace metadata, and one Docker Compose production topology.
 
 ## Source requirements
 
-- `TODO.md` sections 0, 1, and 2: deployment, identity, workspace ownership,
-  authenticated HTTP, path authorization, shared contracts.
+- `.plans/02-python-ts-migration.md` Wave 1: deployment, identity, workspace
+  ownership, authenticated HTTP, path authorization, shared contracts.
 - `DESKTOP_REVAMP.md`: shared shell, workspace selector, Agents terminology,
   organization-only project groups.
 

@@ -213,6 +213,66 @@ def _normalize_notice_delivery(value: Any, default: str = "public") -> str:
     return default
 
 
+_RUNTIME_MIGRATION_DEFAULT_RUNTIMES = frozenset({"python", "typescript"})
+
+
+@dataclass
+class TypeScriptRuntimeMigrationConfig:
+    """Declarative TypeScript migration settings; no runtime behavior is wired."""
+
+    enabled: bool = False
+    default_runtime: str = "python"
+    shadow_mode: bool = False
+    allowed_models: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "default_runtime": self.default_runtime,
+            "shadow_mode": self.shadow_mode,
+            "allowed_models": list(self.allowed_models),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "TypeScriptRuntimeMigrationConfig":
+        data = _coerce_dict(data)
+        default_runtime = data.get("default_runtime", "python")
+        if not isinstance(default_runtime, str):
+            default_runtime = "python"
+        else:
+            default_runtime = default_runtime.strip().lower()
+            if default_runtime not in _RUNTIME_MIGRATION_DEFAULT_RUNTIMES:
+                default_runtime = "python"
+        allowed_models = data.get("allowed_models", [])
+        if not isinstance(allowed_models, list):
+            allowed_models = []
+        return cls(
+            enabled=_coerce_bool(data.get("enabled"), False),
+            default_runtime=default_runtime,
+            shadow_mode=_coerce_bool(data.get("shadow_mode"), False),
+            allowed_models=[model for model in allowed_models if isinstance(model, str) and model],
+        )
+
+
+@dataclass
+class RuntimeMigrationConfig:
+    """Configuration-only runtime migration namespace."""
+
+    typescript: TypeScriptRuntimeMigrationConfig = field(
+        default_factory=TypeScriptRuntimeMigrationConfig
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"typescript": self.typescript.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "RuntimeMigrationConfig":
+        data = _coerce_dict(data)
+        return cls(
+            typescript=TypeScriptRuntimeMigrationConfig.from_dict(data.get("typescript"))
+        )
+
+
 def _ensure_platform_extra_dict(platforms_data: dict, name: str) -> tuple[dict, dict]:
     """Get-or-create ``platforms_data[name]`` and its nested ``extra`` dict.
 
@@ -955,6 +1015,9 @@ class GatewayConfig:
     # dict with: name, platform, profile, and optional guild_id/chat_id/thread_id.
     profile_routes: list = field(default_factory=list)
 
+    # Parsed for migration tooling only. Gateway execution does not consume it.
+    runtime_migration: RuntimeMigrationConfig = field(default_factory=RuntimeMigrationConfig)
+
     def __post_init__(self) -> None:
         self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             self.systemd_watchdog_seconds
@@ -1079,6 +1142,7 @@ class GatewayConfig:
                 asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
                 for r in self.profile_routes
             ],
+            "runtime_migration": self.runtime_migration.to_dict(),
         }
     
     @classmethod
@@ -1214,6 +1278,9 @@ class GatewayConfig:
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=profile_routes,
+            runtime_migration=RuntimeMigrationConfig.from_dict(
+                data.get("runtime_migration")
+            ),
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -1333,6 +1400,11 @@ def load_gateway_config() -> GatewayConfig:
                 gw_data["stt_echo_transcripts"] = gateway_section["stt_echo_transcripts"]
 
             gateway_cfg = yaml_cfg.get("gateway")
+
+            # This namespace is intentionally config.yaml-only: it controls no
+            # secrets and has no environment override or execution bridge.
+            if "runtime_migration" in yaml_cfg:
+                gw_data["runtime_migration"] = yaml_cfg["runtime_migration"]
 
             if "group_sessions_per_user" in yaml_cfg:
                 gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]

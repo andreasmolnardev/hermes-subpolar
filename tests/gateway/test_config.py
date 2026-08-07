@@ -21,6 +21,7 @@ from gateway.config import (
     PlatformConfig,
     SessionResetPolicy,
     StreamingConfig,
+    RuntimeMigrationConfig,
     _apply_env_overrides,
     load_gateway_config,
     persist_home_channel,
@@ -205,6 +206,35 @@ class TestStreamingConfig:
         assert restored.edit_interval == 0.8
         assert restored.buffer_threshold == 24
         assert restored.fresh_final_after_seconds == 0.0
+
+
+class TestRuntimeMigrationConfig:
+    def test_defaults_are_disabled_and_keep_python_runtime(self):
+        config = RuntimeMigrationConfig.from_dict({})
+
+        assert config.typescript.enabled is False
+        assert config.typescript.default_runtime == "python"
+        assert config.typescript.shadow_mode is False
+
+    def test_gateway_loads_typescript_migration_from_config_yaml_only(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "runtime_migration:\n"
+            "  typescript:\n"
+            "    enabled: true\n"
+            "    default_runtime: typescript\n"
+            "    shadow_mode: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("TYPESCRIPT_RUNTIME_ENABLED", "false")
+
+        config = load_gateway_config()
+
+        assert config.runtime_migration.typescript.enabled is True
+        assert config.runtime_migration.typescript.default_runtime == "typescript"
+        assert config.runtime_migration.typescript.shadow_mode is True
 
 
 class TestGatewayConfigRoundtrip:

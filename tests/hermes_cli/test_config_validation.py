@@ -90,6 +90,37 @@ class TestConfigIssueDataclass:
         assert a == b
 
 
+class TestRuntimeMigrationValidation:
+    def test_typescript_migration_accepts_documented_values(self):
+        issues = validate_config_structure({
+            "runtime_migration": {
+                "typescript": {
+                    "enabled": False,
+                    "default_runtime": "python",
+                    "shadow_mode": False,
+                },
+            },
+        })
+
+        assert not any("runtime_migration" in issue.message for issue in issues)
+
+    def test_typescript_migration_rejects_invalid_values(self):
+        issues = validate_config_structure({
+            "runtime_migration": {
+                "typescript": {
+                    "enabled": "true",
+                    "default_runtime": "node",
+                    "shadow_mode": 1,
+                },
+            },
+        })
+
+        messages = [issue.message for issue in issues]
+        assert any("enabled must be a boolean" in message for message in messages)
+        assert any("default_runtime must be 'python' or 'typescript'" in message for message in messages)
+        assert any("shadow_mode must be a boolean" in message for message in messages)
+
+
 class TestUnknownTopLevelKeys:
     """Arbitrary top-level keys must NOT warn — they are bridged to os.environ.
 
@@ -119,4 +150,3 @@ class TestUnknownTopLevelKeys:
         ]
         assert any("base_url" in i.message for i in misplaced)
         assert any("api_key" in i.message for i in misplaced)
-

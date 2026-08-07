@@ -23,7 +23,9 @@ behavioral oracle and must not be bridged into the new runtime.
 
 The product is a self-hosted web agent:
 
-1. `subpolar` starts one Bun process.
+1. `bun run serve` and the container entry point start one Bun process. There
+   is no general-purpose end-user CLI, command registry, interactive shell, or
+   compatibility command surface in the target product.
 2. That process serves the compiled `web-ui`, REST API, WebSocket API, and
    runtime gateway from one origin.
 3. The gateway validates a request, authenticates it, creates or resumes a
@@ -42,7 +44,7 @@ The product is a self-hosted web agent:
 
 | Package | Owns | Must not own |
 | --- | --- | --- |
-| `packages/api-gateway` | Uniform API abstraction, Bun CLI, HTTP/WebSocket listener, auth/session cookies, static assets, request validation, composition root, shutdown, public API command mapping, event projection, session turn lease, request/response envelopes | Agent-loop policy, provider codecs, tool implementations |
+| `packages/api-gateway` | Uniform API abstraction, Bun server entry point, HTTP/WebSocket listener, auth/session cookies, static assets, request validation, composition root, shutdown, public API command mapping, event projection, session turn lease, request/response envelopes | General-purpose CLI commands, agent-loop policy, provider codecs, tool implementations |
 | `packages/harness` | Turn state machine, cancellation, retries, fallback, budgets, tool-call continuation, lifecycle events | Network, filesystem, SQLite, process globals, web types |
 | `packages/chat-provider-interface` | Provider-neutral messages, streams, usage, errors, provider adapters | Harness policy, gateway transport, secret storage |
 | `packages/tool-resolver` | Schema validation, deterministic descriptors, collision checks, restrictive policy calculation | Tool execution, process/network I/O |
@@ -65,6 +67,115 @@ web-ui -> shared, api-gateway/client, data-layer/contracts
 `tool-runtime` may be composed by `api-gateway`; it must not be imported by
 `harness`. Every new edge requires an update to
 `scripts/check-package-boundaries.mjs` and its test.
+
+## Architectural Mental Model
+
+The system is a set of inward-facing policy cores surrounded by adapters. The
+browser and network are inputs, SQLite is durable state, providers and tools are
+side-effecting outputs, and `api-gateway` is the only place where those pieces
+are assembled. Package boundaries exist to make authority visible and to make
+unsafe dependency directions impossible.
+
+### One Request, One Direction
+
+A supported turn follows this sequence and no other:
+
+1. `web-ui` sends a versioned browser-safe request to `api-gateway`.
+2. `api-gateway` authenticates the actor, validates origin/CSRF/input, acquires
+   the session lease, and loads owner-scoped state through `data-layer`.
+3. `api-gateway` resolves configured provider credentials to an opaque handle
+   and asks `tool-resolver` for deterministic allowed tool descriptors.
+4. `api-gateway` constructs a `harness` request from immutable messages,
+   provider/tool ports, budgets, deadlines, persistence callbacks, and an
+   abort signal.
+5. `harness` owns the turn state machine. It may call only the supplied
+   provider and tool ports; it cannot discover credentials, open SQLite, spawn
+   processes, access the network, or infer browser identity.
+6. A provider adapter in `chat-provider-interface` translates normalized model
+   contracts to one configured provider protocol.
+7. Approved tool calls are matched to handles created by `tool-runtime`.
+   `tool-resolver` decides policy; `tool-runtime` performs the side effect;
+   `harness` only orchestrates the supplied handle.
+8. Persistence callbacks commit ordered messages, attempts, checkpoints,
+   approvals, usage, and the single terminal outcome through `data-layer`.
+9. `api-gateway` projects ordered domain events to HTTP/SSE/WebSocket envelopes;
+   `web-ui` renders them without reproducing harness logic.
+
+If validation or capability resolution fails at any step, processing stops at
+that boundary. It must never jump sideways into a Python implementation or
+partially execute the same turn in two runtimes.
+
+### Boundary Responsibilities
+
+- **Transport boundary:** `api-gateway` cares about authenticated actors,
+  request limits, protocol versions, leases, and event delivery. It does not
+  care how prompts, provider payloads, or tool implementations work.
+- **Execution boundary:** `harness` cares about deterministic lifecycle,
+  ordering, cancellation, budgets, and exactly one outcome. It does not care
+  about HTTP, cookies, SQLite, process globals, concrete providers, or concrete
+  tools.
+- **Provider boundary:** `chat-provider-interface` cares about normalized
+  messages, streams, errors, usage, and protocol codecs. It does not decide
+  retries, fallback policy, session ownership, or where secrets are stored.
+- **Policy boundary:** `tool-resolver` cares about trusted descriptors,
+  schemas, collisions, and restrictive policy reduction. It does not execute,
+  discover arbitrary infrastructure, read ambient configuration, or mutate
+  state.
+- **Effect boundary:** `tool-runtime` cares about safely executing preapproved
+  shell/OpenAPI/MCP handles with limits and cancellation. It does not select
+  models, authorize users, construct prompts, or expose browser routes.
+- **Persistence boundary:** `data-layer` cares about schema lineage,
+  transactions, ownership, ordering, idempotency, recovery, and retention. It
+  does not call providers/tools or define HTTP behavior.
+- **Presentation boundary:** `web-ui` cares about accessible interaction,
+  optimistic state, reconnection, and rendering ordered events. It does not
+  contain credentials, server policy, provider SDKs, database code, or tool
+  execution.
+- **Wire-contract boundary:** `shared` cares only about stable JSON-safe types
+  consumed on both sides of the browser boundary. It must not become a dumping
+  ground for runtime helpers or a way to bypass dependency direction.
+
+### Abstraction Rules
+
+- Add an abstraction only for a real boundary with at least one current
+  producer and consumer, or where deterministic tests require an injected
+  clock, process, transport, persistence, or credential port.
+- Interfaces describe capabilities, not implementation ancestry. Prefer small
+  request/result ports over service locators, registries, global containers,
+  or generic plugin objects.
+- Concrete adapters live at the edge and are instantiated only by the gateway
+  composition root. Core packages receive already-validated values and opaque
+  handles.
+- Cross-package data is immutable, JSON-safe where persisted/transmitted, and
+  validated once at the owning boundary. Do not pass database rows, provider
+  SDK objects, `Request`/`Response`, or process handles across domain packages.
+- Errors are typed at the producing boundary, mapped once by the gateway, and
+  redacted before persistence or transport.
+- Do not create compatibility abstractions for deleted Python behavior. A
+  removed capability gets an explicit unsupported error or disappears from the
+  product surface.
+
+## Explicit Product Non-Goals
+
+The Bun rewrite intentionally does not preserve every Hermes Python surface:
+
+- No general-purpose CLI, subcommand framework, interactive terminal command,
+  updater command, doctor command, service installer, or Python-compatible
+  command syntax. Operational startup is `bun run serve` or the container
+  entry point; configuration is file/environment based as defined by the Bun
+  contract.
+- No TUI, ACP/editor bridge, desktop application, cron scheduler, messaging
+  platform gateway, voice/media pipeline, computer-use stack, Python plugin
+  loader, Python skill runtime, or legacy installer.
+- No migration of Python sessions, databases, credentials, configuration,
+  plugins, transport protocols, or runtime flags.
+- No generic plugin ABI or speculative provider/tool abstraction. New external
+  capabilities enter through explicit MCP, fixed-origin OpenAPI, verified
+  executable, or separately approved TypeScript adapter boundaries.
+
+Anything in this list is removed rather than ported unless a later plan changes
+the product contract and names a TypeScript package owner, security model, and
+test gate.
 
 ## Non-Negotiable Engineering Rules
 
@@ -94,10 +205,275 @@ web-ui -> shared, api-gateway/client, data-layer/contracts
 10. Tests assert behavior and invariants. Do not test source text, volatile
     provider catalogs, snapshots of secrets, or implementation counts.
 
+## Meaning Of "Bun-Only Monorepo"
+
+The migration is not complete merely because the default Docker command starts
+Bun. All of the following must be true at the same time:
+
+- Bun is the only production runtime, package manager, workspace runner, test
+  runner, build runner, and release entry point for Subpolar.
+- `bun.lock` is the only root JavaScript lockfile. Root and workspace scripts do
+  not invoke `npm`, `npx`, `pnpm`, Yarn, `pip`, `uv`, or Python.
+- Every supported request enters through `api-gateway` and completes through
+  TypeScript-owned provider, harness, tool, and persistence paths.
+- No active package contains a Python bridge, Python runtime selector, Python
+  executable reference, legacy Python schema reader, or fallback-to-Python
+  branch.
+- A fresh clone can install, build, test, serve, package, and run the supported
+  product without a Python interpreter or Python environment.
+- Docker and release artifacts contain no Python interpreter, virtual
+  environment, Python package, or copied Python runtime source.
+- CI has no required Python job, Python cache, Python dependency installation,
+  or Python-based release helper.
+- Unsupported legacy capabilities are removed from the product and fail closed;
+  they are never retained through an invisible Python sidecar.
+- Historical Python implementation code is deleted from this repository or
+  moved to a separately versioned archive/research repository. Documentation
+  may mention Python only to describe removed compatibility or show user-owned
+  tool content; it must not advertise Python as a Subpolar requirement.
+
+This definition applies to production code, tests, scripts, CI, containers,
+installers, documentation, and release automation. Optional integrations may
+execute an operator-configured external program, but core must not install,
+configure, assume, or special-case Python for them.
+
+## Roadmap At A Glance
+
+| Stage | Outcome | Blocking proof |
+| --- | --- | --- |
+| 0. Freeze contracts | One versioned Bun API, event model, config model, and package graph | Contract, boundary, and threat-model review |
+| 1. Establish Bun product shell | One Bun process owns HTTP, WebSocket, auth, static assets, and shutdown | Authenticated browser smoke test without Python installed |
+| 2. Make state TypeScript-owned | Fresh SQLite schema owns identity, sessions, turns, recovery, approvals, and usage | Restart/idempotency tests with no legacy reader |
+| 3. Complete the harness | Every supported turn has one deterministic TypeScript lifecycle | Fake-provider and interrupted-turn matrix |
+| 4. Make providers native | Every advertised provider is a TypeScript adapter | Recorded codec/error/stream tests per provider |
+| 5. Make tools native | Resolver decisions execute only through `tool-runtime` handles | Adversarial shell/OpenAPI/MCP and approval E2E |
+| 6. Cut the browser over | Every visible UI feature uses the versioned Bun API | Browser lifecycle, stream, approval, reconnect, restart E2E |
+| 7. Make the monorepo Bun-native | Install, build, test, CI, Docker, and release use Bun only | Fresh-clone and container matrix on supported platforms |
+| 8. Retire Python | Bridges, selectors, compatibility code, Python trees, tests, docs, and dependencies are gone | Repository/runtime scans plus full release matrix |
+
+Stages are ordered by dependency, not by directory. Python deletion begins as
+soon as a capability has a verified Bun owner, but the final bulk removal is
+blocked until Stages 0-7 pass. No stage may introduce a new compatibility path
+to make deletion easier.
+
+## Python Deprecation Ledger
+
+Every Python-owned capability must end in exactly one disposition:
+
+1. **Replace** — a supported product capability gets a Bun/TypeScript owner and
+   equivalent behavior and security tests.
+2. **Remove** — the capability is outside the new product contract; remove its
+   routes, controls, docs, configuration, tests, dependencies, and source.
+3. **Externalize** — a genuinely independent integration becomes an
+   operator-managed MCP/OpenAPI/executable integration or a separately
+   versioned repository. Core retains no Python-specific adapter.
+
+`wrap`, `bridge`, `fallback`, and `keep both` are not final dispositions.
+
+### Why Every Python File Becomes Redundant
+
+Python files are not removed merely because TypeScript files exist. They become
+redundant when their responsibility is either owned by a verified Bun package
+or intentionally absent from the product contract. The required mapping is:
+
+| Python source family | Former responsibility | Bun owner or disposition | Why Python is redundant at completion |
+| --- | --- | --- | --- |
+| `run_agent.py`, `agent/` | Conversation loop, prompts, context, retries, tools, recovery, model orchestration | `harness` plus explicit provider/tool/persistence ports | The Bun state machine owns every supported turn and its invariants; a second loop would create divergent policy and duplicate-side-effect risk |
+| `providers/`, Python provider adapters, model-provider plugins | Provider request/response codecs, streaming, errors, credentials | `chat-provider-interface` adapters; unported providers are removed from advertised support | Every advertised provider has a native adapter and conformance tests, so Python codecs add no supported capability |
+| `model_tools.py`, `toolsets.py`, `tools/registry.py`, Python discovery helpers | Tool catalogs, aliases, schemas, permission resolution | `tool-resolver` | Resolution is deterministic and TypeScript-owned; import-time Python discovery would bypass policy and package boundaries |
+| `tools/*.py`, `tools/environments/`, Python MCP/OpenAPI/browser/media helpers | Tool execution and third-party integrations | `tool-runtime`, explicit TypeScript adapters, external MCP/OpenAPI, or remove | Retained effects execute through bounded native handles; unsupported integrations are intentionally absent, so Python execution is neither fallback nor compatibility |
+| `gateway/`, Python dashboard/gateway modules, platform gateways | HTTP/WebSocket transport, auth, routing, events, platform delivery | `api-gateway`; platform delivery is removed unless separately planned | One Bun origin owns the supported web protocol; a Python gateway would create a second authority and revive undocumented routes |
+| `hermes_cli/`, launcher scripts, doctor/update/service-install commands | User CLI, installation, process/service management | Remove; startup is `bun run serve` or the container entry point | A general CLI is intentionally outside the product contract, so preserving command compatibility has no consumer |
+| `hermes_state*.py`, Python stores, checkpoint/search helpers | Sessions, messages, search, checkpoints, recovery, usage | `data-layer`; unsupported legacy database formats are rejected | The TypeScript schema is authoritative and starts fresh; Python readers/writers would create dual ownership and block schema cleanup |
+| `cron/` and cron tools | Schedules, reminders, background execution | Remove unless a later Bun scheduler plan is approved | Scheduling is intentionally unsupported, so keeping Python would be hidden production scope rather than compatibility |
+| `batch_runner.py`, `mini_swe_runner.py`, `trajectory_compressor.py`, evaluation helpers | Batch/research/evaluation workflows | Remove or move to a separately versioned research repository | They are not part of the self-hosted web-agent contract and must not dictate production dependencies |
+| Python TUI, ACP, desktop, messaging, voice/media, browser/computer-use modules | Legacy interaction surfaces | Remove or externalize under a later explicit TypeScript plan | The browser product intentionally excludes these surfaces; Python cannot remain as an undeclared sidecar |
+| Python plugin/skill loaders and bundled Python integrations | Dynamic extension loading | External MCP/OpenAPI/executable integrations or separately versioned packages | Core uses explicit operator-configured boundaries and does not execute imported Python extension code |
+| Python bootstrap, installer, packaging, update, release, and CI scripts | Environment creation and repository operations | Bun/TypeScript scripts for required operations; obsolete workflows removed | Install, test, package, and release work without Python, so these scripts have no role in the supported lifecycle |
+| Python tests and fixtures | Verification of Python behavior and compatibility | Bun unit/contract/integration/E2E tests; language-neutral fixtures retained selectively | Once Python behavior is no longer a contract, testing it would preserve an implementation the product has deliberately retired |
+
+This table is a responsibility map, not permission for bulk deletion. Before
+Wave 8, generate `docs/migration/python-retirement-ledger.md` from
+`rg --files -g '*.py'` and list every tracked Python file exactly once with:
+
+- its former responsibility;
+- `replace`, `remove`, or `externalize` disposition;
+- owning Bun package or explicit non-goal;
+- replacement tests and security/recovery evidence;
+- references that must be deleted with it;
+- deletion wave/change identifier and completion status.
+
+- [ ] Create and review the per-file retirement ledger before deleting Python
+  directories.
+- [ ] Reject the Wave 8 exit gate if any tracked Python file is unclassified,
+  has more than one owner, or lacks deletion evidence.
+- [ ] Delete ledger rows only after the corresponding files are gone; retain
+  the completed ledger as the historical rationale for removal.
+
+### Runtime And Composition TODOs
+
+- [ ] Delete `packages/api-gateway/src/python-bridge.ts` and its exports, tests,
+  fixtures, configuration, and request fields.
+- [ ] Delete `packages/api-gateway/src/python-runtime-bridge.ts` and all
+  whole-turn subprocess protocol code.
+- [ ] Replace `GatewayRuntimeName = "harness" | "python"` with a single Bun
+  harness path; remove runtime adapter maps and Python fallback selection.
+- [ ] Remove `RuntimeSelection = "harness" | "python"`, the runtime-selection
+  persistence table, pinning APIs, migration flags, and rollback-to-Python
+  policy.
+- [ ] Remove Python references from harness context/model metadata. Unsupported
+  context or model shapes return typed terminal errors before side effects.
+- [ ] Prove that every server route, WebSocket command, scheduled internal
+  action retained in scope, and browser turn calls the same Bun composition
+  root.
+- [ ] Add a boundary test that rejects filenames, imports, spawn arguments,
+  configuration keys, and executable references that reintroduce a Python
+  runtime path inside active packages.
+
+### Persistence TODOs
+
+- [ ] Remove Python-shaped session/message readers and `python-legacy` runtime
+  metadata from `data-layer`.
+- [ ] Remove migration tables and fields whose only purpose is Python/TS
+  coexistence. Keep migrations only within the TypeScript schema lineage.
+- [ ] Create a new database identity/version marker that rejects legacy Python
+  databases with a clear operator-facing error and no mutation.
+- [ ] Verify a fresh database, upgrade between TS schema versions, restart,
+  retention, corruption handling, and interrupted-turn recovery.
+- [ ] Remove Python database fixtures and differential tests after equivalent
+  TypeScript behavior tests cover the supported contract.
+
+### Product Surface TODOs
+
+- [ ] Inventory every Python route, WebSocket method/event, CLI command,
+  configuration key, environment variable, UI control, and documented feature;
+  assign `replace`, `remove`, or `externalize` with a Bun owner.
+- [ ] Remove TUI, ACP, desktop, cron, platform messaging, voice/media,
+  computer-use, Python plugin loading, and Python skill execution from the
+  supported product unless a later approved TypeScript plan explicitly owns
+  them.
+- [ ] Remove legacy dashboard pages and controls that call unsupported Python
+  APIs; do not leave disabled or misleading placeholders.
+- [ ] Rewrite the root README, deployment guide, security model, contribution
+  guide, issue templates, command help, and provider/tool documentation around
+  the Bun product contract.
+- [ ] Return explicit versioned errors for removed API/configuration inputs;
+  never silently ignore them or dispatch them to a sidecar.
+
+### Source, Tests, And Dependency TODOs
+
+- [ ] Delete Python runtime trees and entry points, including `agent/`,
+  `gateway/`, `hermes_cli/`, `providers/`, `cron/`, `run_agent.py`,
+  `batch_runner.py`, `mini_swe_runner.py`, `mcp_serve.py`, and their runtime
+  tests, after each retained behavior has passed its deletion gate.
+- [ ] Delete Python tool/plugin implementations from core. Externalize selected
+  integrations through MCP, OpenAPI, or separate repositories without carrying
+  Python discovery or installation logic in Subpolar.
+- [ ] Remove Python manifests, lockfiles, virtual-environment setup, bootstrap
+  code, dependency installers, caches, generated bytecode, and Python-specific
+  security/update logic.
+- [ ] Port required repository maintenance and release scripts to TypeScript
+  executed by Bun; delete obsolete research, compatibility, and installer
+  scripts rather than porting them automatically.
+- [ ] Delete Python test commands and fixtures from the required test matrix.
+  Keep language-agnostic protocol fixtures only when they test a current Bun
+  contract.
+- [ ] Remove the root `package-lock.json` and npm workspace scripts after
+  `bun install --frozen-lockfile` and all Bun checks pass from a clean clone.
+- [ ] Remove sidecar lockfiles and Node/Python bootstrappers that belong only to
+  removed legacy integrations.
+
+### CI, Container, And Release TODOs
+
+- [ ] Pin Bun once in repository metadata and CI; document the supported Bun
+  version and upgrade policy.
+- [ ] Make `bun.lock` the sole root dependency lock and require frozen installs
+  in CI and Docker.
+- [ ] Replace required Python/npm CI jobs with Bun workspace checks, browser
+  E2E, API contract tests, and Docker lifecycle tests.
+- [ ] Build the production image from Bun stages only and scan the final image
+  for Python binaries, virtual environments, Python packages, and copied legacy
+  source.
+- [ ] Run Linux and macOS tests without assuming platform-specific executable
+  paths; inject process fixtures for shell cancellation tests.
+- [ ] Make release versioning, changelog, artifact assembly, and publishing Bun
+  scripts with dry-run coverage.
+- [ ] Add a clean-environment gate that runs install/build/test/serve with
+  Python absent from `PATH`, proving it is not accidentally used.
+
+### Per-Capability Deletion Gate
+
+A Python capability may be deleted only after all applicable items pass:
+
+- [ ] Its disposition and Bun owner are recorded in this plan.
+- [ ] Supported success, failure, authorization, cancellation, timeout, and
+  redaction behavior is covered by black-box tests.
+- [ ] Stateful behavior has restart, retention, idempotency, and
+  no-duplicate-side-effect coverage.
+- [ ] Public HTTP/WebSocket/UI behavior has contract and E2E coverage.
+- [ ] Active imports, subprocess calls, configuration, documentation, CI,
+  packaging, and release references to the Python implementation are gone.
+- [ ] Removing it does not require weakening a package boundary or moving its
+  implementation into `api-gateway`, `harness`, `shared`, or `web-ui`.
+
 ## Orchestration Model
 
 One orchestration agent owns the plan. It delegates independent work to
 subagents in parallel and integrates only reviewed, tested changes.
+
+### Persistent Implementation Loop
+
+The orchestrator executes the roadmap in one persistent pass. It does not stop
+after analysis, scaffolding, a partial wave, or the first failing test. It loops
+until the Definition Of Done passes or a genuine external decision/credential
+blocker remains:
+
+1. **Observe:** inspect the current worktree, package graph, active plan
+   checkboxes, test failures, and Python retirement ledger. Preserve unrelated
+   user changes.
+2. **Select:** choose the earliest incomplete exit gate whose prerequisites are
+   satisfied. Split it into independent work packets with exclusive files and
+   explicit contracts.
+3. **Parallelize:** dispatch exploration and package-local implementation
+   packets concurrently. Never let two agents edit the same file, lockfile,
+   shared contract, `openapi.json`, or shared fixture.
+4. **Integrate:** review every returned diff and result; reject boundary drift,
+   untested assumptions, broad refactors, secret exposure, compatibility
+   shims, or behavior outside the product contract.
+5. **Verify:** run focused tests first, then package checks, boundary checks,
+   cross-package integration tests, and the applicable release-matrix prefix.
+6. **Repair:** classify failures as contract, implementation, test,
+   environment, or pre-existing worktree issues. Fix in-scope failures and
+   rerun; do not mark a checkbox to bypass a failure.
+7. **Retire:** when a Bun owner passes its deletion gate, remove the associated
+   Python path and all imports, tests, docs, config, dependencies, and packaging
+   references in the same bounded change.
+8. **Record:** update this plan, the per-file retirement ledger, `PATCH.md`, and
+   API/schema docs with evidence. Commit a coherent wave or capability slice.
+9. **Repeat:** return to Observe and continue automatically until all waves and
+   absence checks pass.
+
+The orchestrator remains responsible for final correctness. A subagent report
+is evidence, not acceptance; all changes must be inspected and verified in the
+integrated worktree.
+
+### Work Packet Template
+
+Every parallel implementation packet must state:
+
+- objective and the exact plan checkboxes it advances;
+- files/directories exclusively owned by the packet;
+- existing interfaces consumed and exported contract produced;
+- allowed package dependencies and forbidden imports;
+- success, failure, security, cancellation, timeout, persistence, and
+  redaction behaviors that apply;
+- focused verification commands and expected observable outcomes;
+- Python files made redundant by the packet and whether they may be deleted
+  now or only recorded for Wave 8;
+- non-goals, especially legacy parity and intentionally removed CLI/TUI/ACP/
+  cron/platform/media behavior;
+- instruction to stop and report rather than redesign a shared contract or
+  modify files owned by another packet.
 
 ### Orchestration Agent Responsibilities
 
@@ -220,14 +596,16 @@ in order unless a dependency is explicitly moved earlier.
 - [ ] Security review explicitly approves the first authentication and tool
   threat model.
 
-## Wave 1: Server, CLI, Static Assets, And Authentication
+## Wave 1: Server, Static Assets, And Authentication
 
 **Goal:** Ship one Bun process that safely serves the browser and API.
 
 ### Required Work
 
-- [x] Make `subpolar` accept only `serve`, `--host`, `--port`, `--config`, and
-  `--data-dir`; reject unknown positional commands.
+- [ ] Remove the general-purpose `subpolar` command parser and legacy command
+  compatibility. Keep a minimal Bun server entry module consumed by
+  `bun run serve` and Docker; configure host, port, config path, and data path
+  through the approved Bun configuration contract.
 - [x] Change Vite output to `packages/web-ui/dist`; remove Python build/serve
   paths and injected token globals.
 - [x] Serve hashed assets with immutable cache headers, HTML with `no-store`,
@@ -488,40 +866,117 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 - [ ] The browser build imports no server-only packages or secret-bearing code.
 - [ ] All UI network requests target the Bun server contract.
 
-## Wave 7: Operations, Packaging, And Removal
+## Wave 7: Bun Workspace, Operations, Packaging, And Release
 
-**Goal:** Ship the TypeScript product and remove obsolete runtime ownership.
+**Goal:** Make the complete development and production lifecycle Bun-native
+before deleting the final Python safety net.
 
-### Required Work
+### Workspace And Dependency Work
 
-- [ ] Make Docker build Bun packages and web assets, then run `bun run serve`.
-- [ ] Remove Python runtime invocation from Docker, install scripts, root npm
-  scripts, CI runtime jobs, and production documentation.
+- [ ] Keep exactly the approved runtime packages plus `packages/shared` under
+  `packages/`; remove transitional package names and duplicate application
+  directories.
+- [ ] Make every internal workspace dependency use the repository-approved Bun
+  workspace version convention consistently.
+- [ ] Remove root and workspace npm scripts, `package-lock.json`, npm engine
+  requirements, npm audit helpers, and npm bootstrap logic.
+- [ ] Keep one root `bun.lock`; verify a frozen install from a fresh clone and
+  reject lockfile drift in CI.
+- [ ] Centralize strict TypeScript, lint, formatting, and test configuration
+  without allowing browser packages to inherit server runtime globals.
+- [ ] Ensure `bun run check:boundaries` validates manifests, declared imports,
+  browser safety, forbidden dependency edges, and absence of Python runtime
+  hooks in active packages.
+
+### Operations And Release Work
+
+- [ ] Make Docker build Bun packages and web assets, then run `bun run serve`
+  from a minimal Bun-only production stage.
 - [ ] Add structured redacted logs, metrics categories, readiness, liveness,
   active-turn count, provider/tool error categories, and shutdown metrics.
+- [ ] Implement SIGTERM/SIGINT stop-accepting, active-turn cancellation,
+  bounded drain, child-process cleanup, SQLite close, and deterministic exit.
+- [ ] Port required release, changelog, artifact, and publishing automation to
+  TypeScript executed by Bun, with dry-run tests.
 - [ ] Define release stop conditions: security finding, duplicate side effect,
   event-order violation, data corruption, secret leak, or unexplained provider
   usage drift.
 - [ ] Run clean install, package build, full Bun tests, browser E2E, API
   contract tests, Docker health/restart tests, and manual live-provider gates.
-- [x] Delete Python CLI, TUI, server, ACP, packaging, and installer runtime
-  paths after the Bun replacement is available. Remaining Python source is
-  historical and is not reachable from a supported runtime.
-- [ ] Delete remaining Python runtime directories and dependencies only after the Bun
-  product has passed the complete TypeScript release matrix. No compatibility
-  window or data migration is needed, but the deletion must not happen before a
-  functioning replacement exists.
 
 ### Exit Gate
 
-- [ ] A fresh clone runs the web product with Bun and documented TypeScript
-  configuration only.
-- [ ] `git grep` confirms active runtime paths contain no Python bridge,
-  subprocess, config, or persistence dependency.
-- [ ] Docker starts, serves the UI, passes authenticated API/WebSocket E2E, and
-  restarts safely with the new SQLite store.
-- [ ] Python runtime code, Python test commands, and Python production
-  dependencies are removed in the same bounded cleanup wave.
+- [ ] A fresh clone installs, checks, builds, tests, and serves with Bun and the
+  documented TypeScript configuration only.
+- [ ] The complete supported product passes in an environment where Python,
+  pip, uv, npm, and npx are unavailable.
+- [ ] Docker starts, serves the UI, passes authenticated API/WebSocket E2E,
+  cancels and drains safely, and restarts with the new SQLite store.
+- [ ] CI and release workflows require only Bun plus platform/container tools.
+
+## Wave 8: Python Retirement And Repository Cleanup
+
+**Goal:** Remove Python completely after every retained capability has a
+verified Bun owner and every removed capability has disappeared from the
+public product contract.
+
+### Cutover
+
+- [ ] Make the Bun composition root the only gateway execution path.
+- [ ] Delete Python tool and whole-turn bridges, runtime adapters, fallback
+  flags, session runtime pinning, and compatibility configuration.
+- [ ] Delete Python persistence readers, migration metadata, fixtures, and
+  rollback code; legacy databases reject read-only with a documented error.
+- [ ] Remove every Python-backed route, command, WebSocket method/event, UI
+  control, and product claim that was not replaced.
+- [ ] Remove Python runtime invocation from Docker, install scripts, CI,
+  production documentation, health checks, and release automation.
+
+### Source Removal
+
+- [ ] Delete Python CLI, gateway, agent loop, provider adapters, tool registry,
+  tool implementations, cron, TUI, ACP, desktop compatibility, plugin loading,
+  media/voice, platform adapters, installers, and packaging paths.
+- [ ] Delete remaining Python runtime dependencies, manifests, lockfiles,
+  virtual-environment state, caches, bytecode, and Python-only tests.
+- [ ] Port only repository utilities that are still required by the Bun
+  product. Delete obsolete evaluation, migration, compatibility, and release
+  utilities instead of carrying them forward by default.
+- [ ] Move intentionally preserved Python research artifacts to a separately
+  versioned repository; do not leave an unbuilt `legacy/` tree in the Bun
+  monorepo.
+- [ ] Rewrite all current documentation and templates so setup, development,
+  testing, deployment, troubleshooting, contribution, and release instructions
+  are Bun-only.
+
+### Auditable Absence Checks
+
+- [ ] Repository scan finds no active `.py`, Python shebang, Python subprocess,
+  Python executable path, Python import, pip/uv command, virtual environment,
+  or Python dependency manifest.
+- [ ] Active TypeScript packages contain no identifier or configuration key for
+  Python bridge, Python runtime, Python fallback, legacy Python persistence, or
+  Python executable references.
+- [ ] Root scripts and required CI contain no npm/npx or Python command; root has
+  no `package-lock.json`, Python lockfile, or Python environment bootstrap.
+- [ ] Final Docker image scan finds no Python executable, site-packages,
+  virtual environment, pip/uv binary, or copied Python source.
+- [ ] API, WebSocket, UI, README, security, deployment, and contribution docs
+  advertise only capabilities implemented by Bun packages.
+- [ ] A clean machine without Python completes the full required verification
+  matrix and an authenticated provider/tool turn.
+
+### Exit Gate
+
+- [ ] Every entry in the Python Deprecation Ledger has a completed disposition
+  and deletion gate.
+- [ ] No supported request, build, test, container, CI, or release path can
+  discover or invoke Python.
+- [ ] Unsupported legacy inputs fail closed before provider, tool, filesystem,
+  persistence mutation, or network side effects.
+- [ ] The repository contains only the Bun monorepo, browser assets,
+  language-agnostic fixtures, documentation, and explicitly approved external
+  integration metadata.
 
 ## Required Verification Matrix
 
@@ -537,6 +992,17 @@ Run these after all applicable changes, in the listed order:
 8. Browser E2E against a temporary data directory
 9. Docker build, health, authenticated turn, restart, and shutdown tests
 10. Opt-in live provider tests with synthetic prompts and isolated credentials
+11. Clean-environment install/build/test/serve with Python, pip, uv, npm, and
+    npx unavailable
+12. Repository scan for Python sources, shebangs, subprocesses, bridges,
+    fallback identifiers, manifests, virtual environments, and compatibility
+    readers
+13. Root/workspace scan confirming `bun.lock` is the only root lockfile and all
+    required scripts execute through Bun
+14. Final-image scan confirming no Python executable, packages, environment, or
+    source is present
+15. Fresh authenticated browser-to-provider and browser-to-tool turn through
+    the Bun composition root with no sidecar processes
 
 Any failure blocks the next wave. Do not change expected output merely to make a
 gate pass; identify whether the contract, implementation, or test is wrong and
@@ -544,8 +1010,9 @@ record the decision in this plan.
 
 ## Definition Of Done
 
-The rewrite is complete only when all Wave 0-7 exit checkboxes are complete,
+The rewrite is complete only when all Wave 0-8 exit checkboxes are complete,
 the verification matrix passes, the browser application uses only the Bun API,
 all supported providers and tools are TypeScript-native, and no active runtime
-or package build depends on Python. Unsupported capabilities must be absent or
-explicitly rejected, never silently delegated.
+or package build depends on Python. In addition, install, test, CI, Docker, and
+release must succeed without Python or npm available. Unsupported capabilities
+must be absent or explicitly rejected, never silently delegated.

@@ -40,18 +40,45 @@ const DEFAULT_LAYOUT: ThemeLayout = {
 
 export const defaultTheme: DashboardTheme = {
   name: "default",
-  label: "Hermes Teal",
-  description: "Classic dark teal — the canonical Hermes look",
+  label: "Tokyo Night",
+  description: "Deep blue night with cool neon accents",
   palette: {
-    background: { hex: "#041c1c", alpha: 1 },
-    midground: { hex: "#ffe6cb", alpha: 1 },
-    foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(255, 189, 56, 0.35)",
-    noiseOpacity: 1,
+    background: { hex: "#1a1b26", alpha: 1 },
+    midground: { hex: "#a9b1d6", alpha: 1 },
+    foreground: { hex: "#c0caf5", alpha: 0 },
+    warmGlow: "rgba(122, 162, 247, 0.32)",
+    noiseOpacity: 0.8,
   },
-  typography: DEFAULT_TYPOGRAPHY,
-  layout: DEFAULT_LAYOUT,
-  terminalBackground: "#000000",
+  typography: {
+    ...DEFAULT_TYPOGRAPHY,
+    fontSans: `"Inter", ${SYSTEM_SANS}`,
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
+    fontUrl:
+      "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap",
+    letterSpacing: "-0.005em",
+  },
+  layout: {
+    ...DEFAULT_LAYOUT,
+    radius: "0.75rem",
+  },
+  colorOverrides: {
+    primary: "#7aa2f7",
+    primaryForeground: "#1a1b26",
+    secondary: "#24283b",
+    secondaryForeground: "#a9b1d6",
+    muted: "#24283b",
+    mutedForeground: "#565f89",
+    accent: "#bb9af7",
+    accentForeground: "#1a1b26",
+    destructive: "#f7768e",
+    success: "#9ece6a",
+    warning: "#e0af68",
+    border: "color-mix(in srgb, #7aa2f7 28%, transparent)",
+    input: "color-mix(in srgb, #7aa2f7 28%, transparent)",
+    ring: "#7aa2f7",
+  },
+  terminalBackground: "#1a1b26",
+  terminalForeground: "#a9b1d6",
 };
 
 export const midnightTheme: DashboardTheme = {
@@ -214,8 +241,8 @@ export const nousBlueTheme: DashboardTheme = {
  */
 export const defaultLargeTheme: DashboardTheme = {
   name: "default-large",
-  label: "Hermes Teal (Large)",
-  description: "Hermes Teal with bigger fonts and roomier spacing",
+  label: "Tokyo Night (Large)",
+  description: "Tokyo Night with bigger fonts and roomier spacing",
   palette: defaultTheme.palette,
   typography: {
     ...DEFAULT_TYPOGRAPHY,

@@ -107,5 +107,9 @@
   First visit now creates the administrator, stores an OpenAI-compatible
   provider connection server-side, and creates the mandatory `master` agent
   with an optional `research` specialist.
+- Changed web frontend default theme from Hermes Teal to Tokyo Night while
+  preserving the persisted `default` theme identifier.
+- Reduced frontend border weight to 1px and applied a translucent Tokyo Night
+  blue border treatment across shared and legacy shell styles.
 
 Remaining rewrite work is tracked in `.plans/02-python-ts-migration.md`.

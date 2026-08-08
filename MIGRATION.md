@@ -47,7 +47,7 @@ These files still make Python behavior look like supported Subpolar runtime:
   active engine is Bun; rewrite this section around `api-gateway` and `harness`.
 - `README.md:104-238,242-256` lists scheduled tasks, apps, broad tools, and
   providers beyond current Bun behavior. Replace with implemented Bun scope.
-- `run_agent.py`, `model_tools.py`, `toolsets.py`, `providers/README.md`, and
+- `run_agent.py`, `model_tools.py`, `toolsets.py`, and
   `plugins/model-providers/README.md` describe Python APIs and catalogs. Add a
   deprecated header immediately, then delete them with their owners.
 - `cron/__init__.py`, `mcp_serve.py`, and `mini_swe_runner.py` advertise Python

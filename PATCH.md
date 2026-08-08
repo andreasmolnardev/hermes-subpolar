@@ -23,6 +23,8 @@
 - Unsupported trees and entrypoints were removed, including skills/plugins,
   research and datagen, media/computer-use, TUI/ACP, desktop, platform,
   billing, and obsolete bootstrap assets.
+- Remaining stale Python caches, launcher/install-test artifacts, provider/MCP
+  catalogs, desktop specification, and empty runtime log were removed.
 - Historical Python sources were removed under the retirement ledger.
 
 ## Verification

@@ -6,16 +6,18 @@
   CLI/skill -> service-gated tool -> plugin/MCP -> core tool.
 - Plugins must not modify core files. New third-party integrations and memory
   providers belong in standalone plugin repositories.
-- Use `get_hermes_home()` for state paths and `display_hermes_home()` for
-  user-facing paths. Never hardcode `~/.hermes`.
-- Behavioral settings belong in `config.yaml`; `.env` is for secrets only.
+- Use `SUBPOLAR_DATA_DIR` for server state and keep provider credentials in the
+  authenticated server-side setup flow.
+- Behavioral settings belong in process configuration; `.env` is for local
+  development values and must not contain committed secrets.
 - API endpoint changes require updating `openapi.json`.
-- Dependency versions require upper bounds. Regenerate `uv.lock` after changes.
-- Run Python tests through `scripts/run_tests.sh`, never direct `pytest`.
-- Integration, I/O, config, security, and resolution changes require E2E tests
-  using a temporary `HERMES_HOME`.
+- Dependency changes require updating `bun.lock`.
+- Run Bun tests through the repository scripts and use isolated temporary data
+  directories for persistence and integration tests.
+- Integration, I/O, config, security, and resolution changes require behavior
+  tests and browser or protocol E2E coverage where applicable.
 - Tests must verify behavior and invariants, not source text, snapshots, counts,
   or volatile catalogs.
-- Skill changes must follow skill authoring standards in the skill documentation.
+- Skill changes must follow the applicable skill authoring standards.
 - Update `PATCH.md` for relevant changes. Commit all completed work; use
   `wip:` or `draft:` for untested user changes.

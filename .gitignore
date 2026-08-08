@@ -15,6 +15,11 @@ dist/
 packages/web-ui/dist/
 *.tsbuildinfo
 
+# Legacy Python caches
+__pycache__/
+*.py[cod]
+.pytest-cache/
+
 # Playwright output
 playwright-report/
 test-results/

@@ -26,6 +26,10 @@
 - First-run authentication now routes incomplete accounts through `/setup` and
   `/setup/agents` inside one theme-aware card. The existing ThemeProvider is
   mounted for the web UI, with Tokyo Night remaining the default theme.
+- Added client-side routing for authentication, setup, chat threads, projects,
+  agents, automations, apps, settings, resource creation, and themed 404s.
+  Sidebar, thread, resource, setup-step, and settings navigation now uses
+  shareable router links.
 
 - Subpolar is a Bun-only monorepo. Active packages are `api-gateway`, `data-layer`,
   `harness`, `chat-provider-interface`, `tool-resolver`, `tool-runtime`,

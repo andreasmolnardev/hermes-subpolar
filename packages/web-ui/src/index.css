@@ -171,7 +171,8 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
   color: var(--color-secondary-foreground, var(--midground-base));
 }
 
-.setup-step:disabled {
+.setup-step:disabled,
+.setup-step[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.45;
 }

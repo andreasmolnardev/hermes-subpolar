@@ -23,6 +23,7 @@ import {
   X,
   Zap
 } from 'lucide-react'
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   agents,
   availableModels,
@@ -48,9 +49,11 @@ import {
 import { SubpolarWebSocketClient, type SubpolarSocketEvent } from '@/lib/subpolar-client'
 import { projectSubpolarActivity, subpolarEventType, type SubpolarActivityKind } from '@/lib/subpolar-events'
 import { ProviderSetupScreen } from '@/components/ProviderSetupScreen'
+import { useTheme } from '@/themes'
 
 type AuthMode = 'login' | 'bootstrap'
 type View = 'chat' | 'agents' | 'automations' | 'apps'
+type WorkspaceView = View | 'projects'
 type IconName = 'bot' | 'code' | 'research' | 'rocket' | 'shield' | 'palette'
 const ICONS: Record<IconName, ComponentType<{ size?: number; className?: string }>> = {
   bot: Bot,
@@ -172,26 +175,23 @@ function AuthScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
 
 interface NavProps {
   user: SubpolarUser
-  view: View
-  setView: (view: View) => void
+  view: WorkspaceView
   projects: readonly SubpolarProject[]
   selectedProject: string
   setProject: (id: string) => void
   sessions: readonly SubpolarSession[]
   selectedSession: string | null
-  setSession: (id: string) => void
-  onProject: () => void
   open: boolean
   close: () => void
   logout: () => void
-  onSettings: () => void
 }
 function GlobalSidebar(props: NavProps) {
+  const location = useLocation()
   const nav = [
-    { id: 'chat', label: 'New chat', icon: Plus },
-    { id: 'agents', label: 'Agents', icon: Bot },
-    { id: 'automations', label: 'Scheduled', icon: CalendarClock },
-    { id: 'apps', label: 'Apps', icon: AppWindow }
+    { to: '/chat/new', id: 'chat', label: 'New chat', icon: Plus },
+    { to: '/agents', id: 'agents', label: 'Agents', icon: Bot },
+    { to: '/automations', id: 'automations', label: 'Scheduled', icon: CalendarClock },
+    { to: '/apps', id: 'apps', label: 'Apps', icon: AppWindow }
   ] as const
   return (
     <aside
@@ -208,25 +208,23 @@ function GlobalSidebar(props: NavProps) {
       </div>
       <nav className="space-y-1 px-3">
         {nav.map(item => (
-          <button
+          <NavLink
             key={item.id}
-            onClick={() => {
-              props.setView(item.id)
-              props.close()
-            }}
-            className={`${props.view === item.id ? 'bg-[#214447] text-[#f5eadc]' : 'text-[#b3c4bb] hover:bg-white/5'} flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-sm`}
+            to={item.to}
+            onClick={props.close}
+            className={({ isActive }) => `${isActive || (item.id === 'chat' && location.pathname.startsWith('/chat')) ? 'bg-[#214447] text-[#f5eadc]' : 'text-[#b3c4bb] hover:bg-white/5'} flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-sm`}
           >
             <item.icon size={16} />
             {item.label}
-          </button>
+          </NavLink>
         ))}
       </nav>
       <div className="mx-3 mt-4 border-t border-white/10 pt-4">
         <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-widest text-[#718b82]">
           <span>Projects</span>
-          <button onClick={props.onProject}>
+          <Link to="/projects/new" onClick={props.close}>
             <Plus size={14} />
-          </button>
+          </Link>
         </div>
         <label className="relative block">
           <select
@@ -247,24 +245,21 @@ function GlobalSidebar(props: NavProps) {
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-4">
         <p className="mb-2 text-[10px] uppercase tracking-widest text-[#718b82]">Threads</p>
         {props.sessions.map(session => (
-          <button
+          <Link
             key={session.sessionId}
-            onClick={() => {
-              props.setSession(session.sessionId)
-              props.setView('chat')
-              props.close()
-            }}
+            to={sessionHref(session)}
+            onClick={props.close}
             className={`${props.selectedSession === session.sessionId ? 'bg-[#18383a] text-white' : 'text-[#9dafA6] hover:bg-white/5'} flex w-full items-center gap-2 rounded px-2 py-2 text-left text-xs`}
           >
             <MessageSquare size={13} />
             <span className="truncate">{session.sessionId.slice(0, 18)}</span>
-          </button>
+          </Link>
         ))}
       </div>
       <div className="flex items-center gap-2 border-t border-white/10 p-3">
-        <button onClick={props.onSettings} className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-white"><Settings size={15} className="text-[#829b92]" />
+        <Link to="/settings/account" onClick={props.close} className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-white"><Settings size={15} className="text-[#829b92]" />
         <span className="min-w-0 flex-1 truncate text-xs">{props.user.username}</span>
-        </button>
+        </Link>
         <button onClick={props.logout} aria-label="Log out">
           <LogOut size={15} />
         </button>
@@ -278,14 +273,14 @@ function CollectionSidebar({
   title,
   items,
   selected,
-  onSelect,
+  basePath,
   onExpand
 }: {
   kind: 'agents' | 'automations'
   title: string
   items: readonly { id: string; name: string; icon?: string }[]
   selected: string
-  onSelect: (id: string) => void
+  basePath: string
   onExpand: () => void
 }) {
   return (
@@ -303,14 +298,14 @@ function CollectionSidebar({
       <div className="p-3">
         <p className="mb-2 text-[10px] uppercase tracking-widest text-[#718b82]">Default</p>
         {items.map(item => (
-          <button
+          <Link
             key={item.id}
-            onClick={() => onSelect(item.id)}
+            to={`${basePath}/${encodeURIComponent(item.id)}`}
             className={`${selected === item.id ? 'bg-[#2a5558] text-white' : 'text-[#b3c4bb] hover:bg-white/5'} mb-1 flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-sm`}
           >
             {kind === 'agents' ? agentIcon(item as SubpolarAgent) : <Zap size={16} />}
             <span className="truncate">{item.name}</span>
-          </button>
+          </Link>
         ))}
       </div>
     </aside>
@@ -320,15 +315,11 @@ function CollectionSidebar({
 function Gallery({
   view,
   agents,
-  onAgent,
-  onAutomation,
-  onCreate
+  createTo
 }: {
   view: 'agents' | 'automations'
   agents: readonly SubpolarAgent[]
-  onAgent: (id: string) => void
-  onAutomation: (id: string) => void
-  onCreate: () => void
+  createTo: string
 }) {
   const isAgents = view === 'agents'
   const cards = isAgents ? agents : AUTOMATIONS
@@ -340,16 +331,16 @@ function Gallery({
           <h1 className="mt-1 text-3xl font-semibold">{isAgents ? 'Agents' : 'Scheduled tasks'}</h1>
           <p className="mt-2 text-sm text-[#829b92]">Choose one to open its dedicated workspace.</p>
         </div>
-        <button onClick={onCreate} className="rounded-lg bg-[#a9ddd5] px-4 py-2 text-sm font-semibold text-[#102627]">
+        <Link to={createTo} className="rounded-lg bg-[#a9ddd5] px-4 py-2 text-sm font-semibold text-[#102627]">
           <Plus className="mr-1 inline" size={15} /> Create
-        </button>
+        </Link>
       </div>
       <p className="mb-3 text-xs uppercase tracking-widest text-[#829b92]">Default</p>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {cards.map(item => (
-          <button
+          <Link
             key={item.id}
-            onClick={() => (isAgents ? onAgent(item.id) : onAutomation(item.id))}
+            to={`/${isAgents ? 'agents' : 'automations'}/${encodeURIComponent(item.id)}`}
             className="group min-h-36 rounded-xl border border-white/10 bg-[#102627] p-5 text-left transition hover:-translate-y-0.5 hover:border-[#70d7cc]/50"
           >
             <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#1d4142] text-[#70d7cc]">
@@ -359,7 +350,7 @@ function Gallery({
             <p className="mt-1 text-xs leading-5 text-[#829b92]">
               {'instructions' in item ? item.instructions || 'Custom workspace agent' : item.description}
             </p>
-          </button>
+          </Link>
         ))}
       </div>
       {cards.length === 0 && (
@@ -412,6 +403,36 @@ function Detail({ kind, name, agent }: { kind: 'agent' | 'automation'; name: str
             </div>
           </section>
         </div>
+      </div>
+    </main>
+  )
+}
+
+function ProjectOverview({ projects: projectList, selectedProject }: { projects: readonly SubpolarProject[]; selectedProject: string }) {
+  const project = projectList.find(item => item.id === selectedProject)
+  return (
+    <main className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-8">
+      <div className="mx-auto max-w-4xl">
+        <div className="mb-8 flex items-end justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[.18em] text-[#70d7cc]">Workspace</p>
+            <h1 className="mt-1 text-3xl font-semibold">{project?.name ?? 'Projects'}</h1>
+            <p className="mt-2 text-sm text-[#829b92]">Choose a project context for chats, agents, and automations.</p>
+          </div>
+          <Link to="/projects/new" className="rounded-lg bg-[#a9ddd5] px-4 py-2 text-sm font-semibold text-[#102627]">
+            <Plus className="mr-1 inline" size={15} /> Create
+          </Link>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          {projectList.map(item => (
+            <Link key={item.id} to={`/projects/${encodeURIComponent(item.id)}`} className="rounded-xl border border-white/10 bg-[#102627] p-5 transition hover:border-[#70d7cc]/50">
+              <h2 className="font-semibold">{item.name}</h2>
+              <p className="mt-2 text-xs text-[#829b92]">Created {new Date(item.createdAt).toLocaleDateString()}</p>
+              <span className="mt-5 inline-block text-xs text-[#70d7cc]">Open project</span>
+            </Link>
+          ))}
+        </div>
+        {projectList.length === 0 ? <p className="rounded-xl border border-dashed border-white/15 p-10 text-center text-sm text-[#829b92]">No projects yet.</p> : null}
       </div>
     </main>
   )
@@ -591,16 +612,53 @@ function Chat({
   )
 }
 
-function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogout: () => void; onSettings: () => void }) {
+type WorkspaceRoute = {
+  view: WorkspaceView
+  projectId?: string
+  agentId?: string
+  automationId?: string
+  sessionId?: string
+  create: 'project' | 'agent' | null
+}
+
+function routeSegment(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function sessionHref(session: SubpolarSession): string {
+  const params = new URLSearchParams()
+  if (session.projectId !== undefined) params.set('projectId', session.projectId)
+  if (session.agentId !== undefined) params.set('agentId', session.agentId)
+  const query = params.toString()
+  return `/chat/${encodeURIComponent(session.sessionId)}${query ? `?${query}` : ''}`
+}
+
+function workspaceRoute(pathname: string): WorkspaceRoute {
+  const parts = pathname.split('/').filter(Boolean)
+  const section = parts[0]
+  if (section === 'chat') return { view: 'chat', sessionId: parts[1] === 'new' ? undefined : routeSegment(parts[1]), create: null }
+  if (section === 'projects') {
+    if (parts[1] === 'new') return { view: 'projects', create: 'project' }
+    if (parts[3] === 'new') return { view: 'agents', projectId: routeSegment(parts[1]), create: 'agent' }
+    return { view: 'projects', projectId: routeSegment(parts[1]), create: null }
+  }
+  if (section === 'agents') return { view: 'agents', agentId: routeSegment(parts[1]), create: null }
+  if (section === 'automations') return { view: 'automations', automationId: routeSegment(parts[1]), create: null }
+  return { view: section === 'apps' ? 'apps' : 'chat', create: null }
+}
+
+function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => void }) {
+  const location = useLocation()
+  const routerNavigate = useNavigate()
   const [projectList, setProjectList] = useState<readonly SubpolarProject[]>([]),
     [agentList, setAgentList] = useState<readonly SubpolarAgent[]>([]),
     [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([])
-  const [selectedProject, setSelectedProject] = useState(''),
-    [selectedAgent, setSelectedAgent] = useState(''),
-    [selectedAutomation, setSelectedAutomation] = useState(''),
-    [selectedSession, setSelectedSession] = useState<string | null>(null)
-  const [view, setView] = useState<View>('chat'),
-    [sidebarCollapsed, setSidebarCollapsed] = useState(false),
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false),
     [mobileOpen, setMobileOpen] = useState(false),
      [messages, setMessages] = useState<readonly ChatMessage[]>([]),
     [draft, setDraft] = useState(''),
@@ -610,13 +668,50 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
     [permission, setPermission] = useState('full'),
     [streaming, setStreaming] = useState(false),
     [error, setError] = useState<string | null>(null)
-  const [modal, setModal] = useState<'project' | 'agent' | null>(null),
-    [newName, setNewName] = useState(''),
+  const [newName, setNewName] = useState(''),
     [newInstructions, setNewInstructions] = useState(''),
     [newIcon, setNewIcon] = useState<IconName | ''>('')
+  const route = useMemo(() => workspaceRoute(location.pathname), [location.pathname])
+  const query = useMemo(() => new URLSearchParams(location.search), [location.search])
+  const queryProjectId = query.get('projectId') ?? undefined
+  const view = route.view
+  const selectedProject = route.projectId ?? (query.has('projectId') ? queryProjectId ?? '' : (view === 'projects' ? '' : projectList[0]?.id ?? ''))
+  const selectedAgent = route.agentId ?? query.get('agentId') ?? ''
+  const selectedAutomation = route.automationId ?? ''
+  const selectedSession = route.sessionId ?? null
+  const modal = route.create
   const clientRef = useRef<SubpolarWebSocketClient | null>(null),
     requestRef = useRef<string | null>(null),
     newSessionRef = useRef(new Set<string>())
+  function setProject(id: string): void {
+    routerNavigate(id ? `/chat/new?projectId=${encodeURIComponent(id)}` : '/chat/new?projectId=')
+  }
+  function setSession(id: string | null): void {
+    if (!id) {
+      routerNavigate('/chat/new')
+      return
+    }
+    const params = new URLSearchParams(location.search)
+    if (selectedProject) params.set('projectId', selectedProject)
+    routerNavigate(`/chat/${encodeURIComponent(id)}${params.toString() ? `?${params.toString()}` : ''}`)
+  }
+  function setAgent(id: string): void {
+    const params = new URLSearchParams(location.search)
+    if (selectedProject) params.set('projectId', selectedProject)
+    if (id) params.set('agentId', id)
+    else params.delete('agentId')
+    const base = selectedSession ? `/chat/${encodeURIComponent(selectedSession)}` : '/chat/new'
+    routerNavigate(`${base}?${params.toString()}`)
+  }
+  function closeModal(): void {
+    routerNavigate(-1)
+  }
+  useEffect(() => {
+    if (modal === null) return
+    setNewName('')
+    setNewInstructions('')
+    setNewIcon('')
+  }, [modal])
    async function refreshSessions() {
     try {
       setSessionList((await sessions()).sessions)
@@ -629,7 +724,6 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
       .then(([p, s]) => {
         setProjectList(p.projects)
         setSessionList(s.sessions)
-        setSelectedProject(p.projects[0]?.id ?? '')
       })
       .catch(() => setError('Could not load workspace.'))
   }, [])
@@ -639,18 +733,18 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
       .catch(() => setModelProviders([]))
   }, [])
   useEffect(() => {
-    setSelectedAgent('')
-    if (selectedProject)
-      void agents(selectedProject)
+    const scope = route.projectId ?? queryProjectId ?? (route.agentId === undefined && selectedProject ? selectedProject : undefined)
+    if (scope)
+      void agents(scope)
         .then(r => setAgentList(r.agents))
         .catch(() => setAgentList([]))
     else
       void agents()
         .then(r => setAgentList(r.agents))
         .catch(() => setAgentList([]))
-  }, [selectedProject])
+  }, [route.agentId, route.projectId, queryProjectId, selectedProject])
   useEffect(() => {
-    if (!selectedSession) {
+    if (selectedSession === null) {
       setMessages([])
       return
     }
@@ -696,7 +790,7 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
     const requestId = randomId(),
       sessionId = selectedSession ?? randomId()
     if (!selectedSession) newSessionRef.current.add(sessionId)
-    setSelectedSession(sessionId)
+    setSession(sessionId)
     setMessages(current => [...current, { role: 'user', content: text }, { role: 'assistant', content: '' }])
     setDraft('')
     setStreaming(true)
@@ -734,14 +828,13 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
       if (modal === 'project') {
         const r = await createProject(newName.trim())
         setProjectList(p => [...p, r.project])
-        setSelectedProject(r.project.id)
+        routerNavigate(query.get('next') === 'agent' ? `/projects/${encodeURIComponent(r.project.id)}/agents/new` : `/projects/${encodeURIComponent(r.project.id)}`)
       } else if (modal === 'agent' && selectedProject && newIcon) {
         const r = await createAgent(selectedProject, newName.trim(), newInstructions, newIcon)
         setAgentList(a => [...a, r.agent])
-        setSelectedAgent(r.agent.id)
         setSidebarCollapsed(true)
+        routerNavigate(`/agents/${encodeURIComponent(r.agent.id)}`)
       }
-      setModal(null)
       setNewName('')
       setNewInstructions('')
       setNewIcon('')
@@ -757,25 +850,14 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
         <GlobalSidebar
           user={user}
           view={view}
-          setView={next => {
-            setView(next)
-            setSelectedAgent('')
-            setSelectedAutomation('')
-          }}
           projects={projectList}
           selectedProject={selectedProject}
-          setProject={setSelectedProject}
+          setProject={setProject}
           sessions={sessionList}
           selectedSession={selectedSession}
-          setSession={id => setSelectedSession(id || null)}
-          onProject={() => {
-            setModal('project')
-            setNewName('')
-          }}
           open={mobileOpen}
           close={() => setMobileOpen(false)}
-           logout={onLogout}
-           onSettings={onSettings}
+          logout={onLogout}
         />
       )}
       {detailOpen && (
@@ -784,7 +866,7 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
           title={view === 'agents' ? 'Agents' : 'Scheduled'}
           items={view === 'agents' ? agentList : AUTOMATIONS}
           selected={view === 'agents' ? selectedAgent : selectedAutomation}
-          onSelect={view === 'agents' ? setSelectedAgent : setSelectedAutomation}
+          basePath={view === 'agents' ? '/agents' : '/automations'}
           onExpand={() => setSidebarCollapsed(false)}
         />
       )}
@@ -807,9 +889,11 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
                     : 'New chat'
                   : view === 'agents'
                     ? (activeAgent?.name ?? 'Agents')
-                    : view === 'automations'
-                      ? (AUTOMATIONS.find(a => a.id === selectedAutomation)?.name ?? 'Scheduled tasks')
-                      : 'Apps'}
+                   : view === 'automations'
+                       ? (AUTOMATIONS.find(a => a.id === selectedAutomation)?.name ?? 'Scheduled tasks')
+                       : view === 'projects'
+                         ? 'Projects'
+                         : 'Apps'}
               </h1>
               {view === 'chat' && <p className="text-xs text-[#718b82]">{activeAgent?.name ?? 'Default agent'}</p>}
             </div>
@@ -846,7 +930,7 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
             setPermission={setPermission}
             agents={agentList}
             agent={selectedAgent}
-            setAgent={setSelectedAgent}
+            setAgent={setAgent}
             streaming={streaming}
             onSend={() => void send()}
             onCancel={() => {
@@ -854,6 +938,8 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
               if (id) void clientRef.current?.cancel(id)
             }}
           />
+        ) : view === 'projects' ? (
+          <ProjectOverview projects={projectList} selectedProject={selectedProject} />
         ) : view === 'apps' ? (
           <div className="flex flex-1 items-center justify-center p-8 text-center">
             <div>
@@ -878,21 +964,7 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
           <Gallery
             view={view}
             agents={agentList}
-            onAgent={id => {
-              setSelectedAgent(id)
-              setSidebarCollapsed(true)
-            }}
-            onAutomation={id => {
-              setSelectedAutomation(id)
-              setSidebarCollapsed(true)
-            }}
-            onCreate={() => {
-              if (view === 'agents') {
-                setModal('agent')
-                setNewName('')
-                setNewIcon('')
-              } else setSelectedAutomation('issues')
-            }}
+            createTo={view === 'agents' ? selectedProject ? `/projects/${encodeURIComponent(selectedProject)}/agents/new` : '/projects/new?next=agent' : '/automations/issues'}
           />
         )}
       </div>
@@ -901,7 +973,7 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
           <form onSubmit={submitModal} className="w-full max-w-md rounded-xl border border-white/10 bg-[#102627] p-6">
             <div className="mb-5 flex items-center justify-between">
               <h2 className="text-xl font-semibold">Create {modal}</h2>
-              <button type="button" onClick={() => setModal(null)}>
+              <button type="button" onClick={closeModal}>
                 <X size={18} />
               </button>
             </div>
@@ -967,17 +1039,87 @@ function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogou
   )
 }
 
+function SettingsPage({ user }: { user: SubpolarUser }) {
+  const location = useLocation()
+  const { theme, themeName, availableThemes, setTheme, fontId, fontChoices, setFont } = useTheme()
+  const section = location.pathname.split('/')[2] ?? 'account'
+  return (
+    <main className="setup-page min-h-screen overflow-y-auto p-5 sm:p-8">
+      <div className="mx-auto w-full max-w-4xl">
+        <div className="mb-8">
+          <p className="setup-eyebrow">Workspace settings</p>
+          <h1 className="mt-1 text-3xl font-semibold">Settings</h1>
+          <p className="setup-copy mt-2">Configure your account, provider connection, and dashboard appearance.</p>
+        </div>
+        <nav className="mb-6 flex flex-wrap gap-2" aria-label="Settings sections">
+          {[
+            ['/settings/account', 'Account'],
+            ['/settings/providers', 'Providers'],
+            ['/settings/appearance', 'Appearance'],
+          ].map(([to, label]) => (
+            <NavLink key={to} to={to} className={({ isActive }) => `setup-step ${isActive ? 'setup-step-active' : ''}`}>
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+        <section className="setup-card rounded-2xl p-6 sm:p-8">
+          {section === 'appearance' ? (
+            <>
+              <h2 className="text-xl font-semibold">Appearance</h2>
+              <p className="setup-copy mt-2">Choose the visual language used throughout the workspace.</p>
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                {availableThemes.map(item => (
+                  <button key={item.name} type="button" onClick={() => setTheme(item.name)} className={`setup-option rounded-xl p-4 text-left ${themeName === item.name ? 'setup-step-active' : ''}`}>
+                    <span className="block font-medium">{item.label}</span>
+                    <span className="setup-help mt-1 block text-sm">{item.description}</span>
+                  </button>
+                ))}
+              </div>
+              <label className="setup-label mt-8 block">Interface font
+                <select value={fontId} onChange={event => setFont(event.target.value)} className="setup-input mt-2 w-full">
+                  {fontChoices.map(choice => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
+                </select>
+              </label>
+              <p className="setup-help mt-5 text-sm">Active theme: {theme.label}</p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-xl font-semibold">Account</h2>
+              <p className="setup-copy mt-2">Your local administrator account for this workspace.</p>
+              <div className="setup-option mt-6 rounded-xl p-4">
+                <p className="setup-label">Username</p>
+                <p className="mt-2 font-medium">{user.username}</p>
+              </div>
+              <Link to="/chat/new" className="setup-primary mt-6 inline-block">Return to workspace</Link>
+            </>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function NotFoundPage() {
+  return (
+    <main className="setup-page flex min-h-screen items-center justify-center px-5">
+      <section className="setup-card w-full max-w-md rounded-2xl p-8 text-center">
+        <p className="setup-eyebrow">404</p>
+        <h1 className="mt-2 text-2xl font-semibold">Page not found</h1>
+        <p className="setup-copy mt-2">That workspace route does not exist.</p>
+        <Link to="/chat/new" className="setup-primary mt-6 inline-block">Open workspace</Link>
+      </section>
+    </main>
+  )
+}
+
 export default function SubpolarApp() {
+  const location = useLocation()
+  const routerNavigate = useNavigate()
+  const initialPath = useRef(location.pathname)
   const [user, setUser] = useState<SubpolarUser | null>(null),
     [authMode, setAuthMode] = useState<AuthMode>('login'),
     [setupComplete, setSetupComplete] = useState(false),
-    [providerSettings, setProviderSettings] = useState(false),
     [loading, setLoading] = useState(true)
-
-  function navigate(path: string, replace = false): void {
-    if (typeof window === 'undefined' || window.location.pathname === path) return
-    window.history[replace ? 'replaceState' : 'pushState']({}, '', path)
-  }
 
   useEffect(() => {
     void currentUser()
@@ -985,8 +1127,8 @@ export default function SubpolarApp() {
         const setup = await setupStatus()
         setUser(r.user)
         setSetupComplete(setup.complete)
-        setProviderSettings(typeof window !== 'undefined' && window.location.pathname === '/settings/providers')
-        if (!setup.complete) navigate('/setup', true)
+        if (!setup.complete) routerNavigate('/setup', { replace: true })
+        else if (initialPath.current === '/login' || initialPath.current.startsWith('/setup')) routerNavigate('/chat/new', { replace: true })
       })
       .catch(async reason => {
         if (!(reason instanceof SubpolarApiError) || reason.status !== 401) return
@@ -997,7 +1139,10 @@ export default function SubpolarApp() {
         }
       })
       .finally(() => setLoading(false))
-  }, [])
+  }, [routerNavigate])
+  useEffect(() => {
+    if (!loading && user === null && location.pathname !== '/login') routerNavigate('/login', { replace: true })
+  }, [loading, location.pathname, routerNavigate, user])
   if (loading)
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#07191a] text-[#829b92]">
@@ -1012,22 +1157,44 @@ export default function SubpolarApp() {
           const setup = await setupStatus()
           setUser(authenticated)
           setSetupComplete(setup.complete)
-          navigate(setup.complete ? '/' : '/setup', true)
+          routerNavigate(setup.complete ? '/chat/new' : '/setup', { replace: true })
         }}
       />
     )
-  if (!setupComplete) return <ProviderSetupScreen onComplete={() => { setSetupComplete(true); navigate('/', true) }} />
-  if (providerSettings) return <ProviderSetupScreen editing onComplete={() => { setProviderSettings(false); navigate('/', true) }} />
+  if (!setupComplete) {
+    return (
+      <Routes>
+        <Route path="/setup/*" element={<ProviderSetupScreen onComplete={() => { setSetupComplete(true); routerNavigate('/chat/new', { replace: true }) }} />} />
+        <Route path="*" element={<Navigate to="/setup" replace />} />
+      </Routes>
+    )
+  }
+  const onLogout = () => {
+    void logout().finally(() => {
+      setUser(null)
+      routerNavigate('/login', { replace: true })
+    })
+  }
   return (
-    <Workspace
-      user={user}
-      onSettings={() => { setProviderSettings(true); navigate('/settings/providers') }}
-      onLogout={() => {
-        void logout().finally(() => {
-          setUser(null)
-          navigate('/', true)
-        })
-      }}
-    />
+    <Routes>
+      <Route path="/" element={<Navigate to="/chat/new" replace />} />
+      <Route path="/chat/new" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/chat/:sessionId" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/projects" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/projects/new" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/projects/:projectId" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/projects/:projectId/agents/new" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/agents" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/agents/:agentId" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/automations" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/automations/:automationId" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/apps" element={<Workspace user={user} onLogout={onLogout} />} />
+      <Route path="/settings" element={<Navigate to="/settings/account" replace />} />
+      <Route path="/settings/account" element={<SettingsPage user={user} />} />
+      <Route path="/settings/appearance" element={<SettingsPage user={user} />} />
+      <Route path="/settings/providers" element={<ProviderSetupScreen editing onComplete={() => routerNavigate('/settings/account')} />} />
+      <Route path="/settings/*" element={<SettingsPage user={user} />} />
+      <Route path="*" element={<NotFoundPage />} />
+    </Routes>
   )
 }

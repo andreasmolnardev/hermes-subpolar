@@ -1,20 +1,22 @@
-import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { createGateway, type GatewayProtocolEvent } from "./index";
+import { createGateway, createGatewayPersistenceAdapter, type GatewayProtocolEvent } from "./index";
 import { createOpenAICompatibleProvider, type ChatProvider, type ProviderMessage } from "chat-provider-interface";
 import {
   AuthenticationError,
+  IdempotencyConflictError,
   OwnershipError,
   SQLiteIdentityRepository,
   SQLiteSessionRepository,
+  type JsonValue,
   type AuthenticatedPrincipal,
   type AuthSession,
   type SessionRecord,
 } from "data-layer";
+import type { HarnessApprovalPolicy } from "harness";
+import type { ToolDefinition, ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
-import { MODEL_PROVIDER_CATALOG, modelProvider } from "@hermes/shared/model-providers";
+import { MODEL_PROVIDER_CATALOG, modelProvider } from "../../shared/src/model-providers";
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
@@ -23,6 +25,14 @@ export type ApiGatewayServerOptions = {
   readonly staticRoot?: string;
   readonly maxRequestBytes?: number;
   readonly dataDir?: string;
+  readonly shutdownTimeoutMs?: number;
+  readonly toolDefinitions?: readonly ToolDefinition[];
+  readonly toolPolicyOverrides?: readonly ToolPolicyInput[];
+  readonly approvalPolicy?: HarnessApprovalPolicy;
+};
+
+export type ApiGatewayServer = ReturnType<typeof Bun.serve> & {
+  shutdown(): Promise<void>;
 };
 
 type WebSocketData = { readonly principal: AuthenticatedPrincipal; readonly token: string };
@@ -30,6 +40,7 @@ type TurnInput = { readonly model: string; readonly messages: readonly ProviderM
 
 const SESSION_COOKIE = "subpolar_session";
 const CSRF_COOKIE = "subpolar_csrf";
+const CHAT_REQUEST_FIELDS = new Set(["model", "messages", "sessionId", "projectId", "agentId", "requestId", "stream"]);
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   const responseHeaders = new Headers(headers);
@@ -94,6 +105,8 @@ function parseMessages(value: unknown): readonly ProviderMessage[] {
 function turnInput(value: unknown): TurnInput {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("request body must be an object");
   const body = value as Record<string, unknown>;
+  const unsupported = Object.keys(body).find(field => !CHAT_REQUEST_FIELDS.has(field));
+  if (unsupported !== undefined) throw new TypeError(`Gateway field is unsupported: ${unsupported}`);
   if (typeof body.model !== "string" || !body.model.trim()) throw new TypeError("model must be a non-empty string");
   const stringField = (key: string): string | undefined => body[key] === undefined ? undefined : typeof body[key] === "string" && body[key] ? body[key] : (() => { throw new TypeError(`${key} is invalid`); })();
   const sessionId = stringField("sessionId");
@@ -154,15 +167,39 @@ function eventJson(requestId: string, sequence: number, event: GatewayProtocolEv
   return JSON.stringify({ protocol: "subpolar.v1", requestId, sequence, event });
 }
 
-export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnType<typeof Bun.serve> {
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value as Record<string, unknown>).sort().map(key =>
+    `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`
+  ).join(",")}}`;
+}
+
+function requestFingerprint(principalId: string, input: TurnInput): string {
+  return createHash("sha256")
+    .update(canonicalJson({ endpoint: "subpolar.v1/chat/completions", principalId, input }))
+    .digest("hex");
+}
+
+export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGatewayServer {
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   if (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1) throw new TypeError("maxRequestBytes must be positive");
-  const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "api-gateway-"));
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
+  if (!Number.isFinite(shutdownTimeoutMs) || shutdownTimeoutMs <= 0) throw new TypeError("shutdownTimeoutMs must be positive");
+   const dataDir = options.dataDir ?? process.env.SUBPOLAR_DATA_DIR ?? resolve(process.cwd(), ".subpolar");
   const databasePath = join(dataDir, "state.db");
   const sessions = new SQLiteSessionRepository(databasePath);
   const identity = new SQLiteIdentityRepository(databasePath);
-  const gateway = createGateway({ sessionRepository: sessions });
-  const activeTurns = new Map<object, Map<string, AbortController>>();
+  const persistence = createGatewayPersistenceAdapter(sessions);
+  const gateway = createGateway({ sessionRepository: persistence, persistence });
+  const activeTurns = new Set<AbortController>();
+  const socketTurns = new Map<object, Map<string, AbortController>>();
+  let shutdownPromise: Promise<void> | undefined;
+
+  const trackTurn = (controller: AbortController): (() => void) => {
+    activeTurns.add(controller);
+    return () => activeTurns.delete(controller);
+  };
 
   const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string }> => {
     const sessionId = input.sessionId ?? randomUUID();
@@ -197,15 +234,44 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
       model: prepared.input.model === "default" && connection !== null ? connection.model : prepared.input.model,
       messages: prepared.input.messages,
       toolPolicies: [],
-      runtime: "harness",
+      toolDefinitions: options.toolDefinitions ?? [],
+      toolPolicyOverrides: options.toolPolicyOverrides ?? [],
       sessionId: prepared.sessionId,
       requestId: prepared.input.requestId ?? randomUUID(),
       signal,
       eventSink: emit,
+      approvalPolicy: async approval => {
+        const approvalRequestId = `${approval.requestId}:${approval.call.id}`;
+        const at = new Date().toISOString();
+        await sessions.savePendingApproval({
+          requestId: approvalRequestId,
+          sessionId: approval.sessionId,
+          callId: approval.call.id,
+          toolName: approval.call.name,
+          arguments: approval.arguments,
+          status: "pending",
+          createdAt: at,
+          updatedAt: at,
+        });
+        if (options.approvalPolicy === undefined) {
+          throw new Error("Explicit tool approval decision required");
+        }
+        const decision = await options.approvalPolicy(approval);
+        if (decision !== "allow" && decision !== "deny") {
+          throw new Error("Explicit tool approval decision required");
+        }
+        await sessions.resolvePendingApproval(approvalRequestId, decision, new Date().toISOString());
+        return decision;
+      },
     }, options.provider ?? (() => {
       // The connection has been validated above and is never returned to clients.
       const configured = connection as NonNullable<typeof connection>;
-      return createOpenAICompatibleProvider({ baseUrl: configured.baseUrl, credentials: { apiKey: configured.apiKey }, fetch });
+      return createOpenAICompatibleProvider({
+        baseUrl: configured.baseUrl,
+        credentialHandle: configured.credentialHandle,
+        resolveCredentialHandle: handle => identity.resolveCredentialHandle(handle),
+        fetch,
+      });
     })());
   };
 
@@ -346,13 +412,20 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
         const auth = authenticated(request, identity, true);
         if (auth instanceof Response) return auth;
         try {
-          const value = await body(request, maxRequestBytes);
-          const input = turnInput(value);
-          const controller = new AbortController();
-          const requestId = input.requestId ?? randomUUID();
-          if (value.stream === true) {
-            const encoder = new TextEncoder();
+           const value = await body(request, maxRequestBytes);
+           const input = turnInput(value);
+           const requestId = input.requestId ?? randomUUID();
+           const idempotencyKey = request.headers.get("idempotency-key");
+           if (idempotencyKey !== null && idempotencyKey.length === 0) {
+             return json({ error: "idempotency_key_invalid" }, 400);
+           }
+           if (value.stream === true) {
+             if (idempotencyKey !== null) {
+               return json({ error: "idempotency_streaming_unsupported" }, 400);
+             }
+             const encoder = new TextEncoder();
             const turnController = new AbortController();
+            const untrackTurn = trackTurn(turnController);
             let sequence = 0;
             let closed = false;
             const stream = new ReadableStream<Uint8Array>({
@@ -363,17 +436,35 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
                   if (!closed) { closed = true; controller.enqueue(encoder.encode("data: [DONE]\n\n")); controller.close(); }
                 }).catch(() => {
                   if (!closed) { closed = true; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ protocol: "subpolar.v1", requestId, sequence: sequence++, type: "error", code: "request_failed" })}\n\n`)); controller.close(); }
-                });
+                }).finally(untrackTurn);
               },
               cancel() { turnController.abort(); },
             });
             return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" } });
+           }
+           const fingerprint = idempotencyKey === null
+             ? undefined
+             : requestFingerprint(auth.principal.id, input);
+           if (idempotencyKey !== null && fingerprint !== undefined) {
+             const claim = await sessions.claimIdempotency(idempotencyKey, fingerprint);
+             if (claim.status === "replay") return json(claim.terminalPayload);
+             if (claim.status === "pending") return json({ error: "idempotency_pending" }, 409);
+           }
+           const turnController = new AbortController();
+          const untrackTurn = trackTurn(turnController);
+           try {
+             const result = await executeTurn(auth.principal, { ...input, requestId }, turnController.signal, () => undefined);
+             if (idempotencyKey !== null && fingerprint !== undefined) {
+               await sessions.completeIdempotency(idempotencyKey, fingerprint, result as JsonValue);
+             }
+             return json(result);
+          } finally {
+            untrackTurn();
           }
-          const result = await executeTurn(auth.principal, { ...input, requestId }, new AbortController().signal, () => undefined);
-          return json(result);
-        } catch (error) {
-          return json({ error: error instanceof OwnershipError ? "forbidden" : "request_failed" }, error instanceof OwnershipError ? 403 : 400);
-        }
+         } catch (error) {
+           if (error instanceof IdempotencyConflictError) return json({ error: "idempotency_conflict" }, 409);
+           return json({ error: error instanceof OwnershipError ? "forbidden" : "request_failed" }, error instanceof OwnershipError ? 403 : 400);
+         }
       }
 
       if (options.staticRoot !== undefined) return serveStatic(request, { root: options.staticRoot });
@@ -381,12 +472,12 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
     },
     websocket: {
       open(socket) {
-        activeTurns.set(socket, new Map());
+        socketTurns.set(socket, new Map());
         socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "connected" }));
       },
       message(socket, message) {
-        const turns = activeTurns.get(socket) ?? new Map<string, AbortController>();
-        activeTurns.set(socket, turns);
+        const turns = socketTurns.get(socket) ?? new Map<string, AbortController>();
+        socketTurns.set(socket, turns);
         void (async () => {
           try {
             const value: unknown = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
@@ -394,26 +485,61 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
             const record = value as Record<string, unknown>;
             if (record.type === "chat.cancel" && typeof record.requestId === "string") { turns.get(record.requestId)?.abort(); return; }
             if (record.type !== "chat.start" || typeof record.requestId !== "string" || typeof record.csrfToken !== "string") throw new TypeError("message type is invalid");
-            if (record.csrfToken !== identity.csrfToken(socket.data.token)) throw new AuthenticationError("CSRF validation failed");
-            const requestId = record.requestId;
-            const input = turnInput(record);
+             if (record.csrfToken !== identity.csrfToken(socket.data.token)) throw new AuthenticationError("CSRF validation failed");
+             const requestId = record.requestId;
+             const { type: _type, csrfToken: _csrfToken, ...chatRecord } = record;
+             const input = turnInput(chatRecord);
             const controller = new AbortController();
+            const untrackTurn = trackTurn(controller);
             turns.set(requestId, controller);
-            let sequence = 0;
-            await executeTurn(socket.data.principal, { ...input, requestId }, controller.signal, event => { socket.send(eventJson(requestId, sequence++, event)); });
-            turns.delete(requestId);
+            try {
+              let sequence = 0;
+              await executeTurn(socket.data.principal, { ...input, requestId }, controller.signal, event => { socket.send(eventJson(requestId, sequence++, event)); });
+            } finally {
+              turns.delete(requestId);
+              untrackTurn();
+            }
           } catch (error) {
             socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "error", code: error instanceof AuthenticationError ? "unauthorized" : "request_failed", message: "Request failed" }));
           }
         })();
       },
       close(socket) {
-        for (const controller of activeTurns.get(socket)?.values() ?? []) controller.abort();
-        activeTurns.delete(socket);
+        for (const controller of socketTurns.get(socket)?.values() ?? []) controller.abort();
+        socketTurns.delete(socket);
       },
     },
   });
-  return server;
+
+  const waitForDrain = (): Promise<void> => new Promise(resolve => {
+    const deadline = Date.now() + shutdownTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      if (activeTurns.size === 0 || Date.now() >= deadline) {
+        if (timer !== undefined) clearTimeout(timer);
+        resolve();
+      } else {
+        timer = setTimeout(check, 10);
+      }
+    };
+    check();
+  });
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise !== undefined) return shutdownPromise;
+    shutdownPromise = (async () => {
+      void Promise.resolve(server.stop(false)).catch(() => undefined);
+      for (const controller of activeTurns) controller.abort();
+      await waitForDrain();
+      try {
+        await server.stop(true);
+      } finally {
+        sessions.close();
+        identity.close();
+      }
+    })();
+    return shutdownPromise;
+  };
+  return Object.assign(server, { shutdown });
 }
 
 if (import.meta.main) {
@@ -421,22 +547,13 @@ if (import.meta.main) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("SUBPOLAR_PORT must be a valid TCP port");
   }
-  startApiGatewayServer({
+  const server = startApiGatewayServer({
     hostname: process.env.SUBPOLAR_HOST ?? "127.0.0.1",
     port,
     staticRoot: process.env.SUBPOLAR_STATIC_ROOT ?? resolve(process.cwd(), "packages/web-ui/dist"),
     ...(process.env.SUBPOLAR_DATA_DIR === undefined ? {} : { dataDir: process.env.SUBPOLAR_DATA_DIR }),
   });
-}
-if (import.meta.main) {
-  const port = Number(process.env.SUBPOLAR_PORT ?? "8080");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error("SUBPOLAR_PORT must be a valid TCP port");
-  }
-  startApiGatewayServer({
-    hostname: process.env.SUBPOLAR_HOST ?? "127.0.0.1",
-    port,
-    staticRoot: process.env.SUBPOLAR_STATIC_ROOT ?? resolve(process.cwd(), "packages/web-ui/dist"),
-    ...(process.env.SUBPOLAR_DATA_DIR === undefined ? {} : { dataDir: process.env.SUBPOLAR_DATA_DIR }),
-  });
+  const shutdown = () => { void server.shutdown().then(() => process.exit(0)); };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 }

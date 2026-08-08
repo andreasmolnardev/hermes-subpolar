@@ -1,6 +1,6 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 
 export type IdentityUser = {
@@ -44,8 +44,12 @@ export type OwnedSessionRecord = {
 export type ProviderConnection = {
   readonly provider: string;
   readonly baseUrl: string;
-  readonly apiKey: string;
+  readonly credentialHandle: string;
   readonly model: string;
+};
+
+export type ProviderCredentials = {
+  readonly apiKey: string;
 };
 
 export type SetupStatus = {
@@ -124,11 +128,111 @@ CREATE TABLE IF NOT EXISTS provider_connections (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   provider TEXT NOT NULL DEFAULT 'openai-api',
   base_url TEXT NOT NULL,
-  api_key TEXT NOT NULL,
+  credential_ciphertext TEXT NOT NULL,
   model TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 `;
+
+const SUPPORTED_PROVIDER = "openai-api";
+const CREDENTIAL_KEY_BYTES = 32;
+const CREDENTIAL_IV_BYTES = 12;
+const CREDENTIAL_TAG_BYTES = 16;
+const CREDENTIAL_KEY_FILE = "provider-credentials.key";
+const CREDENTIAL_AAD = Buffer.from("hermes.provider-credential.v1");
+
+type ProviderRow = {
+  provider: string;
+  base_url: string;
+  credential_ciphertext: string;
+  model: string;
+};
+
+function isFileNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function providerCredentialKey(path: string | null, createIfMissing: boolean): Buffer {
+  if (path === null) return randomBytes(CREDENTIAL_KEY_BYTES);
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("invalid provider credential key");
+    const key = readFileSync(path);
+    if (key.length !== CREDENTIAL_KEY_BYTES) throw new Error("invalid provider credential key");
+    return key;
+  } catch (error) {
+    if (!isFileNotFound(error)) throw new Error("provider credential key is unavailable");
+    if (!createIfMissing) throw new Error("provider credential key is unavailable");
+    const key = randomBytes(CREDENTIAL_KEY_BYTES);
+    try {
+      writeFileSync(path, key, { flag: "wx", mode: 0o600 });
+      chmodSync(path, 0o600);
+      return key;
+    } catch (writeError) {
+      if (!isFileNotFound(writeError) && !(typeof writeError === "object" && writeError !== null && "code" in writeError && writeError.code === "EEXIST")) {
+        throw new Error("provider credential key is unavailable");
+      }
+      return providerCredentialKey(path, createIfMissing);
+    }
+  }
+}
+
+function encryptCredential(apiKey: string, key: Buffer): string {
+  const iv = randomBytes(CREDENTIAL_IV_BYTES);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(CREDENTIAL_AAD);
+  const ciphertext = Buffer.concat([cipher.update(apiKey, "utf8"), cipher.final()]);
+  return [iv, cipher.getAuthTag(), ciphertext].map(part => part.toString("base64url")).join(".");
+}
+
+function decryptCredential(value: string, key: Buffer): string {
+  try {
+    const parts = value.split(".");
+    if (parts.length !== 3) throw new Error("invalid credential");
+    const iv = Buffer.from(parts[0] ?? "", "base64url");
+    const tag = Buffer.from(parts[1] ?? "", "base64url");
+    const ciphertext = Buffer.from(parts[2] ?? "", "base64url");
+    if (iv.length !== CREDENTIAL_IV_BYTES || tag.length !== CREDENTIAL_TAG_BYTES || ciphertext.length === 0) {
+      throw new Error("invalid credential");
+    }
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAAD(CREDENTIAL_AAD);
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+    if (plaintext.trim().length === 0) throw new Error("invalid credential");
+    return plaintext;
+  } catch {
+    throw new Error("provider credential is unavailable");
+  }
+}
+
+function providerSlug(value: unknown): string {
+  if (typeof value !== "string" || value.trim() !== SUPPORTED_PROVIDER) throw new Error("provider is invalid");
+  return SUPPORTED_PROVIDER;
+}
+
+function providerBaseUrl(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error("provider URL is invalid");
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error("provider URL is invalid"); }
+  if (value.includes("@") || value.includes("?") || value.includes("#") || parsed.username.length > 0 || parsed.password.length > 0 || parsed.search.length > 0 || parsed.hash.length > 0) {
+    throw new Error("provider URL must not contain credentials or query state");
+  }
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname))) {
+    throw new Error("provider URL must use HTTPS");
+  }
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function providerCredential(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error("provider credential is invalid");
+  return value;
+}
+
+function providerModel(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) throw new Error("provider configuration is invalid");
+  return value.trim();
+}
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -149,21 +253,42 @@ function required(value: string | undefined, label: string): string {
 
 export class SQLiteIdentityRepository {
   private readonly db: Database;
+  private readonly credentialKeyPath: string | null;
+  private credentialKey: Buffer | undefined;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
-    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    this.db.exec(AUTH_SCHEMA);
+    this.credentialKeyPath = path === ":memory:" ? null : join(dirname(path), CREDENTIAL_KEY_FILE);
     try {
-      this.db.exec("ALTER TABLE provider_connections ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai-api'");
-    } catch {
-      // Existing databases already have provider column.
+      this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+      if (this.tableExists("provider_connections")) this.assertProviderSchema();
+      this.db.exec(AUTH_SCHEMA);
+      this.assertProviderSchema();
+    } catch (error) {
+      this.db.close();
+      throw error;
     }
   }
 
   close(): void {
     this.db.close();
+  }
+
+  private tableExists(table: string): boolean {
+    return this.db.query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== null;
+  }
+
+  private assertProviderSchema(): void {
+    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(provider_connections)").all().map(row => row.name));
+    const required = ["id", "provider", "base_url", "credential_ciphertext", "model", "updated_at"];
+    if (columns.has("api_key") || !required.every(column => columns.has(column))) {
+      throw new Error("unsupported provider credential schema");
+    }
+  }
+
+  private key(createIfMissing = false): Buffer {
+    return this.credentialKey ??= providerCredentialKey(this.credentialKeyPath, createIfMissing);
   }
 
   private user(row: Row): IdentityUser {
@@ -316,22 +441,34 @@ export class SQLiteIdentityRepository {
   }
 
   providerConnection(): ProviderConnection | null {
-    const row = this.db.query<{ provider: string; base_url: string; api_key: string; model: string }, []>(
-      "SELECT provider, base_url, api_key, model FROM provider_connections WHERE id = 1",
+    const row = this.db.query<ProviderRow, []>(
+      "SELECT provider, base_url, credential_ciphertext, model FROM provider_connections WHERE id = 1",
     ).get();
-    return row === null ? null : { provider: row.provider, baseUrl: row.base_url, apiKey: row.api_key, model: row.model };
+    if (row === null) return null;
+    const provider = providerSlug(row.provider);
+    decryptCredential(row.credential_ciphertext, this.key());
+    return { provider, baseUrl: row.base_url, credentialHandle: `${provider}:default`, model: row.model };
   }
 
   configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): void {
-    if (!provider.trim() || provider.length > 128) throw new Error("provider is invalid");
-    let parsed: URL;
-    try { parsed = new URL(baseUrl); } catch { throw new Error("provider URL is invalid"); }
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname))) throw new Error("provider URL must use HTTPS");
-    if (!apiKey.trim() || !model.trim() || model.length > 256) throw new Error("provider configuration is invalid");
+    const normalizedProvider = providerSlug(provider);
+    const normalizedBaseUrl = providerBaseUrl(baseUrl);
+    const credential = providerCredential(apiKey);
+    const normalizedModel = providerModel(model);
+    const ciphertext = encryptCredential(credential, this.key(true));
     this.db.run(
-      "INSERT INTO provider_connections (id, provider, base_url, api_key, model, updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, api_key = excluded.api_key, model = excluded.model, updated_at = excluded.updated_at",
-      [provider.trim(), parsed.toString().replace(/\/$/, ""), apiKey, model.trim(), now()],
+      "INSERT INTO provider_connections (id, provider, base_url, credential_ciphertext, model, updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, credential_ciphertext = excluded.credential_ciphertext, model = excluded.model, updated_at = excluded.updated_at",
+      [normalizedProvider, normalizedBaseUrl, ciphertext, normalizedModel, now()],
     );
+  }
+
+  resolveCredentialHandle(handle: string): ProviderCredentials {
+    if (typeof handle !== "string" || handle !== `${SUPPORTED_PROVIDER}:default`) throw new Error("credential handle is invalid");
+    const row = this.db.query<{ provider: string; credential_ciphertext: string }, []>(
+      "SELECT provider, credential_ciphertext FROM provider_connections WHERE id = 1",
+    ).get();
+    if (row === null || row.provider !== SUPPORTED_PROVIDER) throw new Error("provider credential is unavailable");
+    return { apiKey: decryptCredential(row.credential_ciphertext, this.key()) };
   }
 
   createInitialAgents(userId: string, templates: readonly string[]): { project: ProjectRecord; agents: readonly AgentRecord[] } {

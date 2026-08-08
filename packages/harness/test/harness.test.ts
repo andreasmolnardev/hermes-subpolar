@@ -1,17 +1,15 @@
-import { strict as assert } from "node:assert";
-import { test } from "bun:test";
+import { assert } from "./assert.ts";
 
 import {
   HarnessProviderError,
+  HarnessUnsupportedContextSourceError,
   classifyHarnessProviderError,
   boundedBackoff,
   boundedMaxAttempts,
-  execute,
   executeHarness,
   type HarnessAtomicTurnWrite,
   type HarnessEvent,
   type HarnessMessage,
-  type HarnessContextRouting,
   type HarnessProvider,
   type HarnessProviderRequest,
   type HarnessProviderResult,
@@ -47,23 +45,6 @@ function request(provider: HarnessProvider, overrides: Partial<HarnessRequest> =
   };
 }
 
-test("legacy execute remains a direct provider adapter", async () => {
-  const result = await execute({
-    model: "fake",
-    messages: [{ role: "user", content: "hello" }],
-    tools: []
-  }, {
-    async complete(providerRequest) {
-      assert.equal(providerRequest.model, "fake");
-      assert.deepEqual(providerRequest.messages, [{ role: "user", content: "hello" }]);
-      assert.deepEqual(providerRequest.tools, []);
-      return response({ role: "assistant", content: "world" });
-    }
-  });
-
-  assert.equal(result.message.content, "world");
-});
-
 test("text-only loop emits one terminal event in order", async () => {
   const events: HarnessEvent[] = [];
   const result = await executeHarness(request({
@@ -81,14 +62,6 @@ test("text-only loop emits one terminal event in order", async () => {
 test("context source routes unsupported context before persistence, provider, or tool effects", async () => {
   const events: HarnessEvent[] = [];
   const effects: string[] = [];
-  const routing: HarnessContextRouting = {
-    outcome: "fallback",
-    fallback: {
-      runtime: "python",
-      reason: "unsupported-context-source",
-      sourceKind: "memory"
-    }
-  };
   const result = await executeHarness(request({
     async complete() {
       effects.push("provider");
@@ -99,7 +72,7 @@ test("context source routes unsupported context before persistence, provider, or
     contextSource: async context => {
       effects.push("context");
       assert.equal(context.messages[0]?.content, "hello");
-      return routing;
+      throw new HarnessUnsupportedContextSourceError("memory");
     },
     persistence: {
       async ensureSession() {
@@ -113,11 +86,45 @@ test("context source routes unsupported context before persistence, provider, or
     }
   }));
 
-  assert.equal(result.outcome, "fallback");
-  if (result.outcome === "fallback") assert.deepEqual(result.fallback, routing.fallback);
+  assert.equal(result.outcome, "unsupported");
+  assert.equal(result.error.category, "unsupported");
+  assert.equal(result.error.reason, "unsupported-context-source");
   assert.deepEqual(effects, ["context"]);
   assert.deepEqual(events.map(event => event.type), ["request.started", "terminal"]);
-  assert.equal(events[1]?.outcome, "fallback");
+  assert.equal(events[1]?.outcome, "unsupported");
+});
+
+test("unsupported model and token shapes terminate before provider or session effects", async () => {
+  let providerCalls = 0;
+  let sessionEffects = 0;
+  const modelResult = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, {
+    model: " " as never,
+    persistence: { async ensureSession() { sessionEffects += 1; } }
+  }));
+  assert.equal(modelResult.outcome, "unsupported");
+  assert.equal(modelResult.error.reason, "unsupported-model");
+
+  const tokenResult = await executeHarness(request({
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  }, {
+    messages: [{
+      role: "user",
+      content: [{ type: "file", url: "file://unsupported" }]
+    }] as never,
+    persistence: { async ensureSession() { sessionEffects += 1; } }
+  }));
+  assert.equal(tokenResult.outcome, "unsupported");
+  assert.equal(tokenResult.error.reason, "unsupported-token-shape");
+  assert.equal(providerCalls, 0);
+  assert.equal(sessionEffects, 0);
 });
 
 test("one tool call executes with parsed arguments, then completes", async () => {

@@ -21,6 +21,7 @@ import {
   type SubpolarUser,
 } from "@/lib/subpolar-api";
 import { SubpolarWebSocketClient, type SubpolarSocketEvent } from "@/lib/subpolar-client";
+import { projectSubpolarActivity, subpolarEventType, type SubpolarActivityKind } from "@/lib/subpolar-events";
 import { ProviderSetupScreen } from "@/components/ProviderSetupScreen";
 
 type AuthMode = "login" | "bootstrap";
@@ -39,8 +40,24 @@ function eventText(event: SubpolarSocketEvent): string {
   return typeof record?.text === "string" ? record.text : "";
 }
 
-function messageText(message: SubpolarMessage): string {
+function messageText(message: { readonly content: SubpolarMessage["content"] }): string {
   return typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+}
+
+type ChatMessage = SubpolarMessage | {
+  readonly role: SubpolarActivityKind;
+  readonly content: string;
+  readonly sequence?: number;
+};
+
+type PromptMessage = {
+  readonly role: "system" | "user" | "assistant";
+  readonly content: SubpolarMessage["content"];
+  readonly sequence?: number;
+};
+
+function isPromptMessage(message: ChatMessage): message is PromptMessage {
+  return message.role === "system" || message.role === "user" || message.role === "assistant";
 }
 
 function AuthScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: (user: SubpolarUser) => void }) {
@@ -137,7 +154,7 @@ function Chat({
   onSend,
   onCancel,
 }: {
-  messages: readonly SubpolarMessage[];
+  messages: readonly ChatMessage[];
   draft: string;
   setDraft: (value: string) => void;
   model: string;
@@ -159,7 +176,7 @@ function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => voi
   const [selectedProject, setSelectedProject] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [messages, setMessages] = useState<readonly SubpolarMessage[]>([]);
+  const [messages, setMessages] = useState<readonly ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [model, setModel] = useState("default");
   const [streaming, setStreaming] = useState(false);
@@ -179,14 +196,20 @@ function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => voi
   useEffect(() => { if (!selectedSession) { setMessages([]); return; } if (newSessionRef.current.delete(selectedSession)) return; void sessionTranscript(selectedSession).then(result => setMessages(result.messages)).catch(() => setError("Could not load that conversation.")); }, [selectedSession]);
   useEffect(() => () => clientRef.current?.close(), []);
 
-  function handleEvent(requestId: string, event: SubpolarSocketEvent): void {
-    const inner = eventRecord(event.event);
-    const type = typeof inner?.type === "string" ? inner.type : event.type;
-    if (type === "message.delta") setMessages(current => current.map((message, index) => index === current.length - 1 && message.role === "assistant" ? { ...message, content: `${messageText(message)}${eventText(event)}` } : message));
-    if (type === "message.complete") { setStreaming(false); requestRef.current = null; void refreshSessions(); clientRef.current?.close(); }
-    if (type === "error") { setStreaming(false); requestRef.current = null; setError("The response could not be completed."); clientRef.current?.close(); }
-    if (event.requestId !== undefined && event.requestId !== requestId) return;
-  }
+   function handleEvent(requestId: string, event: SubpolarSocketEvent): void {
+     if (event.requestId !== undefined && event.requestId !== requestId) return;
+     const type = subpolarEventType(event);
+     const activity = projectSubpolarActivity(event);
+     if (activity !== undefined) setMessages(current => [...current, { role: activity.kind, content: activity.text, ...(activity.sequence === undefined ? {} : { sequence: activity.sequence }) }]);
+     if (type === "message.delta") {
+       setMessages(current => {
+         const assistantIndex = current.findLastIndex(message => message.role === "assistant");
+         return assistantIndex < 0 ? current : current.map((message, index) => index === assistantIndex ? { ...message, content: `${messageText(message)}${eventText(event)}` } : message);
+       });
+     }
+     if (type === "message.complete" || type === "terminal") { setStreaming(false); requestRef.current = null; void refreshSessions(); clientRef.current?.close(); }
+     if (type === "error") { setStreaming(false); requestRef.current = null; setError("The response could not be completed."); clientRef.current?.close(); }
+   }
 
   async function send(): Promise<void> {
     const text = draft.trim();
@@ -198,9 +221,9 @@ function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => voi
     setSelectedSession(sessionId);
     setMessages(current => [...current, { role: "user", content: text }, { role: "assistant", content: "" }]);
     setDraft(""); setStreaming(true); requestRef.current = requestId;
-    const client = new SubpolarWebSocketClient({ onEvent: event => handleEvent(requestId, event), onClose: () => { if (requestRef.current === requestId) { setStreaming(false); setError("Connection closed while the response was streaming."); } } });
-    clientRef.current = client;
-    try { const outgoing: readonly SubpolarMessage[] = [...messages, { role: "user", content: text }]; await client.start({ requestId, sessionId, model, messages: outgoing.filter(message => message.role !== "tool").map(message => ({ role: message.role as "system" | "user" | "assistant", content: messageText(message) })), ...(selectedProject ? { projectId: selectedProject } : {}), ...(selectedAgent ? { agentId: selectedAgent } : {}) }); } catch { setStreaming(false); requestRef.current = null; setError("Could not connect to the agent."); client.close(); }
+     const client = new SubpolarWebSocketClient({ heartbeatIntervalMs: 15000, reconnect: true, onEvent: event => handleEvent(requestId, event), onClose: () => { if (requestRef.current === requestId) { setStreaming(false); setError("Connection closed while the response was streaming."); } } });
+     clientRef.current = client;
+     try { const outgoing: readonly ChatMessage[] = [...messages, { role: "user", content: text }]; await client.start({ requestId, sessionId, model, messages: outgoing.filter(isPromptMessage).map(message => ({ role: message.role, content: messageText(message) })), ...(selectedProject ? { projectId: selectedProject } : {}), ...(selectedAgent ? { agentId: selectedAgent } : {}) }); } catch { setStreaming(false); requestRef.current = null; setError("Could not connect to the agent."); client.close(); }
   }
 
   async function createNewProject(): Promise<void> { const name = newName.trim(); if (!name) return; try { const result = await createProject(name); setProjectList(current => [...current, result.project]); setSelectedProject(result.project.id); setNewName(""); setProjectForm(false); } catch { setError("Could not create the project."); } }

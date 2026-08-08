@@ -81,3 +81,13 @@ test("requires declared third-party imports in server packages", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("requires Bun commands in workspace scripts", async () => {
+  const root = await createFixture();
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { check: "npm run check" } }));
+    await assert.rejects(check({ root }), /must use Bun/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

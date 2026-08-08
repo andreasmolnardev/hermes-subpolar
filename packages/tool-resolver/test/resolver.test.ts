@@ -136,7 +136,7 @@ test("accepts explicitly branded handles without executing them", () => {
   assert.equal(executed, false);
 });
 
-test("legacy resolveTools keeps concrete callers compatible and orders results", () => {
+test("resolveTools orders concrete callers deterministically", () => {
   const snapshot = [
     { toolName: "z.tool", policy: "allow" as const },
     { toolName: "a.tool", policy: "auto" as const },

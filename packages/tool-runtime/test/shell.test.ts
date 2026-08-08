@@ -73,3 +73,42 @@ test("shell tool bounds output by bytes and responds to cancellation", async () 
   controller.abort();
   await assert.rejects(pending, { name: "AbortError" });
 });
+
+test("shell tool rejects loader variables and supports an injectable process port", async () => {
+  assert.throws(() => createShellTool({
+    policy: {
+      allowedCommands: [{ executable: "/usr/bin/printf" }],
+      executableRoots: ["/usr/bin"],
+      cwdRoots: [process.cwd()],
+      maxTimeoutMs: 100,
+      maxOutputBytes: 32,
+      environment: { LD_PRELOAD: "/tmp/loader.so" }
+    }
+  }), /forbidden variable/);
+
+  const cwd = await mkdtemp(join(tmpdir(), "tool-runtime-"));
+  const executable = await realpath("/usr/bin/printf");
+  let finish!: (code: number) => void;
+  let terminated = false;
+  const port = {
+    spawn: () => ({
+      stdout: new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } }),
+      stderr: new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } }),
+      exited: new Promise<number>(resolve => { finish = resolve; })
+    }),
+    terminate: () => { terminated = true; finish(137); }
+  };
+  const tool = createShellTool({
+    policy: {
+      allowedCommands: [{ executable }],
+      executableRoots: ["/usr/bin"],
+      cwdRoots: [cwd],
+      maxTimeoutMs: 10,
+      maxOutputBytes: 32
+    },
+    processPort: port
+  });
+  assert.ok("handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ argv: [executable], cwd }), /timed out/);
+  assert.equal(terminated, true);
+});

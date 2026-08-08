@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "bun:test";
 
 import { startApiGatewayServer } from "../src/server.ts";
@@ -15,9 +18,15 @@ function csrf(cookies: string): string {
   return decodeURIComponent(match[1] as string);
 }
 
+function testDataDir(): string {
+  return mkdtempSync(join(tmpdir(), "subpolar-gateway-test-"));
+}
+
 test("server authenticates users before dispatching owned chat turns", async () => {
+  const dataDir = testDataDir();
   const server = startApiGatewayServer({
     port: 0,
+    dataDir,
     provider: {
       async complete() {
         return { message: { role: "assistant", content: "hello" }, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } };
@@ -71,12 +80,14 @@ test("server authenticates users before dispatching owned chat turns", async () 
     assert.equal(logout.status, 200);
     assert.equal((await fetch(`${server.url}v1/me`, { headers: { cookie: rotatedCookies } })).status, 401);
   } finally {
-    server.stop(true);
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
 test("server completes first-run provider and agent setup before dispatch", async () => {
-  const server = startApiGatewayServer({ port: 0 });
+  const dataDir = testDataDir();
+  const server = startApiGatewayServer({ port: 0, dataDir });
   try {
     const origin = new URL(server.url).origin;
     const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ username: "operator", password: "correct horse" }) });
@@ -86,11 +97,10 @@ test("server completes first-run provider and agent setup before dispatch", asyn
     const providerCatalog = await fetch(`${server.url}v1/setup/providers`, { headers: { cookie: cookies } });
     assert.equal(providerCatalog.status, 200);
     const catalog = await providerCatalog.json() as { providers: readonly { slug: string }[] };
-    assert.ok(catalog.providers.some(provider => provider.slug === "openrouter"));
-    assert.ok(catalog.providers.some(provider => provider.slug === "anthropic"));
+    assert.ok(catalog.providers.some(provider => provider.slug === "openai-api"));
     const invalidProvider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "not-a-hermes-provider", baseUrl: "https://example.test/v1", apiKey: "key", model: "model" }) });
     assert.equal(invalidProvider.status, 400);
-    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "openrouter", baseUrl: "http://127.0.0.1:11434/v1", apiKey: "local-key", model: "local-model" }) });
+    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "openai-api", baseUrl: "http://127.0.0.1:11434/v1", apiKey: "local-key", model: "local-model" }) });
     assert.equal(provider.status, 200);
     const agents = await fetch(`${server.url}v1/setup/agents`, { method: "POST", headers, body: JSON.stringify({ templates: ["research"] }) });
     assert.equal(agents.status, 201);
@@ -98,13 +108,16 @@ test("server completes first-run provider and agent setup before dispatch", asyn
     assert.deepEqual(created.agents.map(agent => agent.name), ["master", "research"]);
     assert.deepEqual(await (await fetch(`${server.url}v1/setup`, { headers: { cookie: cookies } })).json(), { complete: true, providerConfigured: true });
   } finally {
-    server.stop(true);
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
 test("server exposes provider deltas as an authenticated SSE stream", async () => {
+  const dataDir = testDataDir();
   const server = startApiGatewayServer({
     port: 0,
+    dataDir,
     provider: {
       async complete() {
         return { message: { role: "assistant", content: "unused" }, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } };
@@ -135,13 +148,74 @@ test("server exposes provider deltas as an authenticated SSE stream", async () =
     assert.match(text, /hello/);
     assert.match(text, /data: \[DONE\]/);
   } finally {
-    server.stop(true);
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("server enforces non-stream idempotency before provider effects", async () => {
+  let providerCalls = 0;
+  const dataDir = testDataDir();
+  const server = startApiGatewayServer({
+    port: 0,
+    dataDir,
+    provider: {
+      async complete() {
+        providerCalls += 1;
+        return { message: { role: "assistant", content: "idempotent" }, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    },
+  });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ username: "idempotent-user", password: "correct horse" }),
+    });
+    const cookies = sessionCookies(bootstrap);
+    const headers = {
+      "content-type": "application/json",
+      cookie: cookies,
+      "x-csrf-token": csrf(cookies),
+      origin,
+      "idempotency-key": "request-key",
+    };
+    const request = { model: "test", messages: [{ role: "user", content: "same" }] };
+    const first = await fetch(`${server.url}v1/chat/completions`, { method: "POST", headers, body: JSON.stringify(request) });
+    const firstPayload = await first.json();
+    const replay = await fetch(`${server.url}v1/chat/completions`, { method: "POST", headers, body: JSON.stringify(request) });
+    assert.equal(replay.status, 200);
+    assert.deepEqual(await replay.json(), firstPayload);
+    assert.equal(providerCalls, 1);
+
+    const mismatch = await fetch(`${server.url}v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...request, messages: [{ role: "user", content: "different" }] }),
+    });
+    assert.equal(mismatch.status, 409);
+    assert.deepEqual(await mismatch.json(), { error: "idempotency_conflict" });
+
+    const streaming = await fetch(`${server.url}v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...request, stream: true }),
+    });
+    assert.equal(streaming.status, 400);
+    assert.deepEqual(await streaming.json(), { error: "idempotency_streaming_unsupported" });
+    assert.equal(providerCalls, 1);
+  } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
 test("server upgrades authenticated WebSockets and projects ordered chat events", async () => {
+  const dataDir = testDataDir();
   const server = startApiGatewayServer({
     port: 0,
+    dataDir,
     provider: {
       async complete() {
         return { message: { role: "assistant", content: "socket hello" }, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } };
@@ -171,6 +245,7 @@ test("server upgrades authenticated WebSockets and projects ordered chat events"
     assert.ok(events.some(event => event.includes('"type":"message.start"')));
     assert.ok(events.some(event => event.includes('"type":"message.complete"')));
   } finally {
-    server.stop(true);
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });

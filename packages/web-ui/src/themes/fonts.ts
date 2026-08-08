@@ -12,11 +12,7 @@
  * accepting an arbitrary user-supplied URL would be a self-XSS / SSRF-ish
  * footgun in the dashboard. A vetted catalog keeps the injected origins
  * fixed (system stacks + Google Fonts) while still giving real choice. The
- * matching allow-list on the backend (`_FONT_CHOICES` in web_server.py)
- * rejects any id not defined here.
- *
- * Keep `FONT_CHOICES` in sync with `_FONT_CHOICES` in
- * `hermes_cli/web_server.py` — the ids must match exactly.
+ * Only vetted choices are exposed to the browser.
  */
 
 /** System stacks reused from presets so "System" choices need no webfont. */

@@ -286,7 +286,7 @@ export function classifyProviderError(
 
   if (statusCode !== undefined) return result(classifyStatus(statusCode, message), statusCode);
 
-  // These checks mirror the Python classifier's message-only ordering.
+  // Keep message-only classification deterministic when providers omit codes.
   if (matches(message, OVERLOAD_PATTERNS)) return result("overloaded", undefined);
   if (matches(message, RATE_LIMIT_PATTERNS)) return result("rate_limit", undefined);
   if (matches(message, CONTEXT_LENGTH_PATTERNS)) return result("context_length", undefined);

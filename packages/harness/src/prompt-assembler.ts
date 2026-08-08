@@ -72,25 +72,35 @@ export type HarnessUnsupportedSourceKind =
   | "discovery"
   | "unknown";
 
-export type HarnessFallbackSignal = {
-  readonly runtime: "python";
-  readonly reason: "unsupported-context-source";
-  readonly sourceKind: string;
-};
+export type HarnessUnsupportedKind = "context" | "model" | "tokens";
+export type HarnessUnsupportedReason =
+  | "unsupported-context-source"
+  | "unsupported-model"
+  | "unsupported-token-shape";
 
-export class HarnessUnsupportedContextSourceError extends Error {
+export class HarnessUnsupportedError extends Error {
+  readonly kind: HarnessUnsupportedKind;
+  readonly reason: HarnessUnsupportedReason;
+
+  constructor(kind: HarnessUnsupportedKind, reason: HarnessUnsupportedReason, message: string) {
+    super(message);
+    this.name = "HarnessUnsupportedError";
+    this.kind = kind;
+    this.reason = reason;
+  }
+}
+
+export class HarnessUnsupportedContextSourceError extends HarnessUnsupportedError {
   readonly sourceKind: string;
-  readonly fallback: HarnessFallbackSignal;
 
   constructor(sourceKind: string) {
-    super(`Context source is unsupported by the first-cut harness runtime: ${sourceKind}`);
+    super(
+      "context",
+      "unsupported-context-source",
+      `Context source is unsupported by the TypeScript harness runtime: ${sourceKind}`
+    );
     this.name = "HarnessUnsupportedContextSourceError";
     this.sourceKind = sourceKind;
-    this.fallback = {
-      runtime: "python",
-      reason: "unsupported-context-source",
-      sourceKind
-    };
   }
 }
 
@@ -274,4 +284,10 @@ export function isHarnessUnsupportedContextSourceError(
   value: unknown
 ): value is HarnessUnsupportedContextSourceError {
   return value instanceof HarnessUnsupportedContextSourceError;
+}
+
+export function isHarnessUnsupportedError(
+  value: unknown
+): value is HarnessUnsupportedError {
+  return value instanceof HarnessUnsupportedError;
 }

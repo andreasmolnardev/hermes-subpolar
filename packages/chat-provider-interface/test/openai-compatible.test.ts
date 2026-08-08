@@ -191,10 +191,10 @@ test("OpenAI-compatible adapter exposes ordered streaming deltas", async () => {
   const events: ProviderStreamEvent[] = [];
   for await (const event of provider.stream!(request())) events.push(event);
   assert.equal(JSON.parse(String(recorded.calls[0]?.init?.body)).stream, true);
-  assert.deepEqual(events.map(event => event.type), ["start", "text-delta", "text-delta", "reasoning-delta", "finish", "usage"]);
+  assert.deepEqual(events.map(event => event.type), ["start", "text-delta", "text-delta", "reasoning-delta", "usage", "finish"]);
   assert.equal(events[1]?.text, "hel");
   assert.equal(events[2]?.text, "lo");
-  assert.equal(events[4]?.finishReason, "stop");
+  assert.equal(events[5]?.finishReason, "stop");
 });
 
 test("OpenAI-compatible adapter serializes injected multimodal data without fetching it", async () => {
@@ -327,5 +327,123 @@ test("OpenAI-compatible adapter classifies safe body signals and preserves respo
   await assert.rejects(
     gateway.provider.complete({ model: "fixture-model", messages: [], tools: [] }),
     (error: Error) => error instanceof ProviderError && error.category === "server" && error.retryable
+  );
+});
+
+test("OpenAI-compatible adapter protects authorization and rejects redirects", async () => {
+  assert.throws(() => createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentials: { apiKey: "fixture-secret" },
+    headers: { Authorization: "Bearer caller-secret" },
+    fetch: async () => new Response()
+  }), /credential headers are managed/);
+
+  const recorded = createRecordedFetch({ body: { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }] } });
+  const provider = createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentials: { apiKey: "fixture-secret" },
+    fetch: recorded.fetch
+  });
+  await provider.complete({ model: "fixture-model", messages: [], tools: [] });
+  assert.equal(recorded.calls[0]?.init?.redirect, "error");
+
+  const redirected = createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentials: { apiKey: "fixture-secret" },
+    fetch: async () => Response.redirect("https://evil.example/chat/completions", 302)
+  });
+  await assert.rejects(
+    redirected.complete({ model: "fixture-model", messages: [], tools: [], requestId: "redirect-1" }),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request" && !error.message.includes("evil.example")
+  );
+});
+
+test("OpenAI-compatible adapter resolves opaque credential handles without exposing them", async () => {
+  const recorded = createRecordedFetch({ body: { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }] } });
+  const provider = createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentialHandle: "credential:fixture",
+    resolveCredentialHandle: async (handle) => {
+      assert.equal(handle, "credential:fixture");
+      return { apiKey: "handle-secret" };
+    },
+    fetch: recorded.fetch
+  });
+  await provider.complete({ model: "fixture-model", messages: [], tools: [], requestId: "handle-1" });
+  assert.equal(new Headers(recorded.calls[0]?.init?.headers).get("authorization"), "Bearer handle-secret");
+
+  const failed = createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentialHandle: "credential:fixture",
+    resolveCredentialHandle: () => { throw new Error("handle-secret must not escape"); },
+    fetch: recorded.fetch
+  });
+  await assert.rejects(
+    failed.complete({ model: "fixture-model", messages: [], tools: [], requestId: "handle-2" }),
+    (error: Error) => error instanceof ProviderError && error.category === "authentication" && !error.message.includes("handle-secret")
+  );
+});
+
+test("OpenAI-compatible adapter consumes an unterminated final SSE event", async () => {
+  const { provider } = providerWith({
+    rawBody: 'data: {"choices":[{"delta":{"content":"final"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}'
+  });
+  const events: ProviderStreamEvent[] = [];
+  for await (const event of provider.stream!({ model: "fixture-model", messages: [], tools: [] })) events.push(event);
+  assert.deepEqual(events.map(event => event.type), ["start", "text-delta", "usage", "finish"]);
+  assert.equal(events[1]?.text, "final");
+});
+
+test("OpenAI-compatible adapter enforces response and SSE bounds", async () => {
+  const oversized = providerWith({ body: { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "a large response" } }] } });
+  const bounded = createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentials: { apiKey: "fixture-secret" },
+    maxResponseBytes: 8,
+    fetch: oversized.recorded.fetch
+  });
+  await assert.rejects(
+    bounded.complete({ model: "fixture-model", messages: [], tools: [], requestId: "bounds-1" }),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request" && error.message.includes("size limit")
+  );
+
+  const streamed = createOpenAICompatibleProvider({
+    baseUrl: "https://recorded.example/v1",
+    credentials: { apiKey: "fixture-secret" },
+    maxSseEventBytes: 16,
+    fetch: createRecordedFetch({ rawBody: 'data: {"choices":[]}' }).fetch
+  });
+  await assert.rejects(
+    (async () => { for await (const _event of streamed.stream!({ model: "fixture-model", messages: [], tools: [] })) {} })(),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request"
+  );
+});
+
+test("OpenAI-compatible adapter rejects malformed usage, finish, and tool codecs", async () => {
+  const malformedUsage = providerWith({ body: {
+    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "bad" } }],
+    usage: { prompt_tokens: 1 }
+  } });
+  await assert.rejects(
+    malformedUsage.provider.complete({ model: "fixture-model", messages: [], tools: [] }),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request"
+  );
+
+  const unknownFinish = providerWith({ body: {
+    choices: [{ finish_reason: "vendor-finished", message: { role: "assistant", content: "bad" } }]
+  } });
+  await assert.rejects(
+    unknownFinish.provider.complete({ model: "fixture-model", messages: [], tools: [] }),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request"
+  );
+
+  const malformedTool = providerWith({ body: {
+    choices: [{ finish_reason: "tool_calls", message: {
+      role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "custom", function: { name: "tool", arguments: "{}" } }]
+    } }]
+  } });
+  await assert.rejects(
+    malformedTool.provider.complete({ model: "fixture-model", messages: [], tools: [] }),
+    (error: Error) => error instanceof ProviderError && error.category === "invalid_request"
   );
 });

@@ -57,6 +57,51 @@ describe("InMemorySessionRepository", () => {
     assert.equal((await repository.getSession("session-1"))?.id, "session-1");
   });
 
+  test("updates lifecycle status without replacing session-owned fields", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+
+    for (const [status, updatedAt] of [
+      ["completed", "2026-01-01T00:00:01.000Z"],
+      ["failed", "2026-01-01T00:00:02.000Z"],
+      ["cancelled", "2026-01-01T00:00:03.000Z"],
+    ] as const) {
+      const updated = await repository.updateSession("session-1", { status, updatedAt });
+      assert.equal(updated.status, status);
+      assert.equal(updated.updatedAt, updatedAt);
+      assert.equal(updated.workspaceId, "workspace-1");
+      assert.deepEqual(updated.runtime, runtime);
+    }
+  });
+
+  test("validates session updates and rolls them back with the transaction", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+
+    await assert.rejects(
+      repository.updateSession("missing", { status: "completed", updatedAt: "2026-01-01T00:00:01.000Z" }),
+      /Session not found: missing/,
+    );
+    await assert.rejects(
+      repository.updateSession("session-1", { status: "unknown" as never, updatedAt: "2026-01-01T00:00:01.000Z" }),
+      /Invalid session status/,
+    );
+    await assert.rejects(
+      repository.updateSession("session-1", { updatedAt: "not-a-timestamp" }),
+      /Invalid session timestamp/,
+    );
+    await assert.rejects(repository.transaction(async (transaction) => {
+      await transaction.updateSession("session-1", {
+        status: "failed",
+        updatedAt: "2026-01-01T00:00:01.000Z",
+      });
+      throw new Error("abort");
+    }), /abort/);
+
+    assert.equal((await repository.getSession("session-1"))?.status, "active");
+    assert.equal((await repository.getSession("session-1"))?.updatedAt, "2026-01-01T00:00:00.000Z");
+  });
+
   test("rolls back every transaction mutation on failure", async () => {
     const repository = new InMemorySessionRepository();
     await repository.createSession(session());
@@ -261,7 +306,7 @@ describe("InMemorySessionRepository", () => {
     assert.equal(await repository.getMigrationState("session-1"), null);
   });
 
-  test("round-trips Python-compatible structured content", async () => {
+  test("round-trips structured content without compatibility conversion", async () => {
     const repository = new InMemorySessionRepository();
     await repository.createSession(session());
     const content = [

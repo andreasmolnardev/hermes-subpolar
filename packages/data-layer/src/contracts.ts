@@ -261,6 +261,51 @@ export type AtomicTurnWrite = {
   migrationState?: MigrationStateRecord;
 };
 
+export type IdempotencyRecordStatus = "pending" | "completed";
+
+export type IdempotencyRecord = {
+  requestKey: string;
+  requestFingerprint: string;
+  status: IdempotencyRecordStatus;
+  terminalPayload?: JsonValue;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type IdempotencyClaim =
+  | { status: "claimed"; record: IdempotencyRecord }
+  | { status: "pending"; record: IdempotencyRecord }
+  | { status: "replay"; record: IdempotencyRecord; terminalPayload: JsonValue };
+
+export type PendingApprovalStatus = "pending" | "allowed" | "denied";
+
+export type PendingApprovalRecord = {
+  requestId: string;
+  sessionId: string;
+  callId: string;
+  toolName: string;
+  arguments: JsonObject;
+  status: PendingApprovalStatus;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+};
+
+export type ApprovalDecision = "allow" | "deny";
+
+export type RetentionPruneResult = {
+  idempotencyRecords: number;
+  approvalRecords: number;
+};
+
+export class IdempotencyConflictError extends Error {
+  constructor(message = "Idempotency key was reused with a different request fingerprint") {
+    super(message);
+    this.name = "IdempotencyConflictError";
+  }
+}
+
 /** Implementations must commit all messages, or commit none of them. */
 export interface SessionRepositoryTransaction {
   appendMessages(
@@ -269,6 +314,10 @@ export interface SessionRepositoryTransaction {
     options?: AppendMessagesOptions,
   ): Promise<AppendMessagesResult>;
   getSession(sessionId: string): Promise<SessionRecord | null>;
+  updateSession(
+    sessionId: string,
+    patch: { status?: SessionStatus; updatedAt: string },
+  ): Promise<SessionRecord>;
   listMessages(sessionId: string): Promise<readonly SessionMessage[]>;
   listToolCalls(sessionId: string): Promise<readonly ToolCallRecord[]>;
   listToolResults(sessionId: string): Promise<readonly ToolResultRecord[]>;
@@ -277,6 +326,21 @@ export interface SessionRepositoryTransaction {
   getMigrationState(sessionId: string): Promise<MigrationStateRecord | null>;
   saveMigrationState(state: MigrationStateRecord): Promise<void>;
   saveCheckpoint(checkpoint: CheckpointRecord): Promise<void>;
+  claimIdempotency(requestKey: string, requestFingerprint: string): Promise<IdempotencyClaim>;
+  completeIdempotency(
+    requestKey: string,
+    requestFingerprint: string,
+    terminalPayload: JsonValue,
+  ): Promise<void>;
+  getIdempotency(requestKey: string): Promise<IdempotencyRecord | null>;
+  savePendingApproval(approval: PendingApprovalRecord): Promise<void>;
+  getPendingApproval(requestId: string): Promise<PendingApprovalRecord | null>;
+  listPendingApprovals(sessionId?: string): Promise<readonly PendingApprovalRecord[]>;
+  resolvePendingApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    resolvedAt?: string,
+  ): Promise<PendingApprovalRecord>;
   commitTurn(write: AtomicTurnWrite): Promise<AppendMessagesResult>;
 }
 
@@ -284,18 +348,10 @@ export interface SessionRepository extends SessionRepositoryTransaction {
   createSession(session: SessionRecord): Promise<void>;
   getCheckpoint(sessionId: string, checkpointId: string): Promise<CheckpointRecord | null>;
   listCheckpoints(sessionId: string): Promise<readonly CheckpointRecord[]>;
+  prune(now?: string): Promise<RetentionPruneResult>;
   transaction<T>(
     operation: (transaction: SessionRepositoryTransaction) => Promise<T>,
   ): Promise<T>;
-}
-
-/** Durable per-session runtime pin used by gateway adapters. */
-export type RuntimeSelection = "harness" | "python";
-
-export interface RuntimeSelectionStore {
-  load(sessionId: string): Promise<RuntimeSelection | undefined>;
-  save(sessionId: string, runtime: RuntimeSelection): Promise<void>;
-  clear?(sessionId?: string): Promise<void>;
 }
 
 export type PersistenceRepository = SessionRepository;

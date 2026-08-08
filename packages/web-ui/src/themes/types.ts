@@ -4,9 +4,7 @@
  * Themes customise three orthogonal layers:
  *
  *   1. `palette`       — the 3-layer color triplet (background/midground/
- *                         foreground). Legacy `warmGlow` / `noiseOpacity`
- *                         fields remain for theme YAML compat but are unused
- *                         by the lightweight shell.
+ *                         foreground).
  *   2. `typography`    — font families, base font size, line height,
  *                         letter spacing. An optional `fontUrl` is injected
  *                         as `<link rel="stylesheet">` so self-hosted and
@@ -32,9 +30,9 @@ export interface ThemePalette {
   /** Top-layer highlight. In LENS_0 this is white @ alpha 0 — invisible by
    *  default but still drives `--color-ring`-style accents. */
   foreground: ThemeLayer;
-  /** Legacy palette field — kept for theme YAML compat. */
+   /** Accent used by expressive theme palettes. */
   warmGlow: string;
-  /** Legacy palette field — kept for theme YAML compat. */
+  /** Texture intensity used by expressive theme palettes. */
   noiseOpacity: number;
 }
 
@@ -68,22 +66,14 @@ export interface ThemeLayout {
   density: ThemeDensity;
 }
 
-/** Overall layout variant the shell renders. `standard` = default single-
- *  column page layout. `cockpit` = reserves a left sidebar rail for a
- *  plugin slot (intended for HUD-style themes with persistent status panels).
- *  `tiled` = relaxes the main content max-width so pages can use the full
- *  viewport width. Themes set this; plugins react via CSS vars /
- *  `[data-layout-variant="..."]` selectors. */
+/** Overall layout variant the shell renders. */
 export type ThemeLayoutVariant = "standard" | "cockpit" | "tiled";
 
-/** Named hero/background assets a theme can populate. Each value is
- *  emitted as a CSS var (`--theme-asset-<name>`). Plugin slots and
- *  shell chrome may consume these via CSS. */
+/** Named hero/background assets a theme can populate as CSS variables. */
 export interface ThemeAssets {
-  /** Full-viewport background image URL. Exposed as `--theme-asset-bg` for
-   *  the `backdrop` plugin slot or theme `customCSS`. */
+  /** Full-viewport background image URL. */
   bg?: string;
-  /** Hero render (Gundam, mascot, wallpaper) — for plugin sidebars/overlays. */
+  /** Optional hero image. */
   hero?: string;
   /** Logo mark — header slot consumers use this. */
   logo?: string;
@@ -116,14 +106,9 @@ export interface ThemeComponentStyles {
   page?: Record<string, string>;
 }
 
-/** Data-series accent colors for chart + table visualisations (Analytics,
- *  Models, etc.). Themes provide hex strings; the provider emits them as
- *  `--series-input-token` / `--series-output-token` CSS vars consumed
- *  inline by pages that render input-vs-output token flows. Themes can
- *  omit either field to inherit the default token defined in
- *  `index.css` (Tokyo Night `#7aa2f7` for input, `#9ece6a` for output). */
+/** Optional data-series accent colors. */
 export interface ThemeSeriesColors {
-  /** Input-tokens series accent (Analytics chart bars + table values). */
+  /** Input-tokens series accent. */
   inputTokenAccent?: string;
   /** Output-tokens series accent. */
   outputTokenAccent?: string;
@@ -172,37 +157,17 @@ export interface DashboardTheme {
   /** Per-component CSS-var overrides. See `ThemeComponentStyles`. */
   componentStyles?: ThemeComponentStyles;
   colorOverrides?: ThemeColorOverrides;
-  /** Data-series accent colors for Analytics/Models token charts. */
+  /** Data-series accent colors. */
   seriesColors?: ThemeSeriesColors;
   /** Explicit 3-color swatch override for the theme picker. Order matches the
    *  default swatch cells: [background, midground, warmGlow]. */
   swatchColors?: [string, string, string];
-  /** Background color for the embedded terminal pane (xterm.js).
-   *  Hex string. Defaults to `"#000000"` when absent. */
-  terminalBackground?: string;
-  /** Default text/cursor color for the embedded terminal pane (xterm.js).
-   *  Hex string. Defaults to `"#f0e6d2"` when absent. */
-  terminalForeground?: string;
 }
 
-/**
- * Wire response shape for `GET /api/dashboard/themes`.
- *
- * The `themes` list is intentionally partial — built-in themes are fully
- * defined in `presets.ts`; user themes carry their full definition so the
- * client can apply them without a second round-trip.
- */
 export interface ThemeListEntry {
   description: string;
   label: string;
   name: string;
-  /** Full theme definition. Present for user-defined themes loaded from
-   *  `~/.hermes/dashboard-themes/*.yaml`; undefined for built-ins (the
-   *  client already has those in `BUILTIN_THEMES`). */
+  /** Optional full theme definition. */
   definition?: DashboardTheme;
-}
-
-export interface ThemeListResponse {
-  active: string;
-  themes: ThemeListEntry[];
 }

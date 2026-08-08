@@ -13,36 +13,6 @@
 @source '../node_modules/@nous-research/ui/dist';
 
 /* ------------------------------------------------------------------ */
-/* JetBrains Mono — bundled for the embedded TUI (/chat tab).          */
-/* Gives the terminal a proper monospace font even on systems where    */
-/* the user doesn't have one installed locally; xterm.js picks it up   */
-/* via ChatPage's `fontFamily` option.                                 */
-/* Apache-2.0.                                                         */
-/* ------------------------------------------------------------------ */
-
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('/fonts-terminal/JetBrainsMono-Regular.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url('/fonts-terminal/JetBrainsMono-Bold.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-  src: url('/fonts-terminal/JetBrainsMono-Italic.woff2') format('woff2');
-}
-
-/* ------------------------------------------------------------------ */
 /* Hermes Agent — Tokyo Night palette applied statically as the default
    dashboard theme. */
 /* ------------------------------------------------------------------ */
@@ -161,10 +131,7 @@ code { font-size: 0.875rem; }
   --color-secondary: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
   --color-secondary-foreground: var(--midground);
   --color-muted: color-mix(in srgb, var(--midground-base) 8%, var(--background-base));
-  /* Routes the shadcn `muted-foreground` slot through the DS semantic
-     text-secondary token (defaults to midground 80%) so legacy call
-     sites that use `text-muted-foreground` get a readable color
-     instead of the old 55%-transparent default. */
+   /* Route muted text through the design-system semantic token. */
   --color-muted-foreground: var(--color-text-secondary);
   --color-accent: color-mix(in srgb, var(--midground-base) 10%, var(--background-base));
   --color-accent-foreground: var(--midground);
@@ -184,9 +151,7 @@ code { font-size: 0.875rem; }
   --radius-xl: calc(var(--theme-radius) + 4px);
 }
 
-/* The active Subpolar shell still uses a small set of legacy literal color
-   utilities. Keep that entrypoint on the default palette until it is moved to
-   the shared theme tokens. */
+/* The active Subpolar shell uses a small set of literal palette utilities. */
 @layer utilities {
   [class*="bg-[#041c1c]"] { background-color: #1a1b26 !important; }
   [class*="bg-[#102b2d]"] { background-color: #24283b !important; }

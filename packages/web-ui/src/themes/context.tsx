@@ -28,7 +28,6 @@ import type {
   ThemeSeriesColors,
   ThemeTypography,
 } from "./types";
-import { api } from "@/lib/api";
 
 /** LocalStorage key — pre-applied before the React tree mounts to avoid
  *  a visible flash of the default palette on theme-overridden installs. */
@@ -389,16 +388,6 @@ function applyTheme(theme: DashboardTheme) {
   applyCustomCSS(theme.customCSS);
   applyLayoutVariant(theme.layoutVariant);
 
-  // Terminal colors — read by ChatPage via useTheme(); also available as CSS vars.
-  root.style.setProperty(
-    "--theme-terminal-background",
-    theme.terminalBackground ?? "#000000",
-  );
-  root.style.setProperty(
-    "--theme-terminal-foreground",
-    theme.terminalForeground ?? "#f0e6d2",
-  );
-
   // Re-assert the font override last: theme application just rewrote
   // --theme-font-sans/-display, so an active override has to win again.
   applyFontOverride(_ACTIVE_FONT_OVERRIDE);
@@ -422,9 +411,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return migrated;
   });
 
-  /** All selectable themes (shown in the picker). Starts with just the
-   *  built-ins; the API call below merges in user themes. */
-  const [availableThemes, setAvailableThemes] = useState<ThemeListEntry[]>(() =>
+  /** All selectable themes available in the active client. */
+  const [availableThemes] = useState<ThemeListEntry[]>(() =>
     Object.values(BUILTIN_THEMES).map((t) => ({
       name: t.name,
       label: t.label,
@@ -432,9 +420,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     })),
   );
 
-  /** Full definitions for user themes keyed by name — the API provides
-   *  these so custom YAMLs apply without a client-side stub. */
-  const [userThemeDefs, setUserThemeDefs] = useState<
+  /** Full definitions for optional client-side custom themes. */
+  const [userThemeDefs] = useState<
     Record<string, DashboardTheme>
   >({});
 
@@ -470,76 +457,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     applyTheme(resolveTheme(themeName));
   }, [themeName, resolveTheme, fontId]);
 
-  // Load server-side themes (built-ins + user YAMLs) once on mount.
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getThemes()
-      .then((resp) => {
-        if (cancelled) return;
-        if (resp.themes?.length) {
-          setAvailableThemes(
-            resp.themes.map((t) => ({
-              name: t.name,
-              label: t.label,
-              description: t.description,
-              definition: t.definition,
-            })),
-          );
-          // Index any definitions the server shipped (user themes).
-          const defs: Record<string, DashboardTheme> = {};
-          for (const entry of resp.themes) {
-            if (entry.definition) {
-              defs[entry.name] = entry.definition;
-            }
-          }
-          if (Object.keys(defs).length > 0) setUserThemeDefs(defs);
-        }
-        if (resp.active) {
-          const migratedActive = migrateThemeName(resp.active);
-          if (migratedActive !== themeName) {
-            setThemeName(migratedActive);
-            window.localStorage.setItem(STORAGE_KEY, migratedActive);
-          }
-          // If the server is still persisting the stale key, push the
-          // migrated value back so it converges too — otherwise every
-          // future page load would re-trigger this branch.
-          if (migratedActive !== resp.active) {
-            api.setTheme(migratedActive).catch(() => {});
-          }
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Load the server-persisted font override once on mount. The server is
-  // the source of truth across browsers; localStorage just avoids the flash.
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getFontPref()
-      .then((resp) => {
-        if (cancelled) return;
-        const serverId =
-          resp?.font && getFontChoice(resp.font) ? resp.font : THEME_DEFAULT_FONT_ID;
-        if (serverId !== fontId) {
-          setFontId(serverId);
-          if (typeof window !== "undefined") {
-            window.localStorage.setItem(FONT_STORAGE_KEY, serverId);
-          }
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const setTheme = useCallback(
     (name: string) => {
       // Accept any name the server told us exists OR any built-in.
@@ -553,7 +470,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       if (typeof window !== "undefined") {
         window.localStorage.setItem(STORAGE_KEY, next);
       }
-      api.setTheme(next).catch(() => {});
     },
     [availableThemes, userThemeDefs],
   );
@@ -564,7 +480,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(FONT_STORAGE_KEY, next);
     }
-    api.setFontPref(next).catch(() => {});
   }, []);
 
   const value = useMemo<ThemeContextValue>(

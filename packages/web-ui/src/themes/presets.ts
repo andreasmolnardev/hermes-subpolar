@@ -7,15 +7,14 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
  * themes produces visible changes beyond just color — fonts, density, and
  * corner-radius all shift to match the theme's personality.
  *
- * Theme names must stay in sync with the backend's
- * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server.py`.
+ * Theme names are local to the browser client.
  */
 
 // ---------------------------------------------------------------------------
 // Shared typography / layout presets
 // ---------------------------------------------------------------------------
 
-/** Default system stack — neutral, safe fallback for every platform. */
+/** Default system stack — neutral, safe fallback. */
 const SYSTEM_SANS =
   'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 const SYSTEM_MONO =
@@ -77,8 +76,6 @@ export const defaultTheme: DashboardTheme = {
     input: "color-mix(in srgb, #7aa2f7 28%, transparent)",
     ring: "#7aa2f7",
   },
-  terminalBackground: "#1a1b26",
-  terminalForeground: "#a9b1d6",
 };
 
 export const midnightTheme: DashboardTheme = {
@@ -225,8 +222,6 @@ export const nousBlueTheme: DashboardTheme = {
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,
-  terminalBackground: "#f5f8fc",
-  terminalForeground: "#170d02",
   seriesColors: {
     inputTokenAccent: "#001934",
     outputTokenAccent: "#0053fd",

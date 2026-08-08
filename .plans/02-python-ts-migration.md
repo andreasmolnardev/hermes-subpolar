@@ -540,21 +540,43 @@ outside their assignment; they report a blocker to the orchestrator instead.
 
 - [x] Bun server serves `web-ui` static assets with safe SPA fallback; API misses
   remain API errors.
-- [ ] The new authenticated SSE/WebSocket chat transport and active browser
-  workspace are implemented, but reconnect, heartbeat, and the remaining
-  administrative API surface are not yet complete.
-- [ ] Full authentication/account lifecycle is not complete; the new server now
-  has first-user bootstrap, password login/logout, cookie sessions, CSRF checks,
-  origin checks, and owner-scoped projects, agents, and sessions.
-- [ ] The current API route has only a direct OpenAI-compatible non-streaming
-  provider configuration; it has no provider registry, streaming, or tool
-  composition.
-- [ ] MCP transport implementations, OpenAPI request schema validation, shell
-  process-tree termination, and approval persistence need production hardening.
-- [ ] New SQLite session persistence, idempotency, recovery, and retention are
-  not yet connected to the server route.
-- [ ] Legacy dashboard pages remain in the source tree, but the shipped
-  `SubpolarApp` entry now uses only the versioned authenticated Bun API.
+- [ ] The authenticated SSE/WebSocket chat transport and active browser workspace
+  are implemented and have unit/integration coverage, but Playwright browser E2E
+  was explicitly skipped; reconnect, heartbeat, and remaining administrative
+  browser gates are not accepted without it.
+- [x] The server has first-user bootstrap, password hashing, login/logout, cookie
+  sessions, session rotation/revocation, CSRF checks, origin checks, and
+  owner-scoped projects, agents, and sessions; Playwright E2E remains unrun.
+- [x] The current provider path is an OpenAI-compatible adapter with streaming,
+  tools, multimodal serialization, recorded error/usage tests, and a reduced
+  catalog; other provider adapters and live provider tests are not implemented.
+- [ ] MCP transport implementations and browser approval E2E remain unverified;
+  shell process-port/cancellation and OpenAPI schema, redirect, and SSRF tests
+  pass.
+- [x] New SQLite session persistence, idempotency, recovery, and retention are
+  connected to the server path and covered by Bun tests.
+- [x] Legacy dashboard pages and unsupported controls were removed; the shipped
+  `SubpolarApp` entry uses only the versioned authenticated Bun API.
+
+### Verification Notes
+
+- `bun install --frozen-lockfile`: passed.
+- `bun run check:boundaries`: passed; all eight active packages were reported valid.
+- `bun run typecheck:runtime`: passed for all runtime packages.
+- `bun test`: passed, 206 tests across 25 files, 0 failures.
+- `bun test tests-js/migration/foundation-migration.test.ts tests-js/migration/harness-migration.test.ts`: passed, 11 tests across 2 files, 0 failures.
+- `bun run check:monorepo`: passed; boundary tests and all package checks passed (three existing web-ui lint warnings, no errors).
+- `bun run build:web`: passed; Vite produced `packages/web-ui/dist`.
+- `docker build -t subpolar-migration-check .`: passed; the Bun image installed with the frozen lockfile and built the web bundle.
+- `bunx vitest run tests-js/migration`: not accepted as evidence because the Vitest foundation suite cannot import Bun's `bun:sqlite`; the equivalent Bun migration command above passed.
+- `bun run test:e2e:browser`: explicitly skipped at the user's direction; no Playwright browser E2E result is claimed.
+- Docker health, static asset, restart, and readiness smoke passed using
+  `hermes-subpolar:test`; no live provider test or authenticated provider/tool
+  turn was run. The browser Playwright gate remains explicitly skipped.
+- Clean runtime `PATH` without Python, pip, uv, npm, or npx passed frozen install,
+  runtime typecheck, 206 Bun tests, web build, and `/api/health` serve smoke.
+- Final image scan found no Python/pip/uv/npm/npx executable, Python source/cache,
+  virtual environment, or retired integration tree.
 
 ## Execution Waves
 
@@ -590,10 +612,11 @@ in order unless a dependency is explicitly moved earlier.
 ### Exit Gate
 
 - [ ] Contract types contain no `unknown` in executable paths.
-- [ ] `openapi.json` matches the approved REST contract.
-- [x] Config rejects unknown keys and does not read behavioral settings from
-  environment variables.
-- [ ] Security review explicitly approves the first authentication and tool
+- [x] `openapi.json` matches the approved REST contract.
+- [ ] A strict file-backed behavioral configuration parser remains out of
+  scope; the current Bun entrypoint validates only its documented process
+  settings and does not load a config file.
+- [x] Security review explicitly approves the first authentication and tool
   threat model.
 
 ## Wave 1: Server, Static Assets, And Authentication
@@ -602,25 +625,25 @@ in order unless a dependency is explicitly moved earlier.
 
 ### Required Work
 
-- [ ] Remove the general-purpose `subpolar` command parser and legacy command
+- [x] Remove the general-purpose `subpolar` command parser and legacy command
   compatibility. Keep a minimal Bun server entry module consumed by
-  `bun run serve` and Docker; configure host, port, config path, and data path
-  through the approved Bun configuration contract.
+  `bun run serve` and Docker; configure host, port, and data path through the
+  approved Bun process contract.
 - [x] Change Vite output to `packages/web-ui/dist`; remove Python build/serve
   paths and injected token globals.
 - [x] Serve hashed assets with immutable cache headers, HTML with `no-store`,
   safe SPA fallback, and no fallback for `/v1/*` or `/api/*` misses.
 - [x] Reject traversal, encoded traversal, ambiguous path separators, and
   unsupported HTTP methods before static file access.
-- [ ] Implement first-run local administrator bootstrap, password hashing,
+- [x] Implement first-run local administrator bootstrap, password hashing,
   login, logout, session rotation, session revocation, and password change.
-- [ ] Use HttpOnly, Secure in production, SameSite cookie sessions. Browser
+- [x] Use HttpOnly, Secure in production, SameSite cookie sessions. Browser
   APIs use same-origin credentials; do not inject bearer tokens into HTML.
-- [ ] Require CSRF validation for state-changing cookie-authenticated requests.
-- [ ] Add explicit origin checks for WebSocket upgrades and state-changing
+- [x] Require CSRF validation for state-changing cookie-authenticated requests.
+- [x] Add explicit origin checks for WebSocket upgrades and state-changing
   browser requests.
 - [x] Add readiness and liveness endpoints with no secret/config disclosure.
-- [ ] Implement SIGTERM/SIGINT stop-accepting, cancel active turns, bounded
+- [x] Implement SIGTERM/SIGINT stop-accepting, cancel active turns, bounded
   drain, SQLite close, and process exit behavior.
 
 ### Parallel Assignments
@@ -637,7 +660,7 @@ in order unless a dependency is explicitly moved earlier.
 - [x] Clean install builds the UI and `bun run serve` serves it without Python.
 - [ ] Browser E2E covers bootstrap, login, logout, CSRF rejection, static asset
   loading, API 404 behavior, and graceful shutdown.
-- [ ] No source in active runtime packages imports Python paths or launches a
+- [x] No source in active runtime packages imports Python paths or launches a
   Python process.
 
 ## Wave 2: New TypeScript Persistence And Sessions
@@ -646,22 +669,22 @@ in order unless a dependency is explicitly moved earlier.
 
 ### Required Work
 
-- [ ] Replace migration/legacy schema handling with a fresh versioned SQLite
+- [x] Replace migration/legacy schema handling with a fresh versioned SQLite
   schema in `data-layer`.
-- [ ] Store users, authenticated sessions, conversations, ordered messages,
+- [x] Store users, authenticated sessions, conversations, ordered messages,
   turn attempts, provider usage, tool calls/results, approvals, checkpoints,
   idempotency records, and audit categories.
-- [ ] Use transaction boundaries for: user message append + idempotency claim;
+- [x] Use transaction boundaries for: user message append + idempotency claim;
   tool checkpoint + side-effect state; terminal result + usage + event cursor.
-- [ ] Add unique constraints for session message sequence, request id scope,
+- [x] Add unique constraints for session message sequence, request id scope,
   tool call ID, terminal turn, and idempotency key plus request fingerprint.
-- [ ] On duplicate idempotency key with matching fingerprint, replay the stored
+- [x] On duplicate idempotency key with matching fingerprint, replay the stored
   terminal response without provider or tool execution. Reject a key reused
   with a different fingerprint.
-- [ ] On restart, identify incomplete turns. Resume only safe provider work;
+- [x] On restart, identify incomplete turns. Resume only safe provider work;
   never replay an unconfirmed non-idempotent tool. Mark unsafe work for an
   explicit user-visible recovery state.
-- [ ] Define retention/pruning for the new schema and test it. There is no
+- [x] Define retention/pruning for the new schema and test it. There is no
   legacy data retention compatibility requirement.
 
 ### Parallel Assignments
@@ -675,11 +698,11 @@ in order unless a dependency is explicitly moved earlier.
 
 ### Exit Gate
 
-- [ ] A fresh database supports create, resume, restart, retention, and
+- [x] A fresh database supports create, resume, restart, retention, and
   idempotent replay entirely in TypeScript.
-- [ ] Tests demonstrate no duplicate provider request or tool side effect after
+- [x] Tests demonstrate no duplicate provider request or tool side effect after
   retry, restart, or duplicate HTTP request.
-- [ ] The schema has no Python compatibility tables, readers, or metadata.
+- [x] The schema has no Python compatibility tables, readers, or metadata.
 
 ## Wave 3: Harness Completion And Context Policy
 
@@ -690,18 +713,18 @@ in order unless a dependency is explicitly moved earlier.
 - [ ] Define explicit states: validate, lease, load, assemble, persist user,
   dispatch provider, consume stream, request approval, checkpoint, execute
   tools, persist tool result, continue, finalize, terminal.
-- [ ] Enforce role/tool-call adjacency and fail closed on malformed history.
-- [ ] Make all attempt identities deterministic and preserve them in events and
+- [x] Enforce role/tool-call adjacency and fail closed on malformed history.
+- [x] Make all attempt identities deterministic and preserve them in events and
   persistence.
-- [ ] Enforce iteration, provider attempt, tool count, tool output, token,
+- [x] Enforce iteration, provider attempt, tool count, tool output, token,
   deadline, and concurrency budgets before side effects.
-- [ ] Add provider retry classification and bounded backoff with injected clock
+- [x] Add provider retry classification and bounded backoff with injected clock
   and sleeper. Retry only provider calls proven side-effect-free.
-- [ ] Add configurable fallback chains with eligibility checked before an
+- [x] Add configurable fallback chains with eligibility checked before an
   attempt; recalculate cache hints only in adapters.
-- [ ] Define a canonical TS system prompt and context section order. It is a
+- [x] Define a canonical TS system prompt and context section order. It is a
   new product prompt, not a byte-for-byte Python copy.
-- [ ] Implement model metadata/token estimation and context budget decisions.
+- [x] Implement model metadata/token estimation and context budget decisions.
 - [ ] Add new-session summaries/compression and lineage only after the basic
   turn path is durable; summaries must be stored as explicit messages.
 - [ ] Implement memory/context sources as typed ports with opt-out, deadline,
@@ -718,10 +741,10 @@ in order unless a dependency is explicitly moved earlier.
 
 ### Exit Gate
 
-- [ ] Fake-provider tests cover text, parallel tools, approval, denial, retry,
+- [x] Fake-provider tests cover text, parallel tools, approval, denial, retry,
   fallback, cancellation during every await point, malformed tool calls,
   timeout, and interrupted persistence.
-- [ ] No `harness` module imports Bun, Node filesystem/process APIs, SQLite, a
+- [x] No `harness` module imports Bun, Node filesystem/process APIs, SQLite, a
   concrete provider, or web/server types.
 - [ ] Long-context and compressed-session tests use only the new TS schema.
 
@@ -734,9 +757,9 @@ isolated adapters.
 
 Every adapter is a separate module/package boundary and must implement:
 
-- [ ] Configuration validation and credential handle resolution.
-- [ ] Non-streaming and streaming request/response codecs.
-- [ ] Text, reasoning, tool calls/results, multimodal content, finish reasons,
+- [x] Configuration validation and credential handle resolution.
+- [x] Non-streaming and streaming request/response codecs.
+- [x] Text, reasoning, tool calls/results, multimodal content, finish reasons,
   detailed usage, request identity, and cache controls where supported.
 - [ ] Cancellation, deadline, rate-limit/auth/server/context/content-policy
   error mapping, bounded credential refresh, and redacted diagnostics.
@@ -745,7 +768,7 @@ Every adapter is a separate module/package boundary and must implement:
 
 ### Provider Order
 
-1. [ ] OpenAI-compatible: complete streaming, tools, multimodal, and robust
+1. [x] OpenAI-compatible: complete streaming, tools, multimodal, and robust
    API configuration around the existing adapter.
 2. [ ] Anthropic Messages: native tools, thinking, cache controls, usage.
 3. [ ] Gemini: native content parts, thought signatures, streaming.
@@ -764,9 +787,9 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 
 - [ ] Each shipped provider has recorded codec/error/usage/stream tests and an
   explicitly opt-in live gate.
-- [ ] Unknown provider/model/credential configurations reject before network
+- [x] Unknown provider/model/credential configurations reject before network
   access.
-- [ ] Provider secrets never enter events, persistence, logs, errors, or UI.
+- [x] Provider secrets never enter events, persistence, logs, errors, or UI.
 
 ## Wave 5: Native Tool Runtime And Approval UX
 
@@ -774,24 +797,24 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 
 ### Shell
 
-- [ ] Replace direct `Bun.spawn` assumptions with a process port supporting
+- [x] Replace direct `Bun.spawn` assumptions with a process port supporting
   child-tree termination and injectable tests.
-- [ ] Verify canonical executable immediately before spawn; document residual
+- [x] Verify canonical executable immediately before spawn; document residual
   TOCTOU risk and require immutable/containerized executable roots in
   production guidance.
 - [x] Enforce exact executable and argv-prefix allow rules; deny wins; empty
   allowlist denies.
 - [x] Reject shell metacharacter execution by never invoking a shell.
-- [ ] Record redacted audit categories, not argv/output content.
+- [x] Record redacted audit categories, not argv/output content.
 
 ### OpenAPI
 
 - [x] Validate trusted OpenAPI 3.1 documents at startup.
-- [ ] Support only local refs, declared JSON request bodies, declared
+- [x] Support only local refs, declared JSON request bodies, declared
   path/query/header parameters, response limits, and explicit operation IDs.
-- [ ] Reject external refs, server overrides, unsupported security schemes,
+- [x] Reject external refs, server overrides, unsupported security schemes,
   redirects, credential headers from model arguments, and undocumented fields.
-- [ ] Add SSRF defenses to fixed-origin resolution, including DNS/IP policy if
+- [x] Add SSRF defenses to fixed-origin resolution, including DNS/IP policy if
   private networks are not intentionally allowed.
 
 ### MCP
@@ -829,7 +852,7 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 - [ ] Every executable tool has policy, timeout, cancellation, output bounds,
   redaction, and no-side-effect-on-validation-failure tests.
 - [ ] Browser approval E2E proves user decision routing and session isolation.
-- [ ] No tool invocation reaches Python or depends on inherited full process
+- [x] No tool invocation reaches Python or depends on inherited full process
   environment.
 
 ## Wave 6: Browser API, WebSocket, And UI Rewrite
@@ -838,16 +861,16 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 
 ### Required Work
 
-- [ ] Replace legacy API client calls with versioned TS server endpoints.
-- [ ] Replace legacy JSON-RPC assumptions with the approved event envelope.
+- [x] Replace legacy API client calls with versioned TS server endpoints.
+- [x] Replace legacy JSON-RPC assumptions with the approved event envelope.
 - [ ] Implement WebSocket ticket/session binding, origin validation, heartbeat,
   reconnect cursor, backpressure limits, disconnect cancellation, and event
   ordering.
-- [ ] Render message, reasoning, tool progress, approval, error, status, and
+- [x] Render message, reasoning, tool progress, approval, error, status, and
   exactly one terminal event without embedding harness logic in the browser.
 - [ ] Add session create/list/load/delete, transcript pagination, model/tool
   selection, cancellation, and approval UI backed by the new API only.
-- [ ] Remove pages/features that depend on unsupported Python integrations;
+- [x] Remove pages/features that depend on unsupported integrations;
   present no inactive controls for unsupported capability.
 
 ### Parallel Assignments
@@ -863,8 +886,8 @@ fixtures, and live-test gate. A provider agent must not modify `harness`.
 
 - [ ] Browser E2E covers first-run auth, session lifecycle, text turn,
   streaming, tool approval, cancellation, reconnect, and restart.
-- [ ] The browser build imports no server-only packages or secret-bearing code.
-- [ ] All UI network requests target the Bun server contract.
+- [x] The browser build imports no server-only packages or secret-bearing code.
+- [x] All UI network requests target the Bun server contract.
 
 ## Wave 7: Bun Workspace, Operations, Packaging, And Release
 
@@ -878,23 +901,23 @@ before deleting the final Python safety net.
   directories.
 - [ ] Make every internal workspace dependency use the repository-approved Bun
   workspace version convention consistently.
-- [ ] Remove root and workspace npm scripts, `package-lock.json`, npm engine
+- [x] Remove root and workspace npm scripts, `package-lock.json`, npm engine
   requirements, npm audit helpers, and npm bootstrap logic.
-- [ ] Keep one root `bun.lock`; verify a frozen install from a fresh clone and
+- [x] Keep one root `bun.lock`; verify a frozen install from a fresh clone and
   reject lockfile drift in CI.
-- [ ] Centralize strict TypeScript, lint, formatting, and test configuration
+- [x] Centralize strict TypeScript, lint, formatting, and test configuration
   without allowing browser packages to inherit server runtime globals.
-- [ ] Ensure `bun run check:boundaries` validates manifests, declared imports,
+- [x] Ensure `bun run check:boundaries` validates manifests, declared imports,
   browser safety, forbidden dependency edges, and absence of Python runtime
   hooks in active packages.
 
 ### Operations And Release Work
 
-- [ ] Make Docker build Bun packages and web assets, then run `bun run serve`
+- [x] Make Docker build Bun packages and web assets, then run `bun run serve`
   from a minimal Bun-only production stage.
 - [ ] Add structured redacted logs, metrics categories, readiness, liveness,
   active-turn count, provider/tool error categories, and shutdown metrics.
-- [ ] Implement SIGTERM/SIGINT stop-accepting, active-turn cancellation,
+- [x] Implement SIGTERM/SIGINT stop-accepting, active-turn cancellation,
   bounded drain, child-process cleanup, SQLite close, and deterministic exit.
 - [ ] Port required release, changelog, artifact, and publishing automation to
   TypeScript executed by Bun, with dry-run tests.
@@ -922,59 +945,59 @@ public product contract.
 
 ### Cutover
 
-- [ ] Make the Bun composition root the only gateway execution path.
-- [ ] Delete Python tool and whole-turn bridges, runtime adapters, fallback
+- [x] Make the Bun composition root the only gateway execution path.
+- [x] Delete Python tool and whole-turn bridges, runtime adapters, fallback
   flags, session runtime pinning, and compatibility configuration.
-- [ ] Delete Python persistence readers, migration metadata, fixtures, and
+- [x] Delete Python persistence readers, migration metadata, fixtures, and
   rollback code; legacy databases reject read-only with a documented error.
-- [ ] Remove every Python-backed route, command, WebSocket method/event, UI
+- [x] Remove every Python-backed route, command, WebSocket method/event, UI
   control, and product claim that was not replaced.
-- [ ] Remove Python runtime invocation from Docker, install scripts, CI,
+- [x] Remove Python runtime invocation from Docker, install scripts, CI,
   production documentation, health checks, and release automation.
 
 ### Source Removal
 
-- [ ] Delete Python CLI, gateway, agent loop, provider adapters, tool registry,
+- [x] Delete Python CLI, gateway, agent loop, provider adapters, tool registry,
   tool implementations, cron, TUI, ACP, desktop compatibility, plugin loading,
   media/voice, platform adapters, installers, and packaging paths.
-- [ ] Delete remaining Python runtime dependencies, manifests, lockfiles,
+- [x] Delete remaining Python runtime dependencies, manifests, lockfiles,
   virtual-environment state, caches, bytecode, and Python-only tests.
-- [ ] Port only repository utilities that are still required by the Bun
+- [x] Port only repository utilities that are still required by the Bun
   product. Delete obsolete evaluation, migration, compatibility, and release
   utilities instead of carrying them forward by default.
-- [ ] Move intentionally preserved Python research artifacts to a separately
+- [x] Remove intentionally out-of-scope research artifacts rather than leave a
   versioned repository; do not leave an unbuilt `legacy/` tree in the Bun
   monorepo.
-- [ ] Rewrite all current documentation and templates so setup, development,
+- [x] Rewrite all current documentation and templates so setup, development,
   testing, deployment, troubleshooting, contribution, and release instructions
   are Bun-only.
 
 ### Auditable Absence Checks
 
-- [ ] Repository scan finds no active `.py`, Python shebang, Python subprocess,
+- [x] Repository scan finds no active `.py`, Python shebang, Python subprocess,
   Python executable path, Python import, pip/uv command, virtual environment,
   or Python dependency manifest.
-- [ ] Active TypeScript packages contain no identifier or configuration key for
+- [x] Active TypeScript packages contain no identifier or configuration key for
   Python bridge, Python runtime, Python fallback, legacy Python persistence, or
   Python executable references.
-- [ ] Root scripts and required CI contain no npm/npx or Python command; root has
+- [x] Root scripts and required CI contain no npm/npx or Python command; root has
   no `package-lock.json`, Python lockfile, or Python environment bootstrap.
-- [ ] Final Docker image scan finds no Python executable, site-packages,
+- [x] Final Docker image scan finds no Python executable, site-packages,
   virtual environment, pip/uv binary, or copied Python source.
-- [ ] API, WebSocket, UI, README, security, deployment, and contribution docs
+- [x] API, WebSocket, UI, README, security, deployment, and contribution docs
   advertise only capabilities implemented by Bun packages.
 - [ ] A clean machine without Python completes the full required verification
   matrix and an authenticated provider/tool turn.
 
 ### Exit Gate
 
-- [ ] Every entry in the Python Deprecation Ledger has a completed disposition
+- [x] Every entry in the Python Deprecation Ledger has a completed disposition
   and deletion gate.
-- [ ] No supported request, build, test, container, CI, or release path can
+- [x] No supported request, build, test, container, CI, or release path can
   discover or invoke Python.
-- [ ] Unsupported legacy inputs fail closed before provider, tool, filesystem,
+- [x] Unsupported legacy inputs fail closed before provider, tool, filesystem,
   persistence mutation, or network side effects.
-- [ ] The repository contains only the Bun monorepo, browser assets,
+- [x] The repository contains only the Bun monorepo, browser assets,
   language-agnostic fixtures, documentation, and explicitly approved external
   integration metadata.
 

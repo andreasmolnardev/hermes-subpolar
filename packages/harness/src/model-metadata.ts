@@ -3,7 +3,7 @@
  *
  * This is deliberately an approximation, not a tokenizer. `rough-v1` is part
  * of the API so persisted or compared estimates cannot be mistaken for exact
- * provider usage. Unknown shapes return an explicit Python fallback signal.
+ * provider usage. Unknown shapes return an explicit unsupported result.
  */
 
 export const HARNESS_TOKEN_APPROXIMATION_VERSION = "rough-v1" as const;
@@ -20,7 +20,6 @@ export type HarnessTokenEstimate =
     readonly supported: false;
     readonly approximationVersion: typeof HARNESS_TOKEN_APPROXIMATION_VERSION;
     readonly reason: "unsupported-content" | "unsupported-media" | "invalid-input";
-    readonly fallback: "python";
   };
 
 export type HarnessParsedTokenValue =
@@ -33,7 +32,6 @@ export type HarnessParsedTokenValue =
     readonly supported: false;
     readonly parserVersion: typeof HARNESS_PROVIDER_ERROR_PARSER_VERSION;
     readonly reason: "unreported-limit" | "unreported-output-cap";
-    readonly fallback: "python";
   };
 
 type UnsupportedTokenReason = "unsupported-content" | "unsupported-media" | "invalid-input";
@@ -51,8 +49,7 @@ function unsupported(reason: UnsupportedTokenReason): HarnessTokenEstimate {
   return {
     supported: false,
     approximationVersion: HARNESS_TOKEN_APPROXIMATION_VERSION,
-    reason,
-    fallback: "python"
+    reason
   };
 }
 
@@ -330,8 +327,7 @@ function unreported(reason: UnreportedReason): HarnessParsedTokenValue {
   return {
     supported: false,
     parserVersion: HARNESS_PROVIDER_ERROR_PARSER_VERSION,
-    reason,
-    fallback: "python"
+    reason
   };
 }
 

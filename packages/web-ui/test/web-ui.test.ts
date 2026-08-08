@@ -1,13 +1,21 @@
 import { strict as assert } from "node:assert";
 import { test } from "bun:test";
 
-import { createMessageRequest } from "../src/index.ts";
+import { projectSubpolarActivity } from "../src/lib/subpolar-events.ts";
 import { defaultTheme } from "../src/themes/presets.ts";
 
-test("web UI creates transport request from browser-safe workspace data", () => {
-  assert.deepEqual(createMessageRequest({ id: "workspace-1", name: "Demo" }, "hello"), {
-    workspaceId: "workspace-1",
-    message: "hello"
+test("web UI projects an active Bun gateway tool event", () => {
+  assert.deepEqual(projectSubpolarActivity({
+    protocol: "subpolar.v1",
+    requestId: "request-1",
+    sequence: 1,
+    event: { type: "tool.start", payload: { name: "search" } },
+  }), {
+    kind: "tool",
+    type: "tool.start",
+    text: "search started",
+    requestId: "request-1",
+    sequence: 1,
   });
 });
 

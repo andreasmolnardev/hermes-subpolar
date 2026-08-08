@@ -60,6 +60,25 @@ function packageDependencyNames(manifest) {
   });
 }
 
+function checkBunScripts(path, manifest, root) {
+  for (const [name, command] of Object.entries(manifest.scripts ?? {})) {
+    if (typeof command === "string" && /\b(?:npm|npx)\b/.test(command)) {
+      throw new Error(`${relative(root, path)} script ${name} must use Bun, not npm or npx`);
+    }
+  }
+}
+
+async function checkWorkspaceScripts(root) {
+  for (const path of [join(root, "package.json"), join(root, "tests-js", "package.json")]) {
+    try {
+      checkBunScripts(path, JSON.parse(await readFile(path, "utf8")), root);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+}
+
 function packageFromImport(specifier) {
   if (specifier === "@hermes/shared" || specifier.startsWith("@hermes/shared/")) {
     return "shared";
@@ -87,10 +106,20 @@ async function sourceFiles(directory) {
 
 export async function check({ root = fileURLToPath(new URL("..", import.meta.url)) } = {}) {
   const packagesRoot = join(root, "packages");
-  const entries = (await readdir(packagesRoot, { withFileTypes: true }))
-    .filter(entry => entry.isDirectory())
-    .map(entry => entry.name)
-    .sort();
+  await checkWorkspaceScripts(root);
+  const entries = [];
+  for (const entry of await readdir(packagesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === "node_modules") continue;
+    try {
+      await readFile(join(packagesRoot, entry.name, "package.json"));
+      entries.push(entry.name);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const children = await readdir(join(packagesRoot, entry.name));
+      if (!(children.length === 1 && children[0] === "node_modules")) entries.push(entry.name);
+    }
+  }
+  entries.sort();
   const expected = [...PACKAGE_DIRECTORIES].sort();
   if (JSON.stringify(entries) !== JSON.stringify(expected)) {
     throw new Error(`packages/ must contain exactly: ${expected.join(", ")}`);
@@ -100,6 +129,7 @@ export async function check({ root = fileURLToPath(new URL("..", import.meta.url
   for (const name of PACKAGE_DIRECTORIES) {
     const manifest = await readPackage(packagesRoot, name);
     manifests.set(name, manifest);
+    checkBunScripts(join(packagesRoot, name, "package.json"), manifest, root);
     const expectedManifestName = name === "shared" ? "@hermes/shared" : name;
     if (manifest.name !== expectedManifestName) {
       throw new Error(`${name}: manifest name must be ${expectedManifestName}`);

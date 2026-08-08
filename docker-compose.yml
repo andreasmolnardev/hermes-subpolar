@@ -7,7 +7,7 @@
 #
 # Put TLS and public authentication policy in a reverse proxy. Forward
 # Host, X-Forwarded-Host, X-Forwarded-Proto, X-Forwarded-Prefix, and upgrade
-# WebSocket connections for /api/ws, /api/pty, /api/events, and /api/pub.
+# WebSocket connections for /v1/ws and the /v1 API routes.
 services:
   subpolar:
     build: .

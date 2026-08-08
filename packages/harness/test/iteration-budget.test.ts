@@ -1,5 +1,4 @@
-import { strict as assert } from "node:assert";
-import { test } from "bun:test";
+import { assert } from "./assert.ts";
 
 import { IterationBudget } from "../src/index.ts";
 

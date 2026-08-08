@@ -3,12 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { SQLiteSessionRepository } from "../src/sqlite.js";
-import {
-  createDefaultRuntimeSelectionStore,
-  getHermesStateDatabasePath,
-  SQLiteRuntimeSelectionStore
-} from "../src/runtime-selection.js";
+import { SQLiteSessionRepository, UnsupportedSchemaError } from "../src/sqlite.js";
 import type { SessionRecord, SessionMessageDraft } from "../src/contracts.js";
 
 function homePath(): { home: string; database: string } {
@@ -62,46 +57,6 @@ test("SQLite repository orders messages and correlates tools", async () => {
     expect((await repo.listToolCalls("session-1"))[0]?.id).toBe("call-1");
     expect((await repo.listToolResults("session-1"))[0]?.toolCallId).toBe("call-1");
   });
-});
-
-test("SQLite runtime selection survives store recreation and remains validated", async () => {
-  const paths = homePath();
-  const first = new SQLiteRuntimeSelectionStore(paths.database);
-  try {
-    await first.save("session-runtime", "harness");
-    expect(await first.load("session-runtime")).toBe("harness");
-  } finally {
-    first.close();
-  }
-
-  const restarted = new SQLiteRuntimeSelectionStore(paths.database);
-  try {
-    expect(await restarted.load("session-runtime")).toBe("harness");
-    await expect(restarted.load(" ")).rejects.toThrow("session id");
-    await expect(restarted.save("session-runtime", "invalid" as never)).rejects.toThrow("invalid");
-    await restarted.clear("session-runtime");
-    expect(await restarted.load("session-runtime")).toBeUndefined();
-  } finally {
-    restarted.close();
-    rmSync(paths.home, { recursive: true, force: true });
-  }
-});
-
-test("default runtime selection store follows HERMES_HOME state.db", async () => {
-  const home = mkdtempSync(join(tmpdir(), "hermes-runtime-home-"));
-  const previous = process.env.HERMES_HOME;
-  process.env.HERMES_HOME = home;
-  const store = createDefaultRuntimeSelectionStore();
-  try {
-    expect(getHermesStateDatabasePath()).toBe(join(home, "state.db"));
-    await store.save("default-runtime-session", "harness");
-    expect(await store.load("default-runtime-session")).toBe("harness");
-  } finally {
-    store.close();
-    if (previous === undefined) delete process.env.HERMES_HOME;
-    else process.env.HERMES_HOME = previous;
-    rmSync(home, { recursive: true, force: true });
-  }
 });
 
 test("SQLite round-trips structured content and every message sidecar exactly", async () => {
@@ -163,9 +118,17 @@ test("SQLite transaction rolls back all writes", async () => {
     await repo.createSession(session());
     await expect(repo.transaction(async (transaction) => {
       await transaction.appendMessages("session-1", [message("not committed")]);
+      await transaction.claimIdempotency("rollback-request", "rollback-fingerprint");
+      await transaction.savePendingApproval({
+        requestId: "rollback-approval", sessionId: "session-1", callId: "rollback-call",
+        toolName: "write", arguments: {}, status: "pending",
+        createdAt: "2026-08-05T00:00:01.000Z", updatedAt: "2026-08-05T00:00:01.000Z",
+      });
       throw new Error("abort");
     })).rejects.toThrow("abort");
     expect(await repo.listMessages("session-1")).toEqual([]);
+    expect(await repo.getIdempotency("rollback-request")).toBeNull();
+    expect(await repo.getPendingApproval("rollback-approval")).toBeNull();
   });
 });
 
@@ -305,224 +268,56 @@ test("SQLite state survives close and restart", async () => {
   const first = new SQLiteSessionRepository(paths.database);
   await first.createSession(session());
   await first.appendMessages("session-1", [message("durable")]);
+  for (const [status, updatedAt] of [
+    ["completed", "2026-08-05T00:00:02.000Z"],
+    ["failed", "2026-08-05T00:00:03.000Z"],
+    ["cancelled", "2026-08-05T00:00:04.000Z"],
+  ] as const) {
+    const updated = await first.updateSession("session-1", { status, updatedAt });
+    expect(updated.status).toBe(status);
+    expect(updated.updatedAt).toBe(updatedAt);
+  }
   first.close();
   const second = new SQLiteSessionRepository(paths.database);
   try {
     expect(await second.getSession("session-1")).not.toBeNull();
     expect((await second.listMessages("session-1"))[0]?.content).toBe("durable");
+    expect(await second.getSession("session-1")).toMatchObject({
+      status: "cancelled",
+      updatedAt: "2026-08-05T00:00:04.000Z",
+      workspaceId: "workspace-1",
+    });
   } finally {
     second.close();
     rmSync(paths.home, { recursive: true, force: true });
   }
 });
 
-test("SQLite reads supported Python-shaped sessions and messages without rewriting rows", async () => {
-  const paths = homePath();
-  const database = new Database(paths.database);
-  database.exec(`
-    CREATE TABLE schema_version (version INTEGER NOT NULL);
-    INSERT INTO schema_version VALUES (25);
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, title TEXT,
-      started_at REAL NOT NULL, ended_at REAL, end_reason TEXT, origin_json TEXT
-    );
-    CREATE TABLE messages (
-      id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
-      content TEXT, tool_call_id TEXT, tool_calls TEXT, timestamp REAL NOT NULL
-    );
-    INSERT INTO sessions VALUES ('legacy-1', 'cli', 'legacy-model', 'Legacy', 1785888000, NULL, NULL, '{"source":"python"}');
-    INSERT INTO sessions VALUES ('unknown-row', 'future', NULL, NULL, 1785888001, NULL, NULL, NULL);
-    INSERT INTO messages VALUES (2, 'legacy-1', 'user', '{"type":"not-content"}', NULL, NULL, 1785888002);
-    INSERT INTO messages VALUES (1, 'legacy-1', 'user', 'first', NULL, NULL, 1785888001);
-  `);
-  database.close();
-  const repo = new SQLiteSessionRepository(paths.database);
-  try {
-    const legacy = await repo.getSession("legacy-1");
-    expect(legacy?.runtime.runtimeVersion).toBe("python-legacy");
-    expect((await repo.listMessages("legacy-1")).map(({ content }) => content)).toEqual(["first", "{\"type\":\"not-content\"}"]);
-    expect(await repo.getSession("unknown-row")).not.toBeNull();
-    await expect(repo.createSession(session("new"))).rejects.toThrow();
-  } finally {
-    repo.close();
-    rmSync(paths.home, { recursive: true, force: true });
-  }
-});
+test("SQLite validates session updates and rolls them back with the transaction", async () => {
+  await withRepo(async (repo) => {
+    await repo.createSession(session());
 
-test("SQLite preserves Python insertion order and normalizes persisted tool calls", async () => {
-  const paths = homePath();
-  const database = new Database(paths.database);
-  database.exec(`
-    CREATE TABLE schema_version (version INTEGER NOT NULL);
-    INSERT INTO schema_version VALUES (25);
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL
-    );
-    CREATE TABLE messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-      role TEXT NOT NULL, content TEXT, tool_call_id TEXT, tool_calls TEXT,
-      tool_name TEXT, timestamp REAL NOT NULL
-    );
-    INSERT INTO sessions VALUES ('legacy-1', 'cli', 1785888000);
-    INSERT INTO messages (session_id, role, content, tool_calls, timestamp)
-      VALUES ('legacy-1', 'assistant', 'working',
-        '[{"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":\\"hermes\\"}"}}]',
-        1785888003);
-    INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp)
-      VALUES ('legacy-1', 'tool', 'done', 'call-1', 'lookup', 1785888002);
-  `);
-  database.close();
+    await expect(repo.updateSession("missing", {
+      status: "completed", updatedAt: "2026-08-05T00:00:01.000Z",
+    })).rejects.toThrow("Session not found: missing");
+    await expect(repo.updateSession("session-1", {
+      status: "unknown" as never, updatedAt: "2026-08-05T00:00:01.000Z",
+    })).rejects.toThrow("Invalid session status");
+    await expect(repo.updateSession("session-1", {
+      updatedAt: "not-a-timestamp",
+    })).rejects.toThrow("Invalid session timestamp");
+    await expect(repo.transaction(async (transaction) => {
+      await transaction.updateSession("session-1", {
+        status: "failed", updatedAt: "2026-08-05T00:00:01.000Z",
+      });
+      throw new Error("abort");
+    })).rejects.toThrow("abort");
 
-  const repo = new SQLiteSessionRepository(paths.database);
-  try {
-    expect((await repo.listMessages("legacy-1")).map(({ id }) => id)).toEqual(["1", "2"]);
-    expect(await repo.listToolCalls("legacy-1")).toMatchObject([{
-      id: "call-1", name: "lookup", arguments: '{"q":"hermes"}', sequence: 0,
-    }]);
-    expect(await repo.listToolResults("legacy-1")).toMatchObject([{
-      toolCallId: "call-1", toolName: "lookup", sequence: 1,
-    }]);
-  } finally {
-    repo.close();
-    rmSync(paths.home, { recursive: true, force: true });
-  }
-});
-
-test("SQLite reads Python-shaped sidecars and preserves structured row order", async () => {
-  const paths = homePath();
-  const database = new Database(paths.database);
-  database.exec(`
-    CREATE TABLE schema_version (version INTEGER NOT NULL);
-    INSERT INTO schema_version VALUES (25);
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL
-    );
-    CREATE TABLE messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-      role TEXT NOT NULL, content TEXT, api_content TEXT, display_kind TEXT,
-      display_metadata TEXT, synthetic INTEGER, context TEXT, timestamp REAL NOT NULL
-    );
-    INSERT INTO sessions VALUES ('legacy-1', 'cli', 1785888000);
-    INSERT INTO messages (session_id, role, content, api_content, display_kind,
-      display_metadata, synthetic, context, timestamp)
-      VALUES ('legacy-1', 'user',
-        '[{"type":"text","text":"visible"},{"type":"image_url","imageUrl":{"url":"https://example.test/a"}}]',
-        '[{"type":"text","text":"provider"}]', 'model_switch',
-        '{"model":"next","attempt":2}', 1, '{"source":"gateway","tags":["one"]}', 1785888002);
-    INSERT INTO messages (session_id, role, content, api_content, context, timestamp)
-      VALUES ('legacy-1', 'assistant', 'answer', 'provider answer', 'plain-context', 1785888001);
-  `);
-  database.close();
-
-  const repo = new SQLiteSessionRepository(paths.database);
-  try {
-    expect(await repo.listMessages("legacy-1")).toEqual([{
-      schemaVersion: 1,
-      id: "1",
-      sessionId: "legacy-1",
-      sequence: 0,
-      role: "user",
-      content: [
-        { type: "text", text: "visible" },
-        { type: "image_url", imageUrl: { url: "https://example.test/a" } },
-      ],
-      apiContent: [{ type: "text", text: "provider" }],
-      displayKind: "model_switch",
-      displayMetadata: { model: "next", attempt: 2 },
-      synthetic: true,
-      context: { source: "gateway", tags: ["one"] },
-      createdAt: "2026-08-05T00:00:02.000Z",
-    }, {
-      schemaVersion: 1,
-      id: "2",
-      sessionId: "legacy-1",
-      sequence: 1,
-      role: "assistant",
-      content: "answer",
-      apiContent: "provider answer",
-      context: "plain-context",
-      createdAt: "2026-08-05T00:00:01.000Z",
-    }]);
-  } finally {
-    repo.close();
-    rmSync(paths.home, { recursive: true, force: true });
-  }
-});
-
-test("SQLite adds missing contract metadata columns without rewriting an older database", async () => {
-  const paths = homePath();
-  const database = new Database(paths.database);
-  database.exec(`
-    CREATE TABLE schema_version (version INTEGER NOT NULL);
-    INSERT INTO schema_version VALUES (1);
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, workspace_id TEXT NOT NULL,
-      status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-      runtime_json TEXT NOT NULL
-    );
-    CREATE TABLE messages (
-      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, schema_version INTEGER NOT NULL,
-      sequence INTEGER NOT NULL, role TEXT NOT NULL, content_json TEXT NOT NULL,
-      created_at TEXT NOT NULL, UNIQUE(session_id, sequence)
-    );
-    CREATE TABLE migration (
-      session_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL,
-      updated_at TEXT NOT NULL, runtime_json TEXT NOT NULL
-    );
-    CREATE TABLE checkpoints (
-      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, schema_version INTEGER NOT NULL,
-      message_sequence INTEGER NOT NULL, created_at TEXT NOT NULL, reason TEXT NOT NULL,
-      runtime_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, label TEXT
-    );
-    INSERT INTO sessions VALUES (
-      'old-1', 1, 'workspace-1', 'active',
-      '2026-08-05T00:00:00.000Z', '2026-08-05T00:00:00.000Z',
-      '{"runtimeVersion":"old","schemaVersion":1}'
-    );
-    INSERT INTO messages VALUES (
-      'old-message', 'old-1', 1, 0, 'user', '"hello"', '2026-08-05T00:00:01.000Z'
-    );
-  `);
-  database.close();
-
-  const repo = new SQLiteSessionRepository(paths.database);
-  try {
-    await repo.appendMessages("old-1", [message("reply", { role: "assistant" })]);
-    await repo.appendMessages("old-1", [message("sidecar", {
-      role: "assistant",
-      apiContent: [{ type: "text", text: "provider" }],
-      displayKind: "hidden",
-      displayMetadata: { source: "test" },
-      synthetic: true,
-      context: { retry: 1 },
-    })]);
-    expect((await repo.listMessages("old-1"))[2]).toMatchObject({
-      apiContent: [{ type: "text", text: "provider" }],
-      displayKind: "hidden",
-      displayMetadata: { source: "test" },
-      synthetic: true,
-      context: { retry: 1 },
+    expect(await repo.getSession("session-1")).toMatchObject({
+      status: "active",
+      updatedAt: "2026-08-05T00:00:00.000Z",
     });
-    await repo.saveCheckpoint({
-      schemaVersion: 1, id: "old-checkpoint", sessionId: "old-1", messageSequence: 2,
-      createdAt: "2026-08-05T00:00:02.000Z", reason: "migration",
-      runtime: { runtimeVersion: "typescript", schemaVersion: 1 }, snapshot: { old: true },
-    });
-    await repo.saveMigrationState({
-      schemaVersion: 1, sessionId: "old-1", updatedAt: "2026-08-05T00:00:02.000Z",
-      runtime: { runtimeVersion: "typescript", schemaVersion: 1 },
-      recovery: {
-        turnId: "turn-1", status: "interrupted", startedAt: "2026-08-05T00:00:01.000Z",
-        updatedAt: "2026-08-05T00:00:02.000Z", checkpointId: "old-checkpoint",
-      },
-    });
-    expect((await repo.listMessages("old-1")).map(({ content }) => content)).toEqual(["hello", "reply", "sidecar"]);
-    expect((await repo.getCheckpoint("old-1", "old-checkpoint"))?.formatVersion).toBe(1);
-    expect((await repo.getMigrationState("old-1"))?.recovery?.checkpointId).toBe("old-checkpoint");
-  } finally {
-    repo.close();
-    rmSync(paths.home, { recursive: true, force: true });
-  }
+  });
 });
 
 test("SQLite rejects orphan recovery checkpoints and rolls back the attempted metadata write", async () => {
@@ -544,7 +339,7 @@ test("SQLite rejects orphan recovery checkpoints and rolls back the attempted me
   });
 });
 
-test("SQLite writes additive metadata for legacy sessions without rewriting transcripts", async () => {
+test("SQLite rejects an unmarked database before mutation", async () => {
   const paths = homePath();
   const database = new Database(paths.database);
   database.exec(`
@@ -557,52 +352,68 @@ test("SQLite writes additive metadata for legacy sessions without rewriting tran
       id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
       content TEXT, timestamp REAL NOT NULL
     );
-    INSERT INTO sessions VALUES ('legacy-1', 'cli', 1785888000);
-    INSERT INTO messages VALUES (1, 'legacy-1', 'user', 'hello', 1785888001);
+    INSERT INTO sessions VALUES ('old-1', 'cli', 1785888000);
+    INSERT INTO messages VALUES (1, 'old-1', 'user', 'hello', 1785888001);
   `);
   database.close();
-  const repo = new SQLiteSessionRepository(paths.database);
   try {
-    await repo.recordUsage({
-      schemaVersion: 1,
-      sessionId: "legacy-1",
-      recordedAt: "2026-08-05T00:00:02.000Z",
-      usage: { inputTokens: 2, outputTokens: 1 },
-    });
-    await repo.saveCheckpoint({
-      schemaVersion: 1,
-      id: "legacy-checkpoint",
-      sessionId: "legacy-1",
-      messageSequence: 1,
-      createdAt: "2026-08-05T00:00:02.000Z",
-      reason: "migration",
-      runtime: { runtimeVersion: "typescript", schemaVersion: 1, migratedFromSchemaVersion: 25 },
-      snapshot: { legacy: true },
-    });
-    await repo.saveMigrationState({
-      schemaVersion: 1,
-      sessionId: "legacy-1",
-      updatedAt: "2026-08-05T00:00:02.000Z",
-      runtime: { runtimeVersion: "typescript", schemaVersion: 1, migratedFromSchemaVersion: 25 },
-    });
-
-    expect((await repo.listUsage("legacy-1"))[0]?.usage.inputTokens).toBe(2);
-    expect((await repo.listCheckpoints("legacy-1"))[0]?.id).toBe("legacy-checkpoint");
-    expect((await repo.getMigrationState("legacy-1"))?.runtime.migratedFromSchemaVersion).toBe(25);
-    await expect(repo.appendMessages("legacy-1", [message("must not rewrite legacy")])).rejects.toThrow();
-    expect((await repo.listMessages("legacy-1"))[0]?.content).toBe("hello");
-
+    expect(() => new SQLiteSessionRepository(paths.database)).toThrow(UnsupportedSchemaError);
     const verification = new Database(paths.database);
     try {
       expect(verification.query("SELECT content FROM messages WHERE id = 1").get()).toEqual({ content: "hello" });
       expect(verification.query("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 1 });
       expect(verification.query("PRAGMA table_info(sessions)").all().map((row) => row.name))
         .toEqual(["id", "source", "started_at"]);
+      expect(verification.query("SELECT name FROM sqlite_master WHERE name = 'data_layer_schema'").get()).toBeNull();
     } finally {
       verification.close();
     }
   } finally {
-    repo.close();
+    rmSync(paths.home, { recursive: true, force: true });
+  }
+});
+
+test("SQLite replays completed idempotency records and rejects mismatches", async () => {
+  await withRepo(async (repo, database) => {
+    const first = await repo.claimIdempotency("request-1", "fingerprint-a");
+    expect(first.status).toBe("claimed");
+    await repo.completeIdempotency("request-1", "fingerprint-a", { result: "done", count: 1 });
+    const restarted = new SQLiteSessionRepository(database);
+    try {
+      await expect(restarted.claimIdempotency("request-1", "fingerprint-b")).rejects.toThrow("fingerprint");
+      const replay = await restarted.claimIdempotency("request-1", "fingerprint-a");
+      expect(replay).toMatchObject({ status: "replay", terminalPayload: { result: "done", count: 1 } });
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("SQLite persists pending approvals, resolves them once, and prunes retained records", async () => {
+  const paths = homePath();
+  const first = new SQLiteSessionRepository({
+    path: paths.database, idempotencyRetentionMs: 1_000, approvalRetentionMs: 1_000,
+  });
+  try {
+    await first.savePendingApproval({
+      requestId: "approval-1", sessionId: "session-1", callId: "call-1", toolName: "write",
+      arguments: { path: "file" }, status: "pending", createdAt: "2026-08-05T00:00:00.000Z",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    const restarted = new SQLiteSessionRepository({
+      path: paths.database, idempotencyRetentionMs: 1_000, approvalRetentionMs: 1_000,
+    });
+    try {
+      expect((await restarted.listPendingApprovals("session-1"))[0]?.callId).toBe("call-1");
+      expect((await restarted.resolvePendingApproval("approval-1", "allow", "2026-08-05T00:00:01.000Z")).status).toBe("allowed");
+      expect(await restarted.listPendingApprovals("session-1")).toEqual([]);
+      await restarted.prune("2026-08-05T00:00:03.000Z");
+      expect(await restarted.getPendingApproval("approval-1")).toBeNull();
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    first.close();
     rmSync(paths.home, { recursive: true, force: true });
   }
 });

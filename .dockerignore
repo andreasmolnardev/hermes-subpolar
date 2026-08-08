@@ -1,94 +1,63 @@
-# Git
+# Repository metadata
 .git
 .gitignore
 .gitmodules
 
-# Python
-__pycache__
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-dist/
+# Dependencies and package-manager caches
+node_modules/
+**/node_modules/
+.bun/
+.cache/
+
+# Build output and local caches
 build/
+dist/
+coverage/
+.turbo/
+.vite/
+*.tsbuildinfo
 
-# Virtual environments
-venv/
-env/
-ENV/
-
-# Dependencies
-node_modules
-**/node_modules
-.venv
-**/.venv
-.notebooklm-cli-venv/
-.notebooklm-playwright/
-.pip-cache/
-.uv-cache/
-
-# Built browser artifacts are regenerated inside the image.
+# Built web artifacts are regenerated inside the image.
 packages/web-ui/dist/
 
-# CI/CD
-.github
-
-# Environment files
+# Environment and secrets
 .env
 .env.*
+*.pem
+*.key
+*.crt
 
-# IDE
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Documentation
-*.md
-
-# Runtime data (bind-mounted at /opt/data; must not leak into build context)
-data/
-.hermes-docker/
-.notebooklm-home/
-
-# Compose/profile runtime state (bind-mounted; avoid ownership/secret issues)
-hermes-config/
-runtime/
-
-# ---------- Not needed inside the Docker image ----------
-
-# Desktop and terminal clients are not shipped in Docker.
-apps/
-ui-tui/
-
-# Test suite — not shipped in production images
+# Tests and test output
 tests/
+test-results/
+playwright-report/
 
-# Supplementary docs
-website/
+# Documentation and planning material
+*.md
 docs/
-
-# Assets only used by the GitHub README
-assets/
-infographic/
-
-# Plugin-level docs (hermes-achievements ships docs/ but the runtime doesn't read them)
-plugins/hermes-achievements/docs/
-
-packaging/
-
-# Design and planning documents
 plans/
 .plans/
+website/
 
-# Repo-level dotfiles that are git-only or dev-tooling config
-.env.example
+# Runtime data and local application state
+data/
+runtime/
+hermes-config/
+
+# Optional non-product assets
+assets/
+infographic/
+packaging/
+plugins/hermes-achievements/docs/
+
+# Local development and repository tooling
+.github/
 .envrc
 .gitattributes
 .hadolint.yaml

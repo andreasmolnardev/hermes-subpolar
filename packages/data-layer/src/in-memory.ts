@@ -1,20 +1,28 @@
 import {
   CHECKPOINT_FORMAT_VERSION,
   PERSISTENCE_SCHEMA_VERSION,
+  IdempotencyConflictError,
   assertSupportedSchemaVersion,
   assertValidSessionMessages,
 } from "./contracts.js";
 import type {
   AppendMessagesOptions,
   AppendMessagesResult,
+  ApprovalDecision,
   CheckpointRecord,
   AtomicTurnWrite,
+  IdempotencyClaim,
+  IdempotencyRecord,
+  JsonValue,
   MigrationStateRecord,
+  PendingApprovalRecord,
+  RetentionPruneResult,
   SessionMessage,
   SessionMessageDraft,
   SessionRecord,
   SessionRepository,
   SessionRepositoryTransaction,
+  SessionStatus,
   ToolCallRecord,
   ToolResultRecord,
   UsageRecord,
@@ -28,6 +36,8 @@ type RepositoryState = {
   usages: Map<string, UsageRecord[]>;
   migrationStates: Map<string, MigrationStateRecord>;
   checkpoints: Map<string, CheckpointRecord[]>;
+  idempotency: Map<string, IdempotencyRecord>;
+  approvals: Map<string, PendingApprovalRecord>;
 };
 
 function copy<T>(value: T): T {
@@ -49,6 +59,8 @@ function emptyState(): RepositoryState {
     usages: new Map(),
     migrationStates: new Map(),
     checkpoints: new Map(),
+    idempotency: new Map(),
+    approvals: new Map(),
   };
 }
 
@@ -67,12 +79,26 @@ function copyState(source: RepositoryState): RepositoryState {
       [...source.migrationStates].map(([key, value]) => [key, copy(value)] as const),
     ),
     checkpoints: copyArrayMap(source.checkpoints),
+    idempotency: new Map([...source.idempotency].map(([key, value]) => [key, copy(value)] as const)),
+    approvals: new Map([...source.approvals].map(([key, value]) => [key, copy(value)] as const)),
   };
 }
 
 function requireSession(state: RepositoryState, sessionId: string): void {
   if (!state.sessions.has(sessionId)) {
     throw new Error(`Session not found: ${sessionId}`);
+  }
+}
+
+function validateSessionUpdate(patch: { status?: SessionStatus; updatedAt: string }): void {
+  if (patch === null || typeof patch !== "object") throw new TypeError("Invalid session patch");
+  if (patch.status !== undefined && patch.status !== "active" && patch.status !== "completed" &&
+      patch.status !== "failed" && patch.status !== "cancelled") {
+    throw new TypeError("Invalid session status");
+  }
+  if (typeof patch.updatedAt !== "string" || patch.updatedAt.length === 0 ||
+      !Number.isFinite(Date.parse(patch.updatedAt))) {
+    throw new TypeError("Invalid session timestamp");
   }
 }
 
@@ -116,6 +142,108 @@ function isUsageRecord(value: AtomicTurnWrite["usage"]): value is UsageRecord {
   return value !== undefined && !Array.isArray(value);
 }
 
+function requestPart(value: string, label: string): void {
+  if (typeof value !== "string" || value.length === 0) throw new TypeError(`${label} must be non-empty`);
+}
+
+function claimIdempotency(
+  state: RepositoryState,
+  requestKey: string,
+  requestFingerprint: string,
+): IdempotencyClaim {
+  requestPart(requestKey, "Idempotency request key");
+  requestPart(requestFingerprint, "Idempotency request fingerprint");
+  const existing = state.idempotency.get(requestKey);
+  if (existing !== undefined) {
+    if (existing.requestFingerprint !== requestFingerprint) throw new IdempotencyConflictError();
+    if (existing.status === "completed" && existing.terminalPayload !== undefined) {
+      return { status: "replay", record: copy(existing), terminalPayload: copy(existing.terminalPayload) };
+    }
+    return { status: "pending", record: copy(existing) };
+  }
+  const at = new Date().toISOString();
+  const record: IdempotencyRecord = {
+    requestKey, requestFingerprint, status: "pending", createdAt: at, updatedAt: at,
+  };
+  state.idempotency.set(requestKey, record);
+  return { status: "claimed", record: copy(record) };
+}
+
+function completeIdempotency(
+  state: RepositoryState,
+  requestKey: string,
+  requestFingerprint: string,
+  terminalPayload: JsonValue,
+): void {
+  requestPart(requestKey, "Idempotency request key");
+  requestPart(requestFingerprint, "Idempotency request fingerprint");
+  const existing = state.idempotency.get(requestKey);
+  if (existing === undefined) throw new Error(`Idempotency key has not been claimed: ${requestKey}`);
+  if (existing.requestFingerprint !== requestFingerprint) throw new IdempotencyConflictError();
+  if (existing.status === "completed") {
+    if (JSON.stringify(existing.terminalPayload) !== JSON.stringify(terminalPayload)) {
+      throw new Error("Idempotency key already has a different terminal payload");
+    }
+    return;
+  }
+  const completedAt = new Date().toISOString();
+  state.idempotency.set(requestKey, {
+    ...copy(existing), status: "completed", terminalPayload: copy(terminalPayload),
+    updatedAt: completedAt, completedAt,
+  });
+}
+
+function savePendingApproval(state: RepositoryState, approval: PendingApprovalRecord): void {
+  for (const [value, label] of [[approval.requestId, "Approval request id"], [approval.sessionId, "Approval session id"], [approval.callId, "Approval call id"], [approval.toolName, "Approval tool name"]] as const) {
+    requestPart(value, label);
+  }
+  if (approval.status !== "pending") throw new TypeError("Pending approval must have pending status");
+  const existing = state.approvals.get(approval.requestId);
+  if (existing !== undefined) {
+    if (existing.sessionId !== approval.sessionId || existing.callId !== approval.callId ||
+        existing.toolName !== approval.toolName || JSON.stringify(existing.arguments) !== JSON.stringify(approval.arguments)) {
+      throw new Error(`Approval request already exists: ${approval.requestId}`);
+    }
+    return;
+  }
+  if ([...state.approvals.values()].some((item) => item.sessionId === approval.sessionId && item.callId === approval.callId)) {
+    throw new Error(`Approval call already exists: ${approval.callId}`);
+  }
+  state.approvals.set(approval.requestId, copy(approval));
+}
+
+function resolvePendingApproval(
+  state: RepositoryState,
+  requestId: string,
+  decision: ApprovalDecision,
+  resolvedAt = new Date().toISOString(),
+): PendingApprovalRecord {
+  requestPart(requestId, "Approval request id");
+  if (decision !== "allow" && decision !== "deny") throw new TypeError("Approval decision is invalid");
+  const existing = state.approvals.get(requestId);
+  if (existing === undefined) throw new Error(`Approval request not found: ${requestId}`);
+  const status = decision === "allow" ? "allowed" : "denied";
+  if (existing.status !== "pending") {
+    if (existing.status !== status) throw new Error(`Approval request already resolved: ${requestId}`);
+    return copy(existing);
+  }
+  const result = { ...copy(existing), status, updatedAt: resolvedAt, resolvedAt } as PendingApprovalRecord;
+  state.approvals.set(requestId, result);
+  return copy(result);
+}
+
+function pruneState(state: RepositoryState, at: string): RetentionPruneResult {
+  const cutoff = Date.parse(at) - 7 * 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(cutoff)) throw new TypeError("Retention timestamp is invalid");
+  for (const [key, record] of state.idempotency) {
+    if (Date.parse(record.updatedAt) < cutoff) state.idempotency.delete(key);
+  }
+  for (const [key, record] of state.approvals) {
+    if (Date.parse(record.updatedAt) < cutoff) state.approvals.delete(key);
+  }
+  return { idempotencyRecords: state.idempotency.size, approvalRecords: state.approvals.size };
+}
+
 export class InMemorySessionRepository implements SessionRepository {
   private state = emptyState();
   private queue = Promise.resolve();
@@ -137,6 +265,18 @@ export class InMemorySessionRepository implements SessionRepository {
       getSession: async (sessionId) => {
         const session = state.sessions.get(sessionId);
         return session === undefined ? null : copy(session);
+      },
+      updateSession: async (sessionId, patch) => {
+        validateSessionUpdate(patch);
+        requireSession(state, sessionId);
+        const current = state.sessions.get(sessionId)!;
+        const updated = {
+          ...current,
+          ...(patch.status === undefined ? {} : { status: patch.status }),
+          updatedAt: patch.updatedAt,
+        };
+        state.sessions.set(sessionId, updated);
+        return copy(updated);
       },
       listMessages: async (sessionId) => copy(state.messages.get(sessionId) ?? []),
       listToolCalls: async (sessionId) => copy(state.toolCalls.get(sessionId) ?? []),
@@ -181,6 +321,28 @@ export class InMemorySessionRepository implements SessionRepository {
         else checkpoints[index] = stored;
         state.checkpoints.set(checkpoint.sessionId, checkpoints);
       },
+      claimIdempotency: async (requestKey, requestFingerprint) =>
+        claimIdempotency(state, requestKey, requestFingerprint),
+      completeIdempotency: async (requestKey, requestFingerprint, terminalPayload) =>
+        completeIdempotency(state, requestKey, requestFingerprint, terminalPayload),
+      getIdempotency: async (requestKey) => {
+        requestPart(requestKey, "Idempotency request key");
+        const record = state.idempotency.get(requestKey);
+        return record === undefined ? null : copy(record);
+      },
+      savePendingApproval: async (approval) => savePendingApproval(state, approval),
+      getPendingApproval: async (requestId) => {
+        requestPart(requestId, "Approval request id");
+        const approval = state.approvals.get(requestId);
+        return approval === undefined ? null : copy(approval);
+      },
+      listPendingApprovals: async (sessionId) => [...state.approvals.values()]
+        .filter((approval) => approval.status === "pending" &&
+          (sessionId === undefined || approval.sessionId === sessionId))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.requestId.localeCompare(right.requestId))
+        .map((approval) => copy(approval)),
+      resolvePendingApproval: async (requestId, decision, resolvedAt) =>
+        resolvePendingApproval(state, requestId, decision, resolvedAt),
       commitTurn: async (write) => {
         if (write.sessionId.length === 0) throw new Error("Turn session id must not be empty");
         const usages = usageRecords(write.usage);
@@ -324,6 +486,13 @@ export class InMemorySessionRepository implements SessionRepository {
     });
   }
 
+  async updateSession(
+    sessionId: string,
+    patch: { status?: SessionStatus; updatedAt: string },
+  ): Promise<SessionRecord> {
+    return this.transaction((transaction) => transaction.updateSession(sessionId, patch));
+  }
+
   async appendMessages(
     sessionId: string,
     messages: readonly SessionMessageDraft[],
@@ -369,6 +538,66 @@ export class InMemorySessionRepository implements SessionRepository {
   async saveCheckpoint(checkpoint: CheckpointRecord): Promise<void> {
     const value = copy(checkpoint);
     await this.transaction((transaction) => transaction.saveCheckpoint(value));
+  }
+
+  async claimIdempotency(requestKey: string, requestFingerprint: string): Promise<IdempotencyClaim> {
+    return this.transaction((transaction) => transaction.claimIdempotency(requestKey, requestFingerprint));
+  }
+
+  async completeIdempotency(
+    requestKey: string,
+    requestFingerprint: string,
+    terminalPayload: JsonValue,
+  ): Promise<void> {
+    await this.transaction((transaction) =>
+      transaction.completeIdempotency(requestKey, requestFingerprint, terminalPayload));
+  }
+
+  async getIdempotency(requestKey: string): Promise<IdempotencyRecord | null> {
+    return this.runExclusive(() => {
+      requestPart(requestKey, "Idempotency request key");
+      const record = this.state.idempotency.get(requestKey);
+      return record === undefined ? null : copy(record);
+    });
+  }
+
+  async savePendingApproval(approval: PendingApprovalRecord): Promise<void> {
+    const value = copy(approval);
+    await this.transaction((transaction) => transaction.savePendingApproval(value));
+  }
+
+  async getPendingApproval(requestId: string): Promise<PendingApprovalRecord | null> {
+    return this.runExclusive(() => {
+      requestPart(requestId, "Approval request id");
+      const approval = this.state.approvals.get(requestId);
+      return approval === undefined ? null : copy(approval);
+    });
+  }
+
+  async listPendingApprovals(sessionId?: string): Promise<readonly PendingApprovalRecord[]> {
+    return this.runExclusive(() => [...this.state.approvals.values()]
+      .filter((approval) => approval.status === "pending" &&
+        (sessionId === undefined || approval.sessionId === sessionId))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.requestId.localeCompare(right.requestId))
+      .map((approval) => copy(approval)));
+  }
+
+  async resolvePendingApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    resolvedAt?: string,
+  ): Promise<PendingApprovalRecord> {
+    return this.transaction((transaction) =>
+      transaction.resolvePendingApproval(requestId, decision, resolvedAt));
+  }
+
+  async prune(at = new Date().toISOString()): Promise<RetentionPruneResult> {
+    return this.runExclusive(() => {
+      const next = copyState(this.state);
+      const result = pruneState(next, at);
+      this.state = next;
+      return result;
+    });
   }
 
   async commitTurn(write: AtomicTurnWrite): Promise<AppendMessagesResult> {

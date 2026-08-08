@@ -7,8 +7,7 @@ name: Docker / shell lint
 #
 # Rules and ignores are documented in .hadolint.yaml at the repo root.
 # shellcheck severity is pinned to `error` so SC1091-style "can't follow
-# sourced script" info-level warnings don't fail the job — the .venv
-# activate script doesn't exist at lint time.
+# sourced script" info-level warnings don't fail the job.
 
 on:
   workflow_call:
@@ -48,8 +47,7 @@ jobs:
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         env:
           # Severity = error: SC1091 (can't follow sourced script) is info-
-          # level and would otherwise fail when the venv activate script
-          # doesn't exist at lint time.
+          # level and would otherwise fail on optional sourced scripts.
           SHELLCHECK_OPTS: --severity=error
         with:
           scandir: ./docker

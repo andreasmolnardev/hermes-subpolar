@@ -209,7 +209,7 @@ function repairArgumentSubset(raw: string): string {
     JSON.parse(fixed);
     return fixed;
   } catch {
-    // Truncation, Python literals other than None, and other syntax are not
+    // Truncation, non-JSON literals, and other syntax are not
     // safe to infer. Leave them invalid so execution fails closed.
     return raw;
   }

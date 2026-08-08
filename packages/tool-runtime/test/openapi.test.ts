@@ -81,3 +81,49 @@ test("OpenAPI responses are bounded before conversion to text", async () => {
     truncated: true,
   });
 });
+
+test("OpenAPI validates local body references before making a request", async () => {
+  let requests = 0;
+  const [tool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document: {
+      openapi: "3.1.0",
+      components: { schemas: { Create: { type: "object", required: ["name"], properties: { name: { type: "string" } }, additionalProperties: false } } },
+      paths: { "/records": { post: {
+        operationId: "createRecord",
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/Create" } } } }
+      } } }
+    },
+    baseUrl: "https://api.example.test",
+    allowedOperationIds: ["createRecord"],
+    fetch: async () => { requests++; return new Response("ok"); }
+  });
+  assert.ok(tool && "handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ body: { extra: true } }), /does not match/);
+  assert.equal(requests, 0);
+  await tool.executable.handle.execute({ body: { name: "record" } });
+  assert.equal(requests, 1);
+});
+
+test("OpenAPI rejects private DNS results and redirects", async () => {
+  const [tool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document,
+    baseUrl: "https://api.example.test",
+    allowedOperationIds: ["getRecord"],
+    lookup: async () => ["192.168.1.10"],
+    fetch: async () => new Response("should not run")
+  });
+  assert.ok(tool && "handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ id: "record" }), /private network/);
+
+  const [redirectTool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document,
+    baseUrl: "https://api.example.test",
+    allowedOperationIds: ["getRecord"],
+    fetch: async () => new Response(null, { status: 302 })
+  });
+  assert.ok(redirectTool && "handle" in redirectTool.executable);
+  await assert.rejects(redirectTool.executable.handle.execute({ id: "record" }), /redirects/);
+});

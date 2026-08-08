@@ -621,8 +621,16 @@ export function validateProviderRequest(request: ProviderRequest): void {
 
   request.messages.forEach((message, index) => assertMessage(message, `request.messages[${index}]`));
   request.tools.forEach((tool, index) => {
+    assertString(tool.name, `request.tools[${index}].name`, true);
+    if (tool.policy !== "allow" && tool.policy !== "ask" && tool.policy !== "auto") {
+      throw new TypeError(`request.tools[${index}].policy is unsupported`);
+    }
+    if (tool.description !== undefined) assertString(tool.description, `request.tools[${index}].description`);
     if (tool.parameters !== undefined) {
       assertProviderJsonValue(tool.parameters, `request.tools[${index}].parameters`);
+      if (Array.isArray(tool.parameters)) {
+        throw new TypeError(`request.tools[${index}].parameters must be an object`);
+      }
     }
   });
 
@@ -1160,6 +1168,7 @@ export interface ChatProvider {
 export {
   createOpenAICompatibleProvider,
   type OpenAICompatibleCredentials,
+  type OpenAICompatibleCredentialResolver,
   type OpenAICompatibleFetch,
   type OpenAICompatibleProviderOptions
 } from "./openai-compatible";

@@ -4,6 +4,7 @@ import { Database, type Statement } from "bun:sqlite";
 import {
   CHECKPOINT_FORMAT_VERSION,
   PERSISTENCE_SCHEMA_VERSION,
+  IdempotencyConflictError,
   assertSupportedSchemaVersion,
   assertValidSessionMessages,
   isMessageContent,
@@ -13,14 +14,19 @@ import type {
   AppendMessagesResult,
   AtomicTurnWrite,
   CheckpointRecord,
+  ApprovalDecision,
+  IdempotencyClaim,
+  IdempotencyRecord,
   JsonObject,
   JsonValue,
-  MessageContent,
   MigrationStateRecord,
+  PendingApprovalRecord,
+  RetentionPruneResult,
   RuntimeMigrationMetadata,
   SessionMessage,
   SessionMessageDraft,
   SessionRecord,
+  SessionStatus,
   SessionRepository,
   SessionRepositoryTransaction,
   ToolCall,
@@ -35,11 +41,13 @@ type SqlValue = string | number | null | undefined;
 type SqlBinding = string | number | null;
 type SqlRow = Record<string, SqlValue>;
 
-const LEGACY_PYTHON_SCHEMA_VERSION = 25;
-
 export type SQLiteSessionRepositoryOptions = {
   path: string;
   runtimeVersion?: string;
+  idempotencyRetentionMs?: number;
+  approvalRetentionMs?: number;
+  maxIdempotencyRecords?: number;
+  maxApprovalRecords?: number;
 };
 
 export class UnsupportedSchemaError extends Error {
@@ -154,88 +162,23 @@ function optionalString(row: SqlRow, column: string, table: string): string | un
   return value;
 }
 
-function timestamp(value: SqlValue, label: string): string {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const result = new Date(value * 1000);
-    if (!Number.isNaN(result.valueOf())) return result.toISOString();
-  }
-  if (typeof value === "string" && !Number.isNaN(Date.parse(value))) return value;
-  throw new UnsupportedSchemaError(`${label} must be a timestamp`);
-}
-
-function legacyJson(value: SqlValue): unknown {
-  if (typeof value !== "string" || value.length === 0) return undefined;
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
-function legacyContent(row: SqlRow): MessageContent {
-  const raw = row.content ?? row.api_content;
-  if (typeof raw !== "string") return "";
-  const decoded = legacyJson(raw);
-  return decoded !== undefined && isMessageContent(decoded) ? decoded : raw;
-}
-
-function legacyMessageContent(value: SqlValue): MessageContent | undefined {
-  if (typeof value !== "string") return undefined;
-  const decoded = legacyJson(value);
-  return decoded !== undefined && isMessageContent(decoded) ? decoded : value;
-}
-
-function legacyJsonObject(value: SqlValue): JsonObject | undefined {
-  const decoded = legacyJson(value);
-  return isJsonObject(decoded) ? decoded : undefined;
-}
-
-function legacyJsonValue(value: SqlValue): JsonValue | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  const decoded = legacyJson(value);
-  return decoded !== undefined && isJsonValue(decoded) ? decoded :
-    (typeof value === "string" ? value : undefined);
-}
-
-function legacyBoolean(value: SqlValue): boolean | undefined {
-  if (value === 0 || value === "0" || value === "false") return false;
-  if (value === 1 || value === "1" || value === "true") return true;
-  return undefined;
-}
-
-function legacyToolCalls(row: SqlRow): readonly ToolCall[] | undefined {
-  const decoded = legacyJson(row.tool_calls);
-  if (!Array.isArray(decoded)) return undefined;
-  const calls = decoded.map((value): ToolCall | null => {
-    if (isToolCall(value)) return value;
-    if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0 ||
-        !isRecord(value.function) || typeof value.function.name !== "string" ||
-        value.function.name.length === 0 ||
-        (typeof value.function.arguments !== "string" && !isJsonObject(value.function.arguments))) {
-      return null;
-    }
-    return {
-      id: value.id,
-      name: value.function.name,
-      arguments: value.function.arguments,
-    };
-  });
-  return calls.every((call): call is ToolCall => call !== null) ? calls : undefined;
-}
-
 function isCheckpointReason(value: unknown): value is CheckpointRecord["reason"] {
   return value === "manual" || value === "turn" || value === "before-tool" || value === "migration";
 }
 
-function legacyFinishReason(value: SqlValue): SessionMessage["finishReason"] | undefined {
+function parseFinishReason(value: SqlValue): SessionMessage["finishReason"] | undefined {
   return value === "stop" || value === "length" || value === "tool_calls" ||
     value === "content_filter" || value === "error" ? value : undefined;
 }
 
 const CORE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE data_layer_schema (
+  marker TEXT PRIMARY KEY,
+  version INTEGER NOT NULL,
+  owner TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   schema_version INTEGER NOT NULL,
   workspace_id TEXT NOT NULL,
@@ -248,7 +191,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider TEXT,
   metadata_json TEXT
 );
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   schema_version INTEGER NOT NULL,
@@ -276,7 +219,7 @@ CREATE INDEX IF NOT EXISTS idx_data_layer_messages_session_sequence
 `;
 
 const AUXILIARY_SCHEMA = `
-CREATE TABLE IF NOT EXISTS tool_calls (
+CREATE TABLE tool_calls (
   id TEXT PRIMARY KEY,
   schema_version INTEGER NOT NULL,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -286,7 +229,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   name TEXT NOT NULL,
   arguments_json TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS tool_results (
+CREATE TABLE tool_results (
   tool_call_id TEXT PRIMARY KEY,
   schema_version INTEGER NOT NULL,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -297,7 +240,7 @@ CREATE TABLE IF NOT EXISTS tool_results (
   is_error INTEGER NOT NULL,
   tool_name TEXT
 );
-CREATE TABLE IF NOT EXISTS usages (
+CREATE TABLE usages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   schema_version INTEGER NOT NULL,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -305,14 +248,14 @@ CREATE TABLE IF NOT EXISTS usages (
   usage_json TEXT NOT NULL,
   message_id TEXT
 );
-CREATE TABLE IF NOT EXISTS migration (
+CREATE TABLE migration (
   session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   schema_version INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
   runtime_json TEXT NOT NULL,
   recovery_json TEXT
 );
-CREATE TABLE IF NOT EXISTS checkpoints (
+CREATE TABLE checkpoints (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   schema_version INTEGER NOT NULL,
@@ -332,14 +275,44 @@ CREATE INDEX IF NOT EXISTS idx_data_layer_usages_session_recorded
   ON usages(session_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_data_layer_checkpoints_session_created
   ON checkpoints(session_id, created_at);
+CREATE TABLE idempotency_records (
+  request_key TEXT PRIMARY KEY,
+  request_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+  terminal_payload_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  CHECK ((status = 'pending' AND terminal_payload_json IS NULL AND completed_at IS NULL) OR
+         (status = 'completed' AND terminal_payload_json IS NOT NULL AND completed_at IS NOT NULL))
+);
+CREATE INDEX idx_data_layer_idempotency_updated
+  ON idempotency_records(updated_at);
+CREATE TABLE pending_approvals (
+  request_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  call_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  arguments_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  resolved_at TEXT,
+  UNIQUE(session_id, call_id),
+  CHECK ((status = 'pending' AND resolved_at IS NULL) OR
+         (status IN ('allowed', 'denied') AND resolved_at IS NOT NULL))
+);
+CREATE INDEX idx_data_layer_approvals_session_status
+  ON pending_approvals(session_id, status, updated_at);
 `;
-
-type StorageMode = "canonical" | "legacy";
 
 export class SQLiteSessionRepository implements SessionRepository {
   private readonly db: Database;
   private readonly runtimeVersion: string;
-  private readonly mode: StorageMode;
+  private readonly idempotencyRetentionMs: number;
+  private readonly approvalRetentionMs: number;
+  private readonly maxIdempotencyRecords: number;
+  private readonly maxApprovalRecords: number;
   private queue = Promise.resolve();
 
   constructor(path: string);
@@ -348,10 +321,21 @@ export class SQLiteSessionRepository implements SessionRepository {
     const path = typeof pathOrOptions === "string" ? pathOrOptions : pathOrOptions.path;
     this.runtimeVersion = typeof pathOrOptions === "string" ? "typescript" :
       (pathOrOptions.runtimeVersion ?? "typescript");
+    const options: Partial<SQLiteSessionRepositoryOptions> = typeof pathOrOptions === "string" ? {} : pathOrOptions;
+    this.idempotencyRetentionMs = this.positiveOption(options.idempotencyRetentionMs ?? 7 * 24 * 60 * 60 * 1000, "idempotencyRetentionMs");
+    this.approvalRetentionMs = this.positiveOption(options.approvalRetentionMs ?? 7 * 24 * 60 * 60 * 1000, "approvalRetentionMs");
+    this.maxIdempotencyRecords = this.positiveIntegerOption(options.maxIdempotencyRecords ?? 10_000, "maxIdempotencyRecords");
+    this.maxApprovalRecords = this.positiveIntegerOption(options.maxApprovalRecords ?? 10_000, "maxApprovalRecords");
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    this.mode = this.initializeSchema();
+    try {
+      this.assertOwnedOrFreshDatabase();
+      this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+      this.initializeSchema();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   close(): void {
@@ -366,79 +350,78 @@ export class SQLiteSessionRepository implements SessionRepository {
     this.db.run(sql, params);
   }
 
-  private tableExists(table: "sessions" | "messages" | "schema_version"): boolean {
+  private positiveOption(value: number, label: string): number {
+    if (!Number.isFinite(value) || value <= 0) throw new TypeError(`${label} must be positive`);
+    return value;
+  }
+
+  private positiveIntegerOption(value: number, label: string): number {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer`);
+    return value;
+  }
+
+  private tableExists(table: string): boolean {
     const row = this.query<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
     ).get(table);
     return row !== null;
   }
 
-  private columns(table: "sessions" | "messages"): Set<string> {
+  private columns(table: string): Set<string> {
     const rows = this.query<{ name: string }>(`PRAGMA table_info(${table})`).all();
     return new Set(rows.map((row) => row.name));
   }
 
-  private schemaVersion(): number | null {
-    if (!this.tableExists("schema_version")) return null;
-    const row = this.query<{ version: number }>(
-      "SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1",
-    ).get();
-    return row?.version ?? null;
+  private assertOwnedOrFreshDatabase(): void {
+    const tables = this.query<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    ).all();
+    if (!this.tableExists("data_layer_schema")) {
+      if (tables.length > 0) {
+        throw new UnsupportedSchemaError("database has no TypeScript data-layer schema marker");
+      }
+      return;
+    }
+    const rows = this.query<{ marker: string; version: number; owner: string }>(
+      "SELECT marker, version, owner FROM data_layer_schema",
+    ).all();
+    if (rows.length !== 1 || rows[0]?.marker !== "hermes.data-layer.typescript" ||
+        rows[0]?.owner !== "typescript" || rows[0]?.version !== PERSISTENCE_SCHEMA_VERSION) {
+      throw new UnsupportedSchemaError("invalid TypeScript data-layer schema marker");
+    }
+    const required: readonly [string, readonly string[]][] = [
+      ["sessions", ["id", "schema_version", "workspace_id", "status", "created_at", "updated_at", "runtime_json"]],
+      ["messages", ["id", "session_id", "schema_version", "sequence", "role", "content_json", "created_at"]],
+      ["tool_calls", ["id", "schema_version", "session_id", "message_id", "sequence", "created_at", "name", "arguments_json"]],
+      ["tool_results", ["tool_call_id", "schema_version", "session_id", "message_id", "sequence", "created_at", "content_json", "is_error"]],
+      ["usages", ["id", "schema_version", "session_id", "recorded_at", "usage_json"]],
+      ["migration", ["session_id", "schema_version", "updated_at", "runtime_json"]],
+      ["checkpoints", ["id", "session_id", "schema_version", "message_sequence", "created_at", "reason", "runtime_json", "snapshot_json", "format_version"]],
+      ["idempotency_records", ["request_key", "request_fingerprint", "status", "terminal_payload_json", "created_at", "updated_at", "completed_at"]],
+      ["pending_approvals", ["request_id", "session_id", "call_id", "tool_name", "arguments_json", "status", "created_at", "updated_at", "resolved_at"]],
+    ];
+    for (const [table, columns] of required) {
+      if (!this.tableExists(table) || !columns.every((column) => this.columns(table).has(column))) {
+        throw new UnsupportedSchemaError(`TypeScript data-layer table ${table} is incomplete`);
+      }
+    }
   }
 
-  private initializeSchema(): StorageMode {
-    const hasSessions = this.tableExists("sessions");
-    const hasMessages = this.tableExists("messages");
-    if (!hasSessions && !hasMessages) {
+  private initializeSchema(): void {
+    if (this.tableExists("data_layer_schema")) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
       this.db.exec(CORE_SCHEMA);
       this.db.exec(AUXILIARY_SCHEMA);
-      this.run("INSERT INTO schema_version (version) VALUES (?)", PERSISTENCE_SCHEMA_VERSION);
-      return "canonical";
-    }
-    if (!hasSessions || !hasMessages) {
-      throw new UnsupportedSchemaError("sessions and messages must exist together");
-    }
-
-    const sessionColumns = this.columns("sessions");
-    const messageColumns = this.columns("messages");
-    const canonical = ["schema_version", "workspace_id", "status", "created_at", "updated_at", "runtime_json"]
-      .every((column) => sessionColumns.has(column)) &&
-      ["schema_version", "sequence", "content_json", "created_at"]
-        .every((column) => messageColumns.has(column));
-
-    if (canonical) {
-      const version = this.schemaVersion();
-      if (version !== null && version !== PERSISTENCE_SCHEMA_VERSION) {
-        throw new UnsupportedSchemaError(`persistence schema version ${String(version)}`);
-      }
-      this.ensureCanonicalColumns();
-      this.db.exec(AUXILIARY_SCHEMA);
-      this.ensureAuxiliaryColumns();
-      if (version === null) {
-        this.db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
-        this.run("INSERT INTO schema_version (version) VALUES (?)", PERSISTENCE_SCHEMA_VERSION);
-      }
-      return "canonical";
-    }
-
-    const legacy = ["id", "role", "session_id", "timestamp"].every((column) =>
-      sessionColumns.has(column) || messageColumns.has(column));
-    if (!legacy || !messageColumns.has("session_id") || !messageColumns.has("role") ||
-        !messageColumns.has("timestamp") || !sessionColumns.has("id") ||
-        !sessionColumns.has("started_at")) {
-      throw new UnsupportedSchemaError(
-        "sessions/messages are neither contract-native nor a supported Python shape",
+      this.run(
+        "INSERT INTO data_layer_schema (marker, version, owner, created_at) VALUES (?, ?, ?, ?)",
+        "hermes.data-layer.typescript", PERSISTENCE_SCHEMA_VERSION, "typescript", new Date().toISOString(),
       );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* preserve schema creation error */ }
+      throw error;
     }
-    const version = this.schemaVersion();
-    if (version !== null && (version < 0 || version > LEGACY_PYTHON_SCHEMA_VERSION)) {
-      throw new UnsupportedSchemaError(`legacy Python schema version ${String(version)}`);
-    }
-    // Never alter legacy sessions/messages. These tables are read-only compatibility input.
-    this.db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
-    this.db.exec(AUXILIARY_SCHEMA);
-    this.ensureAuxiliaryColumns();
-    return "legacy";
   }
 
   private runExclusive<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -448,62 +431,21 @@ export class SQLiteSessionRepository implements SessionRepository {
     return previous.then(operation).finally(release);
   }
 
-  private assertWritable(): void {
-    if (this.mode === "legacy") {
-      throw new UnsupportedSchemaError(
-        "Python sessions/messages are readable only; contract-native writes require a migrated database",
-      );
-    }
-  }
-
-  private ensureAuxiliaryColumns(): void {
-    const columns = (table: "migration" | "checkpoints"): Set<string> =>
-      new Set(this.query<{ name: string }>(`PRAGMA table_info(${table})`).all().map((row) => row.name));
-    if (!columns("migration").has("recovery_json")) {
-      this.db.exec("ALTER TABLE migration ADD COLUMN recovery_json TEXT");
-    }
-    if (!columns("checkpoints").has("format_version")) {
-      this.db.exec("ALTER TABLE checkpoints ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1");
-    }
-  }
-
-  private ensureCanonicalColumns(): void {
-    const columns = (table: "sessions" | "messages"): Set<string> => this.columns(table);
-    const additions: readonly ["sessions" | "messages", string, string][] = [
-      ["sessions", "title", "TEXT"],
-      ["sessions", "model", "TEXT"],
-      ["sessions", "provider", "TEXT"],
-      ["sessions", "metadata_json", "TEXT"],
-      ["messages", "name", "TEXT"],
-      ["messages", "tool_calls_json", "TEXT"],
-      ["messages", "tool_call_id", "TEXT"],
-      ["messages", "tool_result_json", "TEXT"],
-      ["messages", "finish_reason", "TEXT"],
-      ["messages", "usage_json", "TEXT"],
-      ["messages", "reasoning", "TEXT"],
-      ["messages", "metadata_json", "TEXT"],
-      ["messages", "api_content_json", "TEXT"],
-      ["messages", "display_kind", "TEXT"],
-      ["messages", "display_metadata_json", "TEXT"],
-      ["messages", "synthetic", "INTEGER"],
-      ["messages", "context_json", "TEXT"],
-    ];
-    const known = new Map<"sessions" | "messages", Set<string>>([
-      ["sessions", columns("sessions")],
-      ["messages", columns("messages")],
-    ]);
-    for (const [table, column, definition] of additions) {
-      const tableColumns = known.get(table);
-      if (tableColumns !== undefined && !tableColumns.has(column)) {
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-        tableColumns.add(column);
-      }
-    }
-  }
-
   private requireSession(sessionId: string): void {
     const row = this.query<{ id: string }>("SELECT id FROM sessions WHERE id = ?").get(sessionId);
     if (row === null) throw new Error(`Session not found: ${sessionId}`);
+  }
+
+  private validateSessionUpdate(patch: { status?: SessionStatus; updatedAt: string }): void {
+    if (patch === null || typeof patch !== "object") throw new TypeError("Invalid session patch");
+    if (patch.status !== undefined && patch.status !== "active" && patch.status !== "completed" &&
+        patch.status !== "failed" && patch.status !== "cancelled") {
+      throw new TypeError("Invalid session status");
+    }
+    if (typeof patch.updatedAt !== "string" || patch.updatedAt.length === 0 ||
+        !Number.isFinite(Date.parse(patch.updatedAt))) {
+      throw new TypeError("Invalid session timestamp");
+    }
   }
 
   private canonicalSession(row: SqlRow): SessionRecord {
@@ -599,7 +541,7 @@ export class SQLiteSessionRepository implements SessionRepository {
     if (name !== undefined) message.name = name;
     if (toolCallId !== undefined) message.toolCallId = toolCallId;
     if (finishReason !== undefined) {
-      const value = legacyFinishReason(finishReason);
+      const value = parseFinishReason(finishReason);
       if (value === undefined) throw new UnsupportedSchemaError("messages.finish_reason is invalid");
       message.finishReason = value;
     }
@@ -629,94 +571,11 @@ export class SQLiteSessionRepository implements SessionRepository {
     }
   }
 
-  private legacySession(row: SqlRow): SessionRecord {
-    const id = requiredString(row, "id", "sessions");
-    const endedAt = row.ended_at;
-    const endReason = optionalString(row, "end_reason", "sessions");
-    let status: SessionRecord["status"] = endedAt === null || endedAt === undefined ? "active" : "completed";
-    if (endReason === "cancelled") status = "cancelled";
-    else if (endReason === "failed" || endReason === "error") status = "failed";
-    const createdAt = timestamp(row.started_at, "sessions.started_at");
-    const updatedAt = timestamp(row.last_activity_at ?? endedAt ?? row.started_at, "sessions.updated_at");
-    const runtime: RuntimeMigrationMetadata = {
-      runtimeVersion: "python-legacy",
-      schemaVersion: PERSISTENCE_SCHEMA_VERSION,
-    };
-    const legacyVersion = this.schemaVersion();
-    if (legacyVersion !== null) runtime.migratedFromSchemaVersion = legacyVersion;
-    const workspaceId = optionalString(row, "workspace_id", "sessions") ??
-      optionalString(row, "source", "sessions") ?? "legacy";
-    const session: SessionRecord = {
-      schemaVersion: PERSISTENCE_SCHEMA_VERSION,
-      id,
-      workspaceId,
-      status,
-      createdAt,
-      updatedAt,
-      runtime,
-    };
-    const title = optionalString(row, "title", "sessions");
-    const model = optionalString(row, "model", "sessions");
-    const provider = optionalString(row, "billing_provider", "sessions");
-    if (title !== undefined) session.title = title;
-    if (model !== undefined) session.model = model;
-    if (provider !== undefined) session.provider = provider;
-    const metadata = legacyJson(row.origin_json);
-    if (isJsonObject(metadata)) session.metadata = metadata;
-    return session;
-  }
-
-  private legacyMessage(row: SqlRow, sessionId: string, sequence: number): SessionMessage | null {
-    const role = row.role;
-    if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") return null;
-    const id = row.id;
-    if (typeof id !== "string" && typeof id !== "number") return null;
-    const toolCallId = typeof row.tool_call_id === "string" && row.tool_call_id.length > 0
-      ? row.tool_call_id : undefined;
-    const message: SessionMessage = {
-      schemaVersion: PERSISTENCE_SCHEMA_VERSION,
-      id: String(id),
-      sessionId,
-      sequence,
-      role,
-      content: legacyContent(row),
-      createdAt: timestamp(row.timestamp, "messages.timestamp"),
-    };
-    const apiContent = legacyMessageContent(row.api_content);
-    if (apiContent !== undefined && row.content !== null && row.content !== undefined) {
-      message.apiContent = apiContent;
-    }
-    const displayKind = optionalString(row, "display_kind", "messages");
-    if (displayKind !== undefined) message.displayKind = displayKind;
-    const displayMetadata = legacyJsonObject(row.display_metadata);
-    if (displayMetadata !== undefined) message.displayMetadata = displayMetadata;
-    const synthetic = legacyBoolean(row.synthetic);
-    if (synthetic !== undefined) message.synthetic = synthetic;
-    const context = legacyJsonValue(row.context);
-    if (context !== undefined) message.context = context;
-    if (toolCallId !== undefined) {
-      message.toolCallId = toolCallId;
-      const toolResult: ToolResult = {
-        toolCallId,
-        content: legacyContent(row),
-        isError: row.effect_disposition === "error",
-      };
-      if (typeof row.tool_name === "string") toolResult.toolName = row.tool_name;
-      message.toolResult = toolResult;
-    }
-    const calls = legacyToolCalls(row);
-    if (calls !== undefined) message.toolCalls = calls;
-    const name = typeof row.tool_name === "string" ? row.tool_name : undefined;
-    if (name !== undefined && role !== "tool") message.name = name;
-    const finishReason = legacyFinishReason(row.finish_reason);
-    if (finishReason !== undefined) message.finishReason = finishReason;
-    return message;
-  }
-
   private transactionFor(): SessionRepositoryTransaction {
     return {
       appendMessages: async (sessionId, messages, options) => this.appendToDatabase(sessionId, messages, options),
       getSession: async (sessionId) => this.getSessionNow(sessionId),
+      updateSession: async (sessionId, patch) => this.updateSessionNow(sessionId, patch),
       listMessages: async (sessionId) => this.listMessagesNow(sessionId),
       listToolCalls: async (sessionId) => this.listToolCallsNow(sessionId),
       listToolResults: async (sessionId) => this.listToolResultsNow(sessionId),
@@ -725,6 +584,16 @@ export class SQLiteSessionRepository implements SessionRepository {
       getMigrationState: async (sessionId) => this.getMigrationStateNow(sessionId),
       saveMigrationState: async (state) => this.saveMigrationStateNow(state),
       saveCheckpoint: async (checkpoint) => this.saveCheckpointNow(checkpoint),
+      claimIdempotency: async (requestKey, requestFingerprint) =>
+        this.claimIdempotencyNow(requestKey, requestFingerprint),
+      completeIdempotency: async (requestKey, requestFingerprint, terminalPayload) =>
+        this.completeIdempotencyNow(requestKey, requestFingerprint, terminalPayload),
+      getIdempotency: async (requestKey) => this.getIdempotencyNow(requestKey),
+      savePendingApproval: async (approval) => this.savePendingApprovalNow(approval),
+      getPendingApproval: async (requestId) => this.getPendingApprovalNow(requestId),
+      listPendingApprovals: async (sessionId) => this.listPendingApprovalsNow(sessionId),
+      resolvePendingApproval: async (requestId, decision, resolvedAt) =>
+        this.resolvePendingApprovalNow(requestId, decision, resolvedAt),
       commitTurn: async (write) => this.commitTurnNow(write),
     };
   }
@@ -734,7 +603,6 @@ export class SQLiteSessionRepository implements SessionRepository {
     drafts: readonly SessionMessageDraft[],
     options?: AppendMessagesOptions,
   ): AppendMessagesResult {
-    if (drafts.length > 0) this.assertWritable();
     this.requireSession(sessionId);
     const existing = this.listMessagesNow(sessionId);
     assertValidSessionMessages(existing, sessionId);
@@ -843,24 +711,30 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   private getSessionNow(sessionId: string): SessionRecord | null {
-    if (this.mode === "legacy") {
-      const row = this.query<SqlRow>("SELECT * FROM sessions WHERE id = ?").get(sessionId);
-      return row === null ? null : this.legacySession(row);
-    }
     const row = this.query<SqlRow>("SELECT * FROM sessions WHERE id = ?").get(sessionId);
     return row === null ? null : this.canonicalSession(row);
   }
 
-  private listMessagesNow(sessionId: string): readonly SessionMessage[] {
-    if (this.mode === "legacy") {
-      const rows = this.query<SqlRow>(
-        "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC",
-      ).all(sessionId);
-      const messages = rows.map((row, index) => this.legacyMessage(row, sessionId, index))
-        .filter((message): message is SessionMessage => message !== null);
-      assertValidSessionMessages(messages, sessionId);
-      return messages;
+  private updateSessionNow(
+    sessionId: string,
+    patch: { status?: SessionStatus; updatedAt: string },
+  ): SessionRecord {
+    this.validateSessionUpdate(patch);
+    this.requireSession(sessionId);
+    if (patch.status === undefined) {
+      this.run("UPDATE sessions SET updated_at = ? WHERE id = ?", patch.updatedAt, sessionId);
+    } else {
+      this.run(
+        "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?",
+        patch.status, patch.updatedAt, sessionId,
+      );
     }
+    const session = this.getSessionNow(sessionId);
+    if (session === null) throw new Error(`Session not found: ${sessionId}`);
+    return session;
+  }
+
+  private listMessagesNow(sessionId: string): readonly SessionMessage[] {
     const rows = this.query<SqlRow>(
       "SELECT * FROM messages WHERE session_id = ? ORDER BY sequence ASC",
     ).all(sessionId);
@@ -870,12 +744,6 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   private listToolCallsNow(sessionId: string): readonly ToolCallRecord[] {
-    if (this.mode === "legacy") {
-      return this.listMessagesNow(sessionId).flatMap((message) => (message.toolCalls ?? []).map((call) => ({
-        ...call, schemaVersion: PERSISTENCE_SCHEMA_VERSION, sessionId, messageId: message.id,
-        sequence: message.sequence, createdAt: message.createdAt,
-      })));
-    }
     const rows = this.query<SqlRow>(
       "SELECT * FROM tool_calls WHERE session_id = ? ORDER BY sequence ASC, id ASC",
     ).all(sessionId);
@@ -895,12 +763,6 @@ export class SQLiteSessionRepository implements SessionRepository {
   }
 
   private listToolResultsNow(sessionId: string): readonly ToolResultRecord[] {
-    if (this.mode === "legacy") {
-      return this.listMessagesNow(sessionId).flatMap((message) => message.toolResult === undefined ? [] : [{
-        ...message.toolResult, schemaVersion: PERSISTENCE_SCHEMA_VERSION, sessionId,
-        messageId: message.id, sequence: message.sequence, createdAt: message.createdAt,
-      }]);
-    }
     const rows = this.query<SqlRow>(
       "SELECT * FROM tool_results WHERE session_id = ? ORDER BY sequence ASC, tool_call_id ASC",
     ).all(sessionId);
@@ -948,6 +810,204 @@ export class SQLiteSessionRepository implements SessionRepository {
       "INSERT INTO usages (schema_version, session_id, recorded_at, usage_json, message_id) VALUES (?, ?, ?, ?, ?)",
       usage.schemaVersion, usage.sessionId, usage.recordedAt, json(usage.usage), usage.messageId ?? null,
     );
+  }
+
+  private requestPart(value: string, label: string): string {
+    if (typeof value !== "string" || value.length === 0) throw new TypeError(`${label} must be non-empty`);
+    return value;
+  }
+
+  private idempotencyFromRow(row: SqlRow): IdempotencyRecord {
+    const status = requiredString(row, "status", "idempotency_records");
+    if (status !== "pending" && status !== "completed") {
+      throw new UnsupportedSchemaError("idempotency_records.status is invalid");
+    }
+    const record: IdempotencyRecord = {
+      requestKey: requiredString(row, "request_key", "idempotency_records"),
+      requestFingerprint: requiredString(row, "request_fingerprint", "idempotency_records"),
+      status,
+      createdAt: requiredString(row, "created_at", "idempotency_records"),
+      updatedAt: requiredString(row, "updated_at", "idempotency_records"),
+    };
+    if (row.terminal_payload_json !== null && row.terminal_payload_json !== undefined) {
+      const payload = parseJson(row.terminal_payload_json, "idempotency_records.terminal_payload_json");
+      if (!isJsonValue(payload)) throw new UnsupportedSchemaError("idempotency terminal payload is invalid");
+      record.terminalPayload = payload;
+    }
+    const completedAt = optionalString(row, "completed_at", "idempotency_records");
+    if (completedAt !== undefined) record.completedAt = completedAt;
+    if ((status === "pending" && (record.terminalPayload !== undefined || completedAt !== undefined)) ||
+        (status === "completed" && (record.terminalPayload === undefined || completedAt === undefined))) {
+      throw new UnsupportedSchemaError("idempotency record state is inconsistent");
+    }
+    return record;
+  }
+
+  private getIdempotencyNow(requestKey: string): IdempotencyRecord | null {
+    this.requestPart(requestKey, "Idempotency request key");
+    const row = this.query<SqlRow>("SELECT * FROM idempotency_records WHERE request_key = ?").get(requestKey);
+    return row === null ? null : this.idempotencyFromRow(row);
+  }
+
+  private claimIdempotencyNow(requestKey: string, requestFingerprint: string): IdempotencyClaim {
+    this.requestPart(requestKey, "Idempotency request key");
+    this.requestPart(requestFingerprint, "Idempotency request fingerprint");
+    this.pruneRetentionNow(new Date().toISOString());
+    const existing = this.getIdempotencyNow(requestKey);
+    if (existing !== null) {
+      if (existing.requestFingerprint !== requestFingerprint) throw new IdempotencyConflictError();
+      if (existing.status === "completed" && existing.terminalPayload !== undefined) {
+        return { status: "replay", record: copy(existing), terminalPayload: copy(existing.terminalPayload) };
+      }
+      return { status: "pending", record: copy(existing) };
+    }
+    const at = new Date().toISOString();
+    this.run(
+      `INSERT INTO idempotency_records
+        (request_key, request_fingerprint, status, terminal_payload_json, created_at, updated_at, completed_at)
+       VALUES (?, ?, 'pending', NULL, ?, ?, NULL)`,
+      requestKey, requestFingerprint, at, at,
+    );
+    const record = this.getIdempotencyNow(requestKey);
+    if (record === null) throw new UnsupportedSchemaError("idempotency claim disappeared during write");
+    return { status: "claimed", record: copy(record) };
+  }
+
+  private completeIdempotencyNow(
+    requestKey: string,
+    requestFingerprint: string,
+    terminalPayload: JsonValue,
+  ): void {
+    this.requestPart(requestKey, "Idempotency request key");
+    this.requestPart(requestFingerprint, "Idempotency request fingerprint");
+    if (!isJsonValue(terminalPayload)) throw new TypeError("Idempotency terminal payload must be JSON");
+    const existing = this.getIdempotencyNow(requestKey);
+    if (existing === null) throw new Error(`Idempotency key has not been claimed: ${requestKey}`);
+    if (existing.requestFingerprint !== requestFingerprint) throw new IdempotencyConflictError();
+    const payload = json(terminalPayload);
+    if (existing.status === "completed") {
+      if (existing.terminalPayload === undefined || json(existing.terminalPayload) !== payload) {
+        throw new Error("Idempotency key already has a different terminal payload");
+      }
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    this.run(
+      `UPDATE idempotency_records
+       SET status = 'completed', terminal_payload_json = ?, updated_at = ?, completed_at = ?
+       WHERE request_key = ? AND request_fingerprint = ? AND status = 'pending'`,
+      payload, completedAt, completedAt, requestKey, requestFingerprint,
+    );
+  }
+
+  private approvalFromRow(row: SqlRow): PendingApprovalRecord {
+    const status = requiredString(row, "status", "pending_approvals");
+    if (status !== "pending" && status !== "allowed" && status !== "denied") {
+      throw new UnsupportedSchemaError("pending_approvals.status is invalid");
+    }
+    const argumentsValue = parseJson(row.arguments_json, "pending_approvals.arguments_json");
+    if (!isJsonObject(argumentsValue)) throw new UnsupportedSchemaError("pending approval arguments are invalid");
+    const approval: PendingApprovalRecord = {
+      requestId: requiredString(row, "request_id", "pending_approvals"),
+      sessionId: requiredString(row, "session_id", "pending_approvals"),
+      callId: requiredString(row, "call_id", "pending_approvals"),
+      toolName: requiredString(row, "tool_name", "pending_approvals"),
+      arguments: argumentsValue,
+      status,
+      createdAt: requiredString(row, "created_at", "pending_approvals"),
+      updatedAt: requiredString(row, "updated_at", "pending_approvals"),
+    };
+    const resolvedAt = optionalString(row, "resolved_at", "pending_approvals");
+    if (resolvedAt !== undefined) approval.resolvedAt = resolvedAt;
+    if ((status === "pending" && resolvedAt !== undefined) ||
+        (status !== "pending" && resolvedAt === undefined)) {
+      throw new UnsupportedSchemaError("pending approval state is inconsistent");
+    }
+    return approval;
+  }
+
+  private getPendingApprovalNow(requestId: string): PendingApprovalRecord | null {
+    this.requestPart(requestId, "Approval request id");
+    const row = this.query<SqlRow>("SELECT * FROM pending_approvals WHERE request_id = ?").get(requestId);
+    return row === null ? null : this.approvalFromRow(row);
+  }
+
+  private savePendingApprovalNow(approval: PendingApprovalRecord): void {
+    for (const [value, label] of [[approval.requestId, "Approval request id"], [approval.sessionId, "Approval session id"], [approval.callId, "Approval call id"], [approval.toolName, "Approval tool name"]] as const) {
+      this.requestPart(value, label);
+    }
+    if (!isJsonObject(approval.arguments) || approval.status !== "pending") {
+      throw new TypeError("Pending approval must contain JSON arguments and have pending status");
+    }
+    const existing = this.getPendingApprovalNow(approval.requestId);
+    if (existing !== null) {
+      if (existing.sessionId !== approval.sessionId || existing.callId !== approval.callId ||
+          existing.toolName !== approval.toolName || json(existing.arguments) !== json(approval.arguments)) {
+        throw new Error(`Approval request already exists: ${approval.requestId}`);
+      }
+      return;
+    }
+    this.pruneRetentionNow(new Date().toISOString());
+    this.run(
+      `INSERT INTO pending_approvals
+        (request_id, session_id, call_id, tool_name, arguments_json, status, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL)`,
+      approval.requestId, approval.sessionId, approval.callId, approval.toolName, json(approval.arguments),
+      approval.createdAt, approval.updatedAt,
+    );
+  }
+
+  private listPendingApprovalsNow(sessionId?: string): readonly PendingApprovalRecord[] {
+    const rows = sessionId === undefined
+      ? this.query<SqlRow>("SELECT * FROM pending_approvals WHERE status = 'pending' ORDER BY created_at, request_id").all()
+      : this.query<SqlRow>("SELECT * FROM pending_approvals WHERE status = 'pending' AND session_id = ? ORDER BY created_at, request_id").all(sessionId);
+    return rows.map((row) => this.approvalFromRow(row));
+  }
+
+  private resolvePendingApprovalNow(
+    requestId: string,
+    decision: ApprovalDecision,
+    resolvedAt = new Date().toISOString(),
+  ): PendingApprovalRecord {
+    this.requestPart(requestId, "Approval request id");
+    if (decision !== "allow" && decision !== "deny") throw new TypeError("Approval decision is invalid");
+    const existing = this.getPendingApprovalNow(requestId);
+    if (existing === null) throw new Error(`Approval request not found: ${requestId}`);
+    const status = decision === "allow" ? "allowed" : "denied";
+    if (existing.status !== "pending") {
+      if (existing.status !== status) throw new Error(`Approval request already resolved: ${requestId}`);
+      return copy(existing);
+    }
+    this.run(
+      "UPDATE pending_approvals SET status = ?, updated_at = ?, resolved_at = ? WHERE request_id = ? AND status = 'pending'",
+      status, resolvedAt, resolvedAt, requestId,
+    );
+    const result = this.getPendingApprovalNow(requestId);
+    if (result === null) throw new UnsupportedSchemaError("approval resolution disappeared during write");
+    return result;
+  }
+
+  private pruneRetentionNow(now: string): RetentionPruneResult {
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(nowMs)) throw new TypeError("Retention timestamp is invalid");
+    const idempotencyCutoff = new Date(nowMs - this.idempotencyRetentionMs).toISOString();
+    const approvalCutoff = new Date(nowMs - this.approvalRetentionMs).toISOString();
+    this.run("DELETE FROM idempotency_records WHERE updated_at < ?", idempotencyCutoff);
+    this.run(
+      `DELETE FROM idempotency_records WHERE request_key IN
+       (SELECT request_key FROM idempotency_records ORDER BY updated_at, request_key LIMIT -1 OFFSET ?)`,
+      this.maxIdempotencyRecords,
+    );
+    this.run("DELETE FROM pending_approvals WHERE updated_at < ?", approvalCutoff);
+    this.run(
+      `DELETE FROM pending_approvals WHERE request_id IN
+       (SELECT request_id FROM pending_approvals ORDER BY updated_at, request_id LIMIT -1 OFFSET ?)`,
+      this.maxApprovalRecords,
+    );
+    return {
+      idempotencyRecords: this.query<{ count: number }>("SELECT COUNT(*) AS count FROM idempotency_records").get()?.count ?? 0,
+      approvalRecords: this.query<{ count: number }>("SELECT COUNT(*) AS count FROM pending_approvals").get()?.count ?? 0,
+    };
   }
 
   private getMigrationStateNow(sessionId: string): MigrationStateRecord | null {
@@ -1030,7 +1090,6 @@ export class SQLiteSessionRepository implements SessionRepository {
 
   async createSession(session: SessionRecord): Promise<void> {
     await this.transaction(async (transaction) => {
-      this.assertWritable();
       assertSupportedSchemaVersion(session.schemaVersion);
       if (!isRuntime(session.runtime)) throw new Error("Invalid session runtime metadata");
       this.run(
@@ -1047,6 +1106,13 @@ export class SQLiteSessionRepository implements SessionRepository {
 
   async getSession(sessionId: string): Promise<SessionRecord | null> {
     return this.runExclusive(() => this.getSessionNow(sessionId));
+  }
+
+  async updateSession(
+    sessionId: string,
+    patch: { status?: SessionStatus; updatedAt: string },
+  ): Promise<SessionRecord> {
+    return this.transaction((transaction) => transaction.updateSession(sessionId, patch));
   }
 
   async appendMessages(sessionId: string, messages: readonly SessionMessageDraft[], options?: AppendMessagesOptions): Promise<AppendMessagesResult> {
@@ -1083,6 +1149,48 @@ export class SQLiteSessionRepository implements SessionRepository {
 
   async saveCheckpoint(checkpoint: CheckpointRecord): Promise<void> {
     await this.transaction(async (transaction) => transaction.saveCheckpoint(checkpoint));
+  }
+
+  async claimIdempotency(requestKey: string, requestFingerprint: string): Promise<IdempotencyClaim> {
+    return this.transaction((transaction) => transaction.claimIdempotency(requestKey, requestFingerprint));
+  }
+
+  async completeIdempotency(
+    requestKey: string,
+    requestFingerprint: string,
+    terminalPayload: JsonValue,
+  ): Promise<void> {
+    await this.transaction((transaction) =>
+      transaction.completeIdempotency(requestKey, requestFingerprint, terminalPayload));
+  }
+
+  async getIdempotency(requestKey: string): Promise<IdempotencyRecord | null> {
+    return this.runExclusive(() => this.getIdempotencyNow(requestKey));
+  }
+
+  async savePendingApproval(approval: PendingApprovalRecord): Promise<void> {
+    await this.transaction((transaction) => transaction.savePendingApproval(approval));
+  }
+
+  async getPendingApproval(requestId: string): Promise<PendingApprovalRecord | null> {
+    return this.runExclusive(() => this.getPendingApprovalNow(requestId));
+  }
+
+  async listPendingApprovals(sessionId?: string): Promise<readonly PendingApprovalRecord[]> {
+    return this.runExclusive(() => this.listPendingApprovalsNow(sessionId));
+  }
+
+  async resolvePendingApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    resolvedAt?: string,
+  ): Promise<PendingApprovalRecord> {
+    return this.transaction((transaction) =>
+      transaction.resolvePendingApproval(requestId, decision, resolvedAt));
+  }
+
+  async prune(now = new Date().toISOString()): Promise<RetentionPruneResult> {
+    return this.transaction(async () => this.pruneRetentionNow(now));
   }
 
   async commitTurn(write: AtomicTurnWrite): Promise<AppendMessagesResult> {

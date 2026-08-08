@@ -145,7 +145,7 @@ export class IterationBudget {
       : decision;
   }
 
-  /** Python IterationBudget-compatible boolean consume operation. */
+  /** Boolean consume operation for callers that do not need the decision. */
   consume(resource: IterationBudgetResourceAlias = "turns", requested = 1): boolean {
     return this.tryConsume(resource, requested).allowed;
   }

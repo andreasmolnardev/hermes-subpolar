@@ -1,386 +1,109 @@
 # Hermes Subpolar
 
-> **Workspace-first AI development environment built on Hermes Agent.**
-
-Hermes Subpolar transforms Hermes Agent into a graphical, self-hostable AI development environment. Rather than centering everything around conversations, Subpolar introduces persistent workspaces, reusable agents, integrated developer tooling, transparent execution, and project organization while continuing to leverage the proven Hermes runtime.
-
-Whether running locally or as a Docker deployment in your homelab, Subpolar aims to provide an environment where humans and AI collaborate inside the same workspace rather than through an isolated chat window.
+Hermes Subpolar is a self-hosted web application for workspace-scoped AI
+development. It is a Bun and TypeScript service with a React web UI, one HTTP
+process, one OpenAI-compatible model connection, native tool boundaries, and a
+fresh SQLite database for local state.
 
 ## Start Locally
 
-After `bun install`, run `bun run serve`, then open `http://127.0.0.1:8080`.
-The command builds the browser and starts the server. The first visit creates the administrator, connects
-an OpenAI-compatible model provider, and selects initial agent templates.
-
----
-
-# Philosophy
-
-Everything in Subpolar is built around four guiding principles.
-
-## Isolation
-
-Every task should execute inside a well-defined environment.
-
-Users shouldn't have to wonder which files, terminals or repositories an agent can access. Context should be explicit instead of inferred.
-
-### Implementation
-
-* Persistent Workspaces
-* Agents
-* Project Organization
-* Explicit Permissions
-* Workspace-specific resources
-* Independent conversations
-
----
-
-## Transparency
-
-AI should never behave like a black box.
-
-Users should always be able to understand what happened, why it happened and how long it took.
-
-### Implementation
-
-* Activity Panel
-* Thinking timeline
-* Tool execution log
-* Sub-agent visualization
-* Execution durations
-* Integrated Source Control
-* Explain Changes
-* Persistent terminals
-
----
-
-## Extensibility
-
-Nothing should depend on one model, one protocol or one provider.
-
-Every component should be replaceable.
-
-### Implementation
-
-* Multiple LLM providers
-* MCP support
-* OpenAPI integrations
-* Native integrations
-* Skills
-* First-party Apps
-* Modular providers
-* Workspace integrations
-
----
-
-## Human-first
-
-AI should augment developers—not replace them.
-
-The interface should remain useful even when no AI is running.
-
-### Implementation
-
-* Browsable repositories
-* Manual Source Control
-* Integrated terminals
-* Workspace management
-* Project management
-* Tool management
-* Human-accessible applications
-
----
-
-# What makes Hermes Subpolar different?
-
-Unlike traditional coding agents, Subpolar combines conversations with persistent developer environments.
-
-Instead of opening a chat and giving an AI temporary access to a directory, users work inside persistent workspaces that contain repositories, terminals, browser sessions, agents and tools.
-
-Conversations become one way of interacting with the workspace rather than the workspace itself.
-
----
-
-# Features
-
-## Workspace-first Architecture
-
-Every conversation belongs to a workspace.
-
-A workspace contains:
-
-* Files
-* Git repositories
-* Persistent terminals
-* Browser sessions
-* Installed tools
-* Workspace configuration
-* Conversations
-* Scheduled tasks
-
-Changing workspaces changes the execution environment.
-
----
-
-## Reusable Agents
-
-Agents define **who** performs work.
-
-Each agent contains:
-
-* Instructions
-* Skills
-* Tool permissions
-* Default model
-* Behaviour
-* System prompt
-* Permission defaults
-
-Agents can be reused across conversations and workspaces.
-
----
-
-## Transparent Activity Panel
-
-Every execution is visible.
-
-The Activity Panel displays:
-
-* Thinking
-* Planning
-* Tool calls
-* Browser automation
-* Searches
-* Git operations
-* File modifications
-* Sub-agent execution
-* Execution durations
-
-Nothing happens invisibly.
-
----
-
-## Integrated Source Control
-
-Every workspace includes Git integration.
-
-Features include:
-
-* Changed files
-* Staging
-* Commits
-* Branch management
-* Repository status
-
-Without leaving the application.
-
----
-
-## Persistent Terminals
-
-Workspaces own terminals.
-
-Unlike temporary shells created during prompts, terminals remain available across conversations.
-
-Users and agents can both reuse them.
-
----
-
-## Scheduled Tasks
-
-Agents can execute automatically.
-
-Examples include:
-
-* Daily summaries
-* Repository maintenance
-* Documentation updates
-* Scheduled research
-* Monitoring tasks
-
-Each task selects:
-
-* Workspace
-* Agent
-* Permissions
-* Schedule
-* Instructions
-
----
-
-## Apps
-
-Subpolar supports first-party applications built on the same platform.
-
-Applications reuse:
-
-* Authentication
-* Workspaces
-* Agents
-* Tools
-* Themes
-
-Future applications can extend the platform without becoming separate systems.
-
----
-
-## Open Tool Ecosystem
-
-Tools are provider-independent.
-
-Supported integrations include:
-
-* MCP Servers
-* OpenAPI services
-* Native integrations
-* Future provider types
-
-Regardless of implementation, every tool is presented through a common interface.
-
----
-
-## Model Agnostic
-
-Choose whichever LLM best fits the task.
-
-Supported providers include:
-
-* OpenAI
-* Anthropic
-* Google
-* OpenRouter
-* Ollama
-* Local models
-* Hermes-supported providers
-
-Changing models never requires changing agents or workspaces.
-
----
-
-## Docker-first Deployment
-
-Subpolar production deployment uses Docker Compose. Persistent workspaces make
-remote deployments practical while preserving a desktop-like experience. See
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
-
----
-
-# Architecture
-
-Subpolar extends Hermes rather than replacing it.
-
-```
-                 ┌─────────────────────┐
-                 │     User Interface  │
-                  │      Web UI         │
-                 └──────────┬──────────┘
-                            │
-                   Workspace Layer
-                            │
-        ┌──────────────┬──────────────┐
-        │              │              │
-     Projects       Agents        Conversations
-        │              │              │
-        └──────────────┴──────────────┘
-                            │
-                   Hermes Agent Runtime
-                            │
-      ┌───────────┬──────────┬───────────┐
-      │           │          │           │
-   Models      Tools      Skills     Memory
-```
-
-Hermes continues to provide the execution engine while Subpolar provides the workspace-centric experience surrounding it.
-
----
-
-# Getting Started
+Requirements: Bun 1.3.x and a supported browser.
 
 ```bash
-git clone https://github.com/andreasmolnardev/hermes-subpolar
-cd hermes-subpolar
-
-# Start Subpolar
-docker compose up -d --build
+bun install
+bun run serve
 ```
 
-Open `http://127.0.0.1:9119` after first-user authentication is configured.
+Open `http://127.0.0.1:8080`. The command builds `packages/web-ui` and starts
+`packages/api-gateway` in the same Bun process. First-run setup creates the
+administrator, stores one OpenAI-compatible connection, and creates the
+initial agent templates.
 
----
+## What It Provides
 
-# Screens
+- Browser-based workspace and agent management.
+- Authenticated `/v1` HTTP and WebSocket APIs.
+- OpenAI-compatible chat completions with typed streaming events.
+- Owner-scoped projects, agents, sessions, and ordered transcripts.
+- Native tool boundaries with deny-by-default resolution and bounded results.
+- SQLite persistence at `<SUBPOLAR_DATA_DIR>/state.db`.
+- Static web assets served by the same Bun process as the API.
 
-The Subpolar web application currently consists of:
+The public API does not expose provider credentials or allow a browser client to
+register arbitrary executors. Unsupported provider, tool, transport, and data
+shapes fail before side effects.
 
-* Conversation
-* New Chat
-* Agents
-* Scheduled Tasks
-* Apps
-* Project Creation
-* Project Group Creation
+## Configuration
 
-Every screen shares a common application shell consisting of:
+The server accepts these process variables:
 
-* Navigation Sidebar
-* Workspace Selector
-* Main Content Area
-* Optional Activity Panel
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SUBPOLAR_HOST` | `127.0.0.1` | Bun listen hostname |
+| `SUBPOLAR_PORT` | `8080` | HTTP port |
+| `SUBPOLAR_DATA_DIR` | `.subpolar` | Directory containing `state.db` |
+| `SUBPOLAR_STATIC_ROOT` | `packages/web-ui/dist` | Built web assets |
 
----
+Provider setup is completed through the authenticated browser flow. The
+configured connection uses an OpenAI-compatible base URL, API key, and model;
+credentials remain server-side in SQLite.
 
-# Roadmap
+## Development Commands
 
-Current focus:
+```bash
+bun run check:monorepo
+bun run typecheck:runtime
+bun test
+bun run build:web
+bun run test:e2e:browser
+```
 
-* Web application foundation
-* Workspace management
-* Agent management
-* Activity Panel
-* Persistent terminals
-* Source Control integration
-* Project organization
+Run `bun run dev` for the workspace development processes. Package-level
+commands are documented in `packages/*/package.json` and use Bun throughout.
 
-Future plans include:
+## Architecture
 
-* Rich first-party Apps
-* Collaborative workspaces
-* Workspace templates
-* Additional tool providers
-* Advanced automation
-* Multi-user deployments
+```text
+Browser
+  |
+  | HTTP / WebSocket
+  v
+Bun api-gateway
+  |-- authentication and owner checks
+  |-- harness turn lifecycle
+  |-- OpenAI-compatible provider adapter
+  |-- native tool resolver and tool runtime
+  `-- SQLite repositories: identity, setup, sessions, transcripts
+```
 
----
+The browser is a client of the API, not an execution host. Tool descriptors,
+approval, cancellation, output limits, provider calls, and persistence stay on
+the server-side TypeScript boundaries. Stable system-prompt sections, message
+roles, prompt-cache boundaries, and tool-call/result ordering are preserved.
 
-# Contributing
+## Deployment
 
-Contributions are welcome.
+For a durable self-hosted deployment, set `SUBPOLAR_DATA_DIR` to a private
+persistent directory and place TLS and public authentication at a trusted
+reverse proxy. The process listens on one port and must not share its SQLite
+database with another instance. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
-Areas of particular interest include:
+## Documentation
 
-* Web application development
-* React
-* TypeScript
-* Agent UX
-* Docker
-* MCP integrations
-* OpenAPI tooling
-* Workspace management
+- [Deployment](docs/DEPLOYMENT.md)
+- [Session lifecycle](docs/session-lifecycle.md)
+- [Provider contract](docs/contracts/providers.md)
+- [Tool contract](docs/contracts/tools.md)
+- [Persistence contract](docs/contracts/persistence.md)
+- [Configuration contract](docs/contracts/configuration.md)
+- [Security policy](SECURITY.md)
 
-Please open an issue before beginning larger architectural changes.
+## Contributing
 
----
+Use the Bun commands above, keep changes inside the package boundary that owns
+them, and include behavior-focused tests for API, persistence, security, and
+tool changes. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-# License
+## License
 
-Hermes Subpolar inherits the licensing of the underlying Hermes Agent project unless otherwise specified.
-
-See the project's `LICENSE` file for details.
-
----
-
-# Acknowledgements
-
-Hermes Subpolar is built upon the excellent work of the **Hermes Agent** project by **Nous Research**.
-
-The goal of this project is not to replace Hermes, but to extend it with a workspace-first graphical interface, developer tooling, and a transparent user experience while remaining compatible with the Hermes ecosystem.
+Hermes Subpolar is released under the MIT license. See [`LICENSE`](LICENSE).

@@ -18,6 +18,7 @@ import {
   type ProviderResult,
   type ProviderTool,
   type ProviderToolCall,
+  type ProviderFinishReason,
   type ProviderErrorCategory,
   type ProviderErrorContext,
   type ProviderUsageInput,
@@ -33,6 +34,11 @@ export type OpenAICompatibleCredentials = {
   readonly project?: string;
 };
 
+/** An opaque handle can be resolved by a credential broker at request time. */
+export type OpenAICompatibleCredentialResolver = (
+  handle: string
+) => OpenAICompatibleCredentials | Promise<OpenAICompatibleCredentials>;
+
 export type OpenAICompatibleFetch = (
   input: RequestInfo | URL,
   init?: RequestInit
@@ -41,9 +47,15 @@ export type OpenAICompatibleFetch = (
 export type OpenAICompatibleProviderOptions = {
   /** Base URL such as https://api.openai.com/v1. */
   readonly baseUrl: string;
-  readonly credentials: OpenAICompatibleCredentials;
+  readonly credentials?: OpenAICompatibleCredentials;
+  readonly credentialHandle?: string;
+  readonly resolveCredentialHandle?: OpenAICompatibleCredentialResolver;
   readonly fetch: OpenAICompatibleFetch;
   readonly headers?: Readonly<Record<string, string>>;
+  /** Maximum non-streaming response and streaming response bytes. */
+  readonly maxResponseBytes?: number;
+  /** Maximum bytes in one SSE event, including an unterminated final event. */
+  readonly maxSseEventBytes?: number;
 };
 
 type JsonRecord = { [key: string]: unknown };
@@ -64,6 +76,26 @@ function malformed(path: string, requestId: string | undefined): ProviderError {
   });
 }
 
+function responseTooLarge(requestId: string | undefined): ProviderError {
+  return new ProviderError("OpenAI-compatible response exceeded its size limit", {
+    category: "invalid_request",
+    ...(requestId === undefined ? {} : { requestId })
+  });
+}
+
+function validFinishReason(
+  value: unknown,
+  path: string,
+  requestId: string | undefined,
+  nullable: boolean
+): ProviderFinishReason | undefined {
+  if (value === null && nullable) return undefined;
+  if (typeof value !== "string") throw malformed(path, requestId);
+  const normalized = normalizeProviderFinishReason(value);
+  if (normalized === "unknown") throw malformed(path, requestId);
+  return normalized;
+}
+
 function requiredString(value: JsonRecord, key: string, path: string, requestId: string | undefined): string {
   if (typeof value[key] !== "string" || value[key].trim().length === 0) throw malformed(`${path}.${key}`, requestId);
   return value[key] as string;
@@ -76,10 +108,73 @@ function optionalNumber(
   requestId: string | undefined
 ): number | undefined {
   if (!has(value, key)) return undefined;
-  if (typeof value[key] !== "number" || !Number.isFinite(value[key]) || value[key] < 0) {
+  if (typeof value[key] !== "number" || !Number.isSafeInteger(value[key]) || value[key] < 0) {
     throw malformed(`${path}.${key}`, requestId);
   }
   return value[key] as number;
+}
+
+function assertSafeHeader(name: string, value: string): void {
+  if (name.trim().length === 0 || /[\r\n]/.test(name) || /[\r\n]/.test(value)) {
+    throw new TypeError("OpenAI-compatible request headers are invalid");
+  }
+  if (/^(?:authorization|proxy-authorization|cookie|set-cookie)$/i.test(name)) {
+    throw new TypeError("OpenAI-compatible credential headers are managed by the adapter");
+  }
+}
+
+function validateResponseLimit(value: number | undefined, name: string, fallback: number): number {
+  const limit = value ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError(`${name} must be a positive integer`);
+  return limit;
+}
+
+function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("The operation was aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+async function responseText(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+  requestId: string | undefined,
+  rejectOnLimit = true
+): Promise<string | undefined> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && /^\d+$/.test(contentLength) && Number(contentLength) > maxBytes) {
+    if (rejectOnLimit) throw responseTooLarge(requestId);
+    return undefined;
+  }
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      const next = await abortable(reader.read(), signal);
+      if (next.done) {
+        chunks.push(decoder.decode());
+        break;
+      }
+      size += next.value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        if (rejectOnLimit) throw responseTooLarge(requestId);
+        return undefined;
+      }
+      chunks.push(decoder.decode(next.value, { stream: true }));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return chunks.join("");
 }
 
 function contentText(content: ProviderContent): string {
@@ -269,20 +364,43 @@ function streamChunkEvents(
   const events: ProviderStreamEvent[] = [];
   const chunkMetadata = responseMetadata(chunk) ?? metadata;
   const choices = chunk.choices;
-  if (Array.isArray(choices)) {
+  if (!Array.isArray(choices)) throw malformed("stream choices", requestId);
+  if (choices.length > 0) {
     const choice = choices[0];
-    if (isRecord(choice)) {
-      const delta = isRecord(choice.delta) ? choice.delta : {};
-      if (typeof delta.content === "string") events.push({ type: "text-delta", text: delta.content });
-      if (typeof delta.reasoning_content === "string") events.push({ type: "reasoning-delta", text: delta.reasoning_content });
-      if (Array.isArray(delta.tool_calls)) {
-        for (const candidate of delta.tool_calls) {
-          if (!isRecord(candidate)) throw malformed("stream tool call", requestId);
-          const fn = isRecord(candidate.function) ? candidate.function : {};
-          events.push({ type: "tool-call-delta", ...(typeof candidate.id === "string" ? { id: candidate.id } : {}), ...(typeof candidate.index === "number" ? { index: candidate.index } : {}), ...(typeof fn.name === "string" ? { name: fn.name } : {}), ...(typeof fn.arguments === "string" ? { arguments: fn.arguments } : {}) });
+    if (!isRecord(choice)) throw malformed("stream choices[0]", requestId);
+    if (choice.delta !== undefined && !isRecord(choice.delta)) throw malformed("stream choices[0].delta", requestId);
+    const delta = isRecord(choice.delta) ? choice.delta : {};
+    if (delta.content !== undefined && typeof delta.content !== "string") throw malformed("stream content", requestId);
+    if (delta.reasoning_content !== undefined && typeof delta.reasoning_content !== "string") {
+      throw malformed("stream reasoning_content", requestId);
+    }
+    if (typeof delta.content === "string") events.push({ type: "text-delta", text: delta.content });
+    if (typeof delta.reasoning_content === "string") events.push({ type: "reasoning-delta", text: delta.reasoning_content });
+    if (delta.tool_calls !== undefined && !Array.isArray(delta.tool_calls)) throw malformed("stream tool calls", requestId);
+    if (Array.isArray(delta.tool_calls)) {
+      for (const candidate of delta.tool_calls) {
+        if (!isRecord(candidate)) throw malformed("stream tool call", requestId);
+        if (candidate.id !== undefined && typeof candidate.id !== "string") throw malformed("stream tool call.id", requestId);
+        const callIndex = candidate.index;
+        if (callIndex !== undefined && (typeof callIndex !== "number" || !Number.isSafeInteger(callIndex) || callIndex < 0)) {
+          throw malformed("stream tool call.index", requestId);
         }
+        if (!isRecord(candidate.function)) throw malformed("stream tool call.function", requestId);
+        const fn = candidate.function;
+        if (fn.name !== undefined && typeof fn.name !== "string") throw malformed("stream tool call.name", requestId);
+        if (fn.arguments !== undefined && typeof fn.arguments !== "string") {
+          throw malformed("stream tool call.arguments", requestId);
+        }
+        events.push({ type: "tool-call-delta", ...(typeof candidate.id === "string" ? { id: candidate.id } : {}), ...(typeof callIndex === "number" ? { index: callIndex } : {}), ...(typeof fn.name === "string" ? { name: fn.name } : {}), ...(typeof fn.arguments === "string" ? { arguments: fn.arguments } : {}) });
       }
-      if (typeof choice.finish_reason === "string") events.push({ type: "finish", finishReason: normalizeProviderFinishReason(choice.finish_reason), ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }), ...(chunkMetadata === undefined ? {} : { metadata: chunkMetadata }) });
+    }
+    if (!has(choice, "finish_reason")) {
+      // Delta chunks commonly omit the finish reason until their terminal chunk.
+    } else {
+      const finishReason = validFinishReason(choice.finish_reason, "stream finish_reason", requestId, true);
+      if (chunk.usage !== undefined) events.push({ type: "usage", usage: responseUsage(chunk.usage, requestId), ...(chunkMetadata === undefined ? {} : { metadata: chunkMetadata }) });
+      if (finishReason !== undefined) events.push({ type: "finish", finishReason, ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }), ...(chunkMetadata === undefined ? {} : { metadata: chunkMetadata }) });
+      return events;
     }
   }
   if (chunk.usage !== undefined) events.push({ type: "usage", usage: responseUsage(chunk.usage, requestId), ...(chunkMetadata === undefined ? {} : { metadata: chunkMetadata }) });
@@ -294,11 +412,17 @@ async function* streamOpenAIResponse(
   requestId: string | undefined,
   identity: ProviderRequest["identity"],
   signal: AbortSignal,
+  maxResponseBytes: number,
+  maxSseEventBytes: number,
 ): AsyncIterable<ProviderStreamEvent> {
   if (response.body === null) throw malformed("body", requestId);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
   let buffer = "";
+  let eventData: string[] = [];
+  let eventBytes = 0;
+  let responseBytes = 0;
   let finished = false;
   const emit = (event: ProviderStreamEvent): ProviderStreamEvent => {
     validateProviderStreamEvent(event);
@@ -306,27 +430,60 @@ async function* streamOpenAIResponse(
   };
   try {
     yield emit({ type: "start", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) });
+    const dispatch = function* (): Generator<ProviderStreamEvent> {
+      if (eventData.length === 0) return;
+      const data = eventData.join("\n").trim();
+      eventData = [];
+      eventBytes = 0;
+      if (data.length === 0) return;
+      if (data === "[DONE]") {
+        if (!finished) {
+          finished = true;
+          yield emit({ type: "finish", finishReason: "stop", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) });
+        }
+        return;
+      }
+      let chunk: unknown;
+      try {
+        chunk = JSON.parse(data) as unknown;
+      } catch {
+        throw malformed("stream event", requestId);
+      }
+      for (const event of streamChunkEvents(chunk, requestId, identity, undefined)) {
+        if (event.type === "finish") finished = true;
+        yield emit(event);
+      }
+    };
+    const processLine = function* (line: string): Generator<ProviderStreamEvent> {
+      if (line.length === 0) {
+        yield* dispatch();
+        return;
+      }
+      if (!line.startsWith("data:")) return;
+      const value = line.slice(5).startsWith(" ") ? line.slice(6) : line.slice(5);
+      eventBytes += encoder.encode(line).byteLength;
+      if (eventBytes > maxSseEventBytes) throw responseTooLarge(requestId);
+      eventData.push(value);
+    };
     while (true) {
-      if (signal.aborted) throw new ProviderError("OpenAI-compatible request cancelled", { category: "cancelled", ...(requestId === undefined ? {} : { requestId }) });
-      const next = await reader.read();
+      if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      const next = await abortable(reader.read(), signal);
+      if (!next.done) {
+        responseBytes += next.value.byteLength;
+        if (responseBytes > maxResponseBytes) {
+          await reader.cancel();
+          throw responseTooLarge(requestId);
+        }
+      }
       buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data) continue;
-        if (data === "[DONE]") {
-          if (!finished) { finished = true; yield emit({ type: "finish", finishReason: "stop", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) }); }
-          return;
-        }
-        const chunk = JSON.parse(data) as unknown;
-        for (const event of streamChunkEvents(chunk, requestId, identity, undefined)) {
-          if (event.type === "finish") finished = true;
-          yield emit(event);
-        }
+      for (const line of lines) yield* processLine(line);
+      if (next.done) {
+        if (buffer.length > 0) yield* processLine(buffer);
+        yield* dispatch();
+        break;
       }
-      if (next.done) break;
     }
     if (!finished) yield emit({ type: "finish", finishReason: "stop", ...(requestId === undefined ? {} : { requestId }), ...(identity === undefined ? {} : { identity }) });
   } finally {
@@ -349,13 +506,22 @@ function responseMetadata(value: JsonRecord): ProviderMetadata | undefined {
 function responseUsage(value: unknown, requestId: string | undefined): ProviderUsageInput {
   if (value === undefined) return {};
   if (!isRecord(value)) throw malformed("usage", requestId);
+  if (!has(value, "prompt_tokens") || !has(value, "completion_tokens")) {
+    throw malformed("usage", requestId);
+  }
   const promptDetails = value.prompt_tokens_details;
   const completionDetails = value.completion_tokens_details;
   if (promptDetails !== undefined && !isRecord(promptDetails)) throw malformed("usage.prompt_tokens_details", requestId);
   if (completionDetails !== undefined && !isRecord(completionDetails)) {
     throw malformed("usage.completion_tokens_details", requestId);
   }
+  const inputTokens = optionalNumber(value, "prompt_tokens", "usage", requestId);
+  const outputTokens = optionalNumber(value, "completion_tokens", "usage", requestId);
+  if (inputTokens === undefined || outputTokens === undefined) throw malformed("usage", requestId);
   const totalTokens = optionalNumber(value, "total_tokens", "usage", requestId);
+  if (totalTokens !== undefined && totalTokens !== inputTokens + outputTokens) {
+    throw malformed("usage.total_tokens", requestId);
+  }
   const cachedInputTokens = promptDetails === undefined
     ? undefined
     : optionalNumber(promptDetails, "cached_tokens", "usage.prompt_tokens_details", requestId);
@@ -369,8 +535,8 @@ function responseUsage(value: unknown, requestId: string | undefined): ProviderU
     ? undefined
     : optionalNumber(promptDetails, "cache_read_input_tokens", "usage.prompt_tokens_details", requestId);
   return {
-    inputTokens: optionalNumber(value, "prompt_tokens", "usage", requestId) ?? 0,
-    outputTokens: optionalNumber(value, "completion_tokens", "usage", requestId) ?? 0,
+    inputTokens,
+    outputTokens,
     ...(totalTokens === undefined ? {} : { totalTokens }),
     ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
@@ -386,6 +552,7 @@ function responseToolCalls(value: unknown, requestId: string | undefined): Provi
     const path = `choices[0].message.tool_calls[${index}]`;
     if (!isRecord(candidate)) throw malformed(path, requestId);
     const id = requiredString(candidate, "id", path, requestId);
+    if (candidate.type !== "function") throw malformed(`${path}.type`, requestId);
     const functionValue = candidate.function;
     if (!isRecord(functionValue)) throw malformed(`${path}.function`, requestId);
     return {
@@ -406,9 +573,8 @@ function parseResponse(
   }
   const choice = value.choices[0];
   if (!isRecord(choice) || !isRecord(choice.message)) throw malformed("choices[0].message", requestId);
-  if (!has(choice, "finish_reason") || (choice.finish_reason !== null && typeof choice.finish_reason !== "string")) {
-    throw malformed("choices[0].finish_reason", requestId);
-  }
+  if (!has(choice, "finish_reason")) throw malformed("choices[0].finish_reason", requestId);
+  const finishReason = validFinishReason(choice.finish_reason, "choices[0].finish_reason", requestId, true);
   const message = choice.message;
   if (message.role !== "assistant") throw malformed("choices[0].message.role", requestId);
   if (!has(message, "content") || (message.content !== null && typeof message.content !== "string")) {
@@ -429,7 +595,7 @@ function parseResponse(
       ...(toolCalls.length === 0 ? {} : { toolCalls })
     },
     usage: normalizeProviderUsage(responseUsage(value.usage, requestId)),
-    finishReason: normalizeProviderFinishReason(choice.finish_reason === null ? undefined : choice.finish_reason),
+    finishReason: finishReason ?? "unknown",
     ...(reasoning === undefined ? {} : { reasoning }),
     ...(requestId === undefined ? {} : { requestId }),
     ...(identity === undefined ? {} : { identity }),
@@ -477,33 +643,94 @@ function abortRequestError(context: ReturnType<typeof createProviderRequestConte
 }
 
 function endpointFor(baseUrl: string): string {
-  const trimmed = baseUrl.replace(/\/$/, "");
-  return trimmed.endsWith("/chat/completions") ? trimmed : `${trimmed}/chat/completions`;
+  const parsed = new URL(baseUrl);
+  const path = parsed.pathname.replace(/\/$/, "");
+  parsed.pathname = path.endsWith("/chat/completions") ? path : `${path}/chat/completions`;
+  return parsed.toString();
+}
+
+async function resolveCredentials(
+  options: OpenAICompatibleProviderOptions,
+  requestId: string | undefined,
+  signal: AbortSignal
+): Promise<OpenAICompatibleCredentials> {
+  if (options.credentials !== undefined) return options.credentials;
+  try {
+    const credentials = await abortable(
+      Promise.resolve(options.resolveCredentialHandle?.(options.credentialHandle as string)),
+      signal
+    );
+    if (credentials === undefined || typeof credentials.apiKey !== "string" || credentials.apiKey.trim().length === 0) {
+      throw new Error("invalid credentials");
+    }
+    return credentials;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw requestError("OpenAI-compatible credential handle could not be resolved", "authentication", requestId);
+  }
+}
+
+function requestHeaders(
+  options: OpenAICompatibleProviderOptions,
+  credentials: OpenAICompatibleCredentials,
+  requestId: string | undefined
+): Headers {
+  const headers = new Headers(options.headers);
+  headers.set("content-type", "application/json");
+  headers.set("authorization", `Bearer ${credentials.apiKey}`);
+  if (credentials.organization !== undefined) headers.set("OpenAI-Organization", credentials.organization);
+  if (credentials.project !== undefined) headers.set("OpenAI-Project", credentials.project);
+  if (requestId !== undefined) headers.set("X-Request-ID", requestId);
+  return headers;
+}
+
+function rejectRedirect(response: Response, requestId: string | undefined): void {
+  if (response.redirected || (response.status >= 300 && response.status < 400)) {
+    throw requestError("OpenAI-compatible redirects are not allowed", "invalid_request", requestId);
+  }
 }
 
 /** Credential-injected, non-streaming adapter for OpenAI-compatible chat APIs. */
 export function createOpenAICompatibleProvider(options: OpenAICompatibleProviderOptions): ChatProvider {
   if (options.baseUrl.trim().length === 0) throw new TypeError("baseUrl must be non-empty");
-  if (options.credentials.apiKey.trim().length === 0) throw new TypeError("credentials.apiKey must be non-empty");
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(options.baseUrl);
+  } catch {
+    throw new TypeError("baseUrl must be a valid URL");
+  }
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") throw new TypeError("baseUrl must use http(s)");
+  if (baseUrl.username.length > 0 || baseUrl.password.length > 0 || baseUrl.search.length > 0 || baseUrl.hash.length > 0) {
+    throw new TypeError("baseUrl must not contain credentials or query state");
+  }
+  if ((options.credentials === undefined) === (options.credentialHandle === undefined)) {
+    throw new TypeError("provide exactly one of credentials or credentialHandle");
+  }
+  if (options.credentialHandle !== undefined && options.credentialHandle.trim().length === 0) {
+    throw new TypeError("credentialHandle must be non-empty");
+  }
+  if (options.credentialHandle !== undefined && options.resolveCredentialHandle === undefined) {
+    throw new TypeError("resolveCredentialHandle is required for credentialHandle");
+  }
+  if (options.credentials !== undefined && options.credentials.apiKey.trim().length === 0) {
+    throw new TypeError("credentials.apiKey must be non-empty");
+  }
+  const maxResponseBytes = validateResponseLimit(options.maxResponseBytes, "maxResponseBytes", 1_048_576);
+  const maxSseEventBytes = validateResponseLimit(options.maxSseEventBytes, "maxSseEventBytes", 262_144);
+  for (const [name, value] of Object.entries(options.headers ?? {})) assertSafeHeader(name, value);
+  const endpoint = endpointFor(baseUrl.toString());
 
   return {
     async complete(request: ProviderRequest): Promise<ProviderResult> {
       validateProviderRequest(request);
       const context = createProviderRequestContext(request);
       const requestId = context.requestId;
-      const headers: Record<string, string> = {
-        "content-type": "application/json",
-        authorization: `Bearer ${options.credentials.apiKey}`,
-        ...options.headers
-      };
-      if (options.credentials.organization !== undefined) headers["OpenAI-Organization"] = options.credentials.organization;
-      if (options.credentials.project !== undefined) headers["OpenAI-Project"] = options.credentials.project;
-      if (requestId !== undefined) headers["X-Request-ID"] = requestId;
 
       let body: string;
       try {
         body = JSON.stringify(serializeRequest(request));
       } catch (error) {
+        context.dispose();
         throw requestError(
           "Invalid OpenAI-compatible request content",
           "invalid_request",
@@ -513,14 +740,17 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
 
       try {
         if (context.signal.aborted) throw abortRequestError(context);
+        const credentials = await resolveCredentials(options, requestId, context.signal);
+        const headers = requestHeaders(options, credentials, requestId);
         let response: Response;
         try {
-          response = await options.fetch(endpointFor(options.baseUrl), {
+          response = await abortable(options.fetch(endpoint, {
             method: "POST",
             headers,
             body,
-            signal: context.signal
-          });
+            signal: context.signal,
+            redirect: "error"
+          }), context.signal);
         } catch (error) {
           if (context.signal.aborted) {
             throw abortRequestError(context);
@@ -532,12 +762,16 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
           );
         }
 
+        rejectRedirect(response, requestId);
+
         if (!response.ok) {
           const responseId = requestIdFromResponse(response, requestId);
           let body: unknown;
           try {
-            body = await response.json();
+            const text = await responseText(response, maxResponseBytes, context.signal, responseId, false);
+            body = text === undefined || text.length === 0 ? undefined : JSON.parse(text) as unknown;
           } catch {
+            if (context.signal.aborted) throw abortRequestError(context);
             body = undefined;
           }
           throw classifiedRequestError(
@@ -553,8 +787,10 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
 
         let payload: unknown;
         try {
-          payload = await response.json();
-        } catch {
+          const text = await responseText(response, maxResponseBytes, context.signal, requestId);
+          payload = JSON.parse(text ?? "") as unknown;
+        } catch (error) {
+          if (error instanceof ProviderError) throw error;
           if (context.signal.aborted) throw abortRequestError(context);
           throw malformed("body", requestId);
         }
@@ -579,31 +815,35 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
       const context = createProviderRequestContext(request);
       const requestId = context.requestId;
       return (async function* (): AsyncIterable<ProviderStreamEvent> {
-        const headers: Record<string, string> = {
-          "content-type": "application/json",
-          authorization: `Bearer ${options.credentials.apiKey}`,
-          ...options.headers,
-        };
-        if (options.credentials.organization !== undefined) headers["OpenAI-Organization"] = options.credentials.organization;
-        if (options.credentials.project !== undefined) headers["OpenAI-Project"] = options.credentials.project;
-        if (requestId !== undefined) headers["X-Request-ID"] = requestId;
         try {
           if (context.signal.aborted) throw abortRequestError(context);
-          const response = await options.fetch(endpointFor(options.baseUrl), {
+          const credentials = await resolveCredentials(options, requestId, context.signal);
+          const headers = requestHeaders(options, credentials, requestId);
+          const response = await abortable(options.fetch(endpoint, {
             method: "POST",
             headers,
             body: JSON.stringify(serializeRequest(request, true)),
             signal: context.signal,
-          });
+            redirect: "error"
+          }), context.signal);
+          rejectRedirect(response, requestId);
           if (!response.ok) {
             const responseId = requestIdFromResponse(response, requestId);
+            let errorBody: unknown;
+            try {
+              const text = await responseText(response, maxResponseBytes, context.signal, responseId, false);
+              errorBody = text === undefined || text.length === 0 ? undefined : JSON.parse(text) as unknown;
+            } catch {
+              if (context.signal.aborted) throw abortRequestError(context);
+              errorBody = undefined;
+            }
             throw classifiedRequestError(
               `OpenAI-compatible request failed with status ${response.status}`,
               new Error("OpenAI-compatible provider request failed"),
-              { ...(responseId === undefined ? {} : { requestId: responseId }), statusCode: response.status },
+              { ...(responseId === undefined ? {} : { requestId: responseId }), statusCode: response.status, body: errorBody },
             );
           }
-          yield* streamOpenAIResponse(response, requestIdFromResponse(response, requestId), request.identity, context.signal);
+          yield* streamOpenAIResponse(response, requestIdFromResponse(response, requestId), request.identity, context.signal, maxResponseBytes, maxSseEventBytes);
         } catch (error) {
           if (error instanceof ProviderError) throw error;
           if (context.signal.aborted) throw abortRequestError(context);

@@ -6,13 +6,6 @@ import path from 'node:path'
 import { test } from 'vitest'
 
 import {
-  createAllowlistedEnvironment,
-  createPythonToolBridgeExecutor,
-  PythonToolBridge,
-  PythonToolBridgeError,
-  type PythonToolBridgeRequest,
-} from '../../packages/api-gateway/src/python-bridge'
-import {
   createRecordedResponseProvider,
   type ProviderContentPart,
   type ProviderRequest,
@@ -61,20 +54,6 @@ type ToolSafetyFixture = {
   timeoutMs: number
   timeoutToolName: string
   timeoutCallId: string
-}
-
-type PythonFixture = {
-  requestId: string
-  sessionId: string
-  toolName: string
-  toolCallId: string
-  reference: string
-  cwd: string
-  safeEnvironment: Record<string, string>
-  secretEnvironment: Record<string, string>
-  deadlineMs: number
-  arguments: Record<string, string>
-  result: string
 }
 
 type RecordedFixture = {
@@ -350,95 +329,40 @@ test('tool timeout aborts the executor and prevents provider continuation', asyn
   assert.equal(events.filter(event => event.type === 'terminal').length, 1)
 })
 
-test('Python bridge sends a versioned correlated call with only allowlisted environment', async () => {
-  const data = fixture<PythonFixture>('python-bridge.json')
-  const requests: PythonToolBridgeRequest[] = []
-  const deadline = Date.now() + data.deadlineMs
+test('native shell tool fails closed before spawning an unallowlisted command', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-shell-migration-'))
+  const executable = fs.realpathSync('/usr/bin/printf')
+  let spawned = false
 
-  const bridge = new PythonToolBridge({
-    async send(request) {
-      requests.push(request)
+  try {
+    const runtimeModule = () => '../../packages/tool-runtime/src/index'
+    const { createShellTool } = await import(runtimeModule())
+    const tool = createShellTool({
+      policy: {
+        allowedCommands: [{ executable, argumentPrefix: ['safe'] }],
+        executableRoots: ['/usr/bin'],
+        cwdRoots: [cwd],
+        maxTimeoutMs: 1_000,
+        maxOutputBytes: 128,
+      },
+      processPort: {
+        spawn() {
+          spawned = true
+          throw new Error('unallowlisted command was spawned')
+        },
+        terminate() {},
+      },
+    })
 
-      return {
-        protocolVersion: 1,
-        type: 'tool.result',
-        requestId: request.requestId,
-        toolCallId: request.toolCallId,
-        content: data.result,
-      }
-    },
-  })
-
-  const executor = createPythonToolBridgeExecutor({
-    bridge,
-    tools: [{ name: data.toolName, reference: data.reference }],
-    cwd: data.cwd,
-    environment: data.secretEnvironment,
-    environmentAllowlist: Object.keys(data.safeEnvironment),
-    deadline: () => deadline,
-  })
-
-  const execution: HarnessToolExecution = {
-    requestId: data.requestId,
-    sessionId: data.sessionId,
-    call: { id: data.toolCallId, name: data.toolName, arguments: JSON.stringify(data.arguments) },
-    arguments: data.arguments,
-    signal: new AbortController().signal,
+    const executableHandle = tool.executable as { handle: { execute: (...args: unknown[]) => Promise<unknown> } }
+    await assert.rejects(
+      executableHandle.handle.execute({ argv: [executable, 'unsafe'], cwd }),
+      /allowlisted/,
+    )
+    assert.equal(spawned, false)
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true })
   }
-
-  assert.deepEqual(await executor(execution), { content: data.result })
-  assert.equal(requests.length, 1)
-  assert.deepEqual(requests[0], {
-    protocolVersion: 1,
-    type: 'tool.call',
-    requestId: data.requestId,
-    toolCallId: data.toolCallId,
-    tool: { name: data.toolName, reference: data.reference },
-    arguments: data.arguments,
-    cwd: data.cwd,
-    env: data.safeEnvironment,
-    deadline,
-  })
-  assert.equal(requests[0]?.deadline, deadline)
-  assert.equal(Object.isFrozen(requests[0]?.env), true)
-  assert.equal('PYTHON_SECRET' in (requests[0]?.env ?? {}), false)
-})
-
-test('Python bridge rejects unsafe calls and mismatched protocol responses', async () => {
-  const data = fixture<PythonFixture>('python-bridge.json')
-  const invalidCwd = new PythonToolBridge({ send: async () => undefined })
-
-  const call = {
-    requestId: data.requestId,
-    toolCallId: data.toolCallId,
-    tool: { name: data.toolName, reference: data.reference },
-    arguments: data.arguments,
-    cwd: 'relative/path',
-    env: {},
-    deadline: Date.now() + data.deadlineMs,
-  }
-
-  await assert.rejects(invalidCwd.execute(call), error => error instanceof TypeError)
-
-  const mismatched = new PythonToolBridge({
-    send: async request => ({
-      protocolVersion: 99,
-      type: 'tool.result',
-      requestId: request.requestId,
-      toolCallId: request.toolCallId,
-      content: 'not accepted',
-    }),
-  })
-
-  await assert.rejects(mismatched.execute({ ...call, cwd: data.cwd }), error =>
-    error instanceof PythonToolBridgeError && error.code === 'protocol_mismatch'
-  )
-
-  assert.deepEqual(createAllowlistedEnvironment(data.secretEnvironment, ['HERMES_FIXTURE']), data.safeEnvironment)
-  assert.throws(
-    () => createAllowlistedEnvironment(data.secretEnvironment, ['BAD-NAME']),
-    /allowlist is invalid/
-  )
 })
 
 test('recorded response provider normalizes omitted usage counters and retains request identity', async () => {

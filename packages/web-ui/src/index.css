@@ -97,6 +97,133 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
   overflow: hidden;
 }
 
+/* Setup uses the same semantic theme tokens as the authenticated workspace,
+   so the first-run flow does not switch to a separate visual language. */
+.setup-page {
+  background: var(--background-base);
+  color: var(--midground-base);
+}
+
+.setup-card {
+  border: 1px solid var(--color-border, color-mix(in srgb, var(--midground-base) 28%, transparent));
+  background: var(--color-card, color-mix(in srgb, var(--midground-base) 4%, var(--background-base)));
+  box-shadow: 0 24px 80px color-mix(in srgb, var(--background-base) 72%, black);
+}
+
+.setup-icon {
+  background: var(--color-primary, var(--midground-base));
+  color: var(--color-primary-foreground, var(--background-base));
+}
+
+.setup-eyebrow,
+.setup-label {
+  color: var(--color-muted-foreground, var(--midground-base));
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.setup-eyebrow {
+  margin: 0;
+  letter-spacing: 0.24em;
+}
+
+.setup-copy,
+.setup-help {
+  color: var(--color-muted-foreground, var(--midground-base));
+}
+
+.setup-copy {
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+}
+
+.setup-input {
+  display: block;
+  border: 1px solid var(--color-input, color-mix(in srgb, var(--midground-base) 28%, transparent));
+  border-radius: var(--theme-radius);
+  background: var(--background-base);
+  color: var(--midground-base);
+  padding: 0.75rem;
+  font-size: 0.875rem;
+  letter-spacing: normal;
+  outline: none;
+}
+
+.setup-input:focus {
+  border-color: var(--color-ring, var(--midground-base));
+}
+
+.setup-step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--theme-radius);
+  color: var(--color-muted-foreground, var(--midground-base));
+  padding: 0.625rem 0.75rem;
+  font-size: 0.8125rem;
+  text-align: left;
+}
+
+.setup-step:hover:not(:disabled),
+.setup-step-active {
+  background: var(--color-secondary, color-mix(in srgb, var(--midground-base) 8%, transparent));
+  color: var(--color-secondary-foreground, var(--midground-base));
+}
+
+.setup-step:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.setup-step-number {
+  display: inline-flex;
+  width: 1.35rem;
+  height: 1.35rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.7rem;
+}
+
+.setup-option {
+  border: 1px solid var(--color-border, color-mix(in srgb, var(--midground-base) 28%, transparent));
+  background: var(--background-base);
+}
+
+.setup-option input {
+  accent-color: var(--color-primary, var(--midground-base));
+}
+
+.setup-error {
+  border: 1px solid color-mix(in srgb, var(--color-destructive, #f7768e) 32%, transparent);
+  border-radius: var(--theme-radius);
+  background: color-mix(in srgb, var(--color-destructive, #f7768e) 12%, transparent);
+  color: var(--color-destructive-foreground, var(--midground-base));
+  padding: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.setup-primary {
+  border-radius: var(--theme-radius);
+  background: var(--color-primary, var(--midground-base));
+  color: var(--color-primary-foreground, var(--background-base));
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: opacity 150ms ease;
+}
+
+.setup-primary:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
+.setup-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 @media (max-width: 768px) {
   html,
   body,

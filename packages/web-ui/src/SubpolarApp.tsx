@@ -129,21 +129,21 @@ function AuthScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     }
   }
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#07191a] px-5 text-[#f5eadc]">
+    <main className="setup-page flex min-h-screen items-center justify-center px-5">
       <form
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#102627] p-8 shadow-2xl"
+        className="setup-card w-full max-w-md rounded-2xl p-8 shadow-2xl"
       >
-        <Sparkles className="mb-5 text-[#70d7cc]" />
+        <Sparkles className="setup-icon mb-5 rounded-xl p-2" size={38} />
         <h1 className="text-2xl font-semibold">{isBootstrap ? 'Create administrator' : 'Welcome back'}</h1>
-        <p className="mb-6 mt-2 text-sm text-[#91aaa0]">Private Subpolar workspace.</p>
+        <p className="setup-copy mb-6 mt-2">Private Subpolar workspace.</p>
         <input
           value={username}
           onChange={e => setUsername(e.target.value)}
           required
           minLength={3}
           placeholder="Username"
-          className="mb-3 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-3 outline-none focus:border-[#70d7cc]"
+          className="setup-input mb-3 w-full"
         />
         <input
           value={password}
@@ -152,16 +152,16 @@ function AuthScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
           required
           minLength={8}
           placeholder="Password"
-          className="mb-4 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-3 outline-none focus:border-[#70d7cc]"
+          className="setup-input mb-4 w-full"
         />
         {error && (
-          <p role="alert" className="mb-4 text-sm text-red-300">
+          <p role="alert" className="setup-error mb-4">
             {error}
           </p>
         )}
         <button
           disabled={busy}
-          className="w-full rounded-lg bg-[#a9ddd5] px-4 py-3 font-semibold text-[#102627] disabled:opacity-50"
+          className="setup-primary w-full"
         >
           {busy ? 'Working...' : isBootstrap ? 'Create account' : 'Sign in'}
         </button>
@@ -969,11 +969,19 @@ export default function SubpolarApp() {
     [authMode, setAuthMode] = useState<AuthMode>('login'),
     [setupComplete, setSetupComplete] = useState(false),
     [loading, setLoading] = useState(true)
+
+  function navigate(path: string, replace = false): void {
+    if (typeof window === 'undefined' || window.location.pathname === path) return
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', path)
+  }
+
   useEffect(() => {
     void currentUser()
       .then(async r => {
+        const setup = await setupStatus()
         setUser(r.user)
-        setSetupComplete((await setupStatus()).complete)
+        setSetupComplete(setup.complete)
+        if (!setup.complete) navigate('/setup', true)
       })
       .catch(async reason => {
         if (!(reason instanceof SubpolarApiError) || reason.status !== 401) return
@@ -996,17 +1004,22 @@ export default function SubpolarApp() {
       <AuthScreen
         mode={authMode}
         onAuthenticated={async authenticated => {
+          const setup = await setupStatus()
           setUser(authenticated)
-          setSetupComplete((await setupStatus()).complete)
+          setSetupComplete(setup.complete)
+          navigate(setup.complete ? '/' : '/setup', true)
         }}
       />
     )
-  if (!setupComplete) return <ProviderSetupScreen onComplete={() => setSetupComplete(true)} />
+  if (!setupComplete) return <ProviderSetupScreen onComplete={() => { setSetupComplete(true); navigate('/', true) }} />
   return (
     <Workspace
       user={user}
       onLogout={() => {
-        void logout().finally(() => setUser(null))
+        void logout().finally(() => {
+          setUser(null)
+          navigate('/', true)
+        })
       }}
     />
   )

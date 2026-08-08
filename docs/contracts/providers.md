@@ -68,19 +68,31 @@ without exposing raw provider credentials or unclassified provider errors.
 metadata only:
 
 ```ts
-  slug: string;
+  id: string;
+  aliases?: readonly string[];
   label: string;
   description: string;
-  authType: "api_key" | "oauth" | "external_process" | "virtual";
+  apiMode: "chat_completions" | "anthropic_messages" | "codex_responses" | "bedrock_converse";
+  authType: "api_key" | "oauth" | "copilot" | "aws_sdk" | "external_process";
   baseUrl?: string;
+  modelsUrl?: string;
+  fallbackModels?: readonly string[];
+  capabilities?: { vision?: boolean; toolCalling?: boolean; reasoning?: boolean };
+  request?: Record<string, unknown>;
 };
 ```
 
-The Wave 0 server executes the stored connection through its OpenAI-compatible
-provider adapter. A catalog `oauth`, `external_process`, or `virtual` label is
-not by itself an implemented credential or routing flow; those entries remain
-metadata until an adapter is explicitly supplied. The configured base URL and
-credentials are never returned by setup, `/v1/me`, or chat responses.
+The runtime resolves a `ProviderConnection` (`providerId`, model, endpoint, and
+opaque credential handle) to a profile and selects the shared transport for its
+`apiMode`. Chat Completions providers share the existing OpenAI-compatible
+adapter; Anthropic Messages, Responses, and Bedrock Converse have native
+adapters. The configured endpoint and credentials are never returned by setup,
+`/v1/me`, or chat responses.
+
+`GET /v1/providers` is an alias intended for settings clients. Model discovery
+is available through `GET /v1/models` and
+`GET /v1/providers/:providerId/models`; live catalogs fall back to the model
+profile and the configured model.
 
 ## Failure Boundary
 

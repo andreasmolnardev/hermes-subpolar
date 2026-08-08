@@ -7,9 +7,14 @@
   creation now requires a persisted icon selection.
 - Added provider-backed model discovery and model, effort, agent, and permission
   controls to the expanded thread composer.
- - Added shared Hermes model-provider catalog and authenticated setup catalog
-    endpoint. First-run setup now lists same provider universe as provider
-    settings and persists selected provider alongside connection credentials.
+- Added a declarative Hermes-style provider registry with API mode, auth,
+  capabilities, fallback models, request behavior, and endpoint metadata. The
+  runtime now resolves provider profiles separately from encrypted connection
+  credentials and selects shared Chat Completions, Anthropic Messages,
+  Responses, or Bedrock Converse transports.
+- Added authenticated `/v1/providers` and `/v1/providers/:providerId/models`
+  endpoints. First-run setup and model settings consume provider IDs and the
+  same registry, while model discovery falls back to profile catalogs.
 - First-run authentication now routes incomplete accounts through `/setup` and
   `/setup/agents` inside one theme-aware card. The existing ThemeProvider is
   mounted for the web UI, with Tokyo Night remaining the default theme.
@@ -38,6 +43,8 @@
 - Remaining stale Python caches, launcher/install-test artifacts, provider/MCP
   catalogs, desktop specification, and empty runtime log were removed.
 - Historical Python sources were removed under the retirement ledger.
+- Provider credentials remain encrypted at rest; AWS credentials for Bedrock
+  are accepted as a server-side credential object and signed with SigV4.
 
 ## Verification
 

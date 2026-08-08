@@ -43,14 +43,18 @@ export type OwnedSessionRecord = {
 };
 
 export type ProviderConnection = {
-  readonly provider: string;
+  readonly providerId: string;
   readonly baseUrl: string;
   readonly credentialHandle: string;
   readonly model: string;
 };
 
 export type ProviderCredentials = {
-  readonly apiKey: string;
+  readonly apiKey?: string;
+  readonly accessKeyId?: string;
+  readonly secretAccessKey?: string;
+  readonly sessionToken?: string;
+  readonly region?: string;
 };
 
 export type SetupStatus = {
@@ -137,7 +141,13 @@ CREATE TABLE IF NOT EXISTS provider_connections (
 );
 `;
 
-const SUPPORTED_PROVIDER = "openai-api";
+// Keep persistence independent from the runtime/profile package boundary.
+const SUPPORTED_PROVIDER_IDS = new Set([
+  "openai-api", "openrouter", "deepseek", "xai", "nvidia", "fireworks", "groq",
+  "together", "mistral", "perplexity", "moonshot", "anthropic", "openai-responses",
+  "bedrock", "custom"
+]);
+
 const CREDENTIAL_KEY_BYTES = 32;
 const CREDENTIAL_IV_BYTES = 12;
 const CREDENTIAL_TAG_BYTES = 16;
@@ -180,15 +190,15 @@ function providerCredentialKey(path: string | null, createIfMissing: boolean): B
   }
 }
 
-function encryptCredential(apiKey: string, key: Buffer): string {
+function encryptCredential(credentials: ProviderCredentials, key: Buffer): string {
   const iv = randomBytes(CREDENTIAL_IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   cipher.setAAD(CREDENTIAL_AAD);
-  const ciphertext = Buffer.concat([cipher.update(apiKey, "utf8"), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(credentials), "utf8"), cipher.final()]);
   return [iv, cipher.getAuthTag(), ciphertext].map(part => part.toString("base64url")).join(".");
 }
 
-function decryptCredential(value: string, key: Buffer): string {
+function decryptCredential(value: string, key: Buffer): ProviderCredentials {
   try {
     const parts = value.split(".");
     if (parts.length !== 3) throw new Error("invalid credential");
@@ -203,22 +213,31 @@ function decryptCredential(value: string, key: Buffer): string {
     decipher.setAuthTag(tag);
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
     if (plaintext.trim().length === 0) throw new Error("invalid credential");
-    return plaintext;
+    try {
+      const parsed: unknown = JSON.parse(plaintext);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as ProviderCredentials;
+    } catch {
+      // Credentials written before the provider registry stored the API key directly.
+    }
+    return { apiKey: plaintext };
   } catch {
     throw new Error("provider credential is unavailable");
   }
 }
 
 function providerSlug(value: unknown): string {
-  if (typeof value !== "string" || value.trim() !== SUPPORTED_PROVIDER) throw new Error("provider is invalid");
-  return SUPPORTED_PROVIDER;
+  if (typeof value !== "string") throw new Error("provider is invalid");
+  const normalized = value.trim().toLowerCase();
+  if (!SUPPORTED_PROVIDER_IDS.has(normalized)) throw new Error("provider is invalid");
+  return normalized;
 }
 
 function providerBaseUrl(value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0) throw new Error("provider URL is invalid");
+  const candidate = value;
+  if (typeof candidate !== "string" || candidate.trim().length === 0) throw new Error("provider URL is invalid");
   let parsed: URL;
-  try { parsed = new URL(value); } catch { throw new Error("provider URL is invalid"); }
-  if (value.includes("@") || value.includes("?") || value.includes("#") || parsed.username.length > 0 || parsed.password.length > 0 || parsed.search.length > 0 || parsed.hash.length > 0) {
+  try { parsed = new URL(candidate); } catch { throw new Error("provider URL is invalid"); }
+  if (candidate.includes("@") || candidate.includes("?") || candidate.includes("#") || parsed.username.length > 0 || parsed.password.length > 0 || parsed.search.length > 0 || parsed.hash.length > 0) {
     throw new Error("provider URL must not contain credentials or query state");
   }
   if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname))) {
@@ -227,9 +246,15 @@ function providerBaseUrl(value: unknown): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
-function providerCredential(value: unknown): string {
+function providerCredential(value: unknown): ProviderCredentials {
   if (typeof value !== "string" || value.trim().length === 0) throw new Error("provider credential is invalid");
-  return value;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as ProviderCredentials;
+  } catch {
+    // API keys and OAuth access tokens are intentionally opaque strings.
+  }
+  return { apiKey: value };
 }
 
 function providerModel(value: unknown): string {
@@ -455,7 +480,7 @@ export class SQLiteIdentityRepository {
     if (row === null) return null;
     const provider = providerSlug(row.provider);
     decryptCredential(row.credential_ciphertext, this.key());
-    return { provider, baseUrl: row.base_url, credentialHandle: `${provider}:default`, model: row.model };
+    return { providerId: provider, baseUrl: row.base_url, credentialHandle: `${provider}:default`, model: row.model };
   }
 
   configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): void {
@@ -471,12 +496,13 @@ export class SQLiteIdentityRepository {
   }
 
   resolveCredentialHandle(handle: string): ProviderCredentials {
-    if (typeof handle !== "string" || handle !== `${SUPPORTED_PROVIDER}:default`) throw new Error("credential handle is invalid");
+    if (typeof handle !== "string" || !/^[-a-z0-9]+:default$/.test(handle)) throw new Error("credential handle is invalid");
+    const provider = handle.slice(0, -":default".length);
     const row = this.db.query<{ provider: string; credential_ciphertext: string }, []>(
       "SELECT provider, credential_ciphertext FROM provider_connections WHERE id = 1",
     ).get();
-    if (row === null || row.provider !== SUPPORTED_PROVIDER) throw new Error("provider credential is unavailable");
-    return { apiKey: decryptCredential(row.credential_ciphertext, this.key()) };
+    if (row === null || row.provider !== provider) throw new Error("provider credential is unavailable");
+    return decryptCredential(row.credential_ciphertext, this.key());
   }
 
   createInitialAgents(userId: string, templates: readonly string[]): { project: ProjectRecord; agents: readonly AgentRecord[] } {

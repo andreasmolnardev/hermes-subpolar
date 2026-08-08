@@ -508,9 +508,9 @@ function Chat({
               >
                 <option value="default">Default model</option>
                 {modelProviders.map(provider => (
-                  <optgroup key={provider.slug} label={provider.slug}>
+                  <optgroup key={provider.id} label={provider.id}>
                     {provider.models.map(option => (
-                      <option key={`${provider.slug}:${option.id}`} value={option.id}>
+                      <option key={`${provider.id}:${option.id}`} value={option.id}>
                         {option.label}
                       </option>
                     ))}

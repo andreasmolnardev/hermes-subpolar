@@ -43,7 +43,7 @@ function SetupCard({ step, canOpenAgents, onStep, children }: { step: SetupStep;
 export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<SetupStep>(stepFromPath);
   const [providers, setProviders] = useState<readonly ModelProviderDefinition[]>([]);
-  const [provider, setProvider] = useState("openai-api");
+  const [providerId, setProviderId] = useState("openai-api");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("gpt-4.1-mini");
@@ -62,10 +62,11 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
         if (!status.providerConfigured && stepFromPath() === "agents") {
           navigate("provider", true);
         }
-        const selected = catalog.providers.find(item => item.slug === "openai-api") ?? catalog.providers[0];
+        const selected = catalog.providers.find(item => item.id === "openai-api") ?? catalog.providers[0];
         if (selected === undefined) return;
-        setProvider(selected.slug);
+        setProviderId(selected.id);
         setBaseUrl(selected.baseUrl ?? "");
+        setModel(selected.fallbackModels?.[0] ?? "");
       })
       .catch(() => setError("Could not load setup configuration."));
     return () => window.removeEventListener("popstate", onPopState);
@@ -80,9 +81,10 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
   }
 
   function selectProvider(slug: string): void {
-    const selected = providers.find(item => item.slug === slug);
-    setProvider(slug);
+    const selected = providers.find(item => item.id === slug);
+    setProviderId(slug);
     setBaseUrl(selected?.baseUrl ?? "");
+    setModel(selected?.fallbackModels?.[0] ?? "");
   }
 
   async function submitProvider(event: FormEvent): Promise<void> {
@@ -90,7 +92,7 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
     setBusy(true);
     setError(null);
     try {
-      await configureProvider(provider, baseUrl, apiKey, model);
+      await configureProvider(providerId, baseUrl, apiKey, model);
       setProviderConfigured(true);
       navigate("agents");
     } catch {
@@ -114,7 +116,7 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
     }
   }
 
-  const selectedProvider = providers.find(item => item.slug === provider);
+  const selectedProvider = providers.find(item => item.id === providerId);
 
   return (
     <SetupCard step={step} canOpenAgents={providerConfigured} onStep={next => navigate(next)}>
@@ -122,11 +124,11 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
         <form onSubmit={submitProvider}>
           <p className="setup-copy mb-6">Choose from the same provider catalog used by Hermes provider settings. Credentials stay on this server and are never sent back to the browser.</p>
           <label className="setup-label mb-4">Provider
-            <select value={provider} onChange={event => selectProvider(event.target.value)} disabled={providers.length === 0} className="setup-input mt-2 w-full"><option value="">Select a provider</option>{providers.map(item => <option key={item.slug} value={item.slug}>{item.label}</option>)}</select>
+              <select value={providerId} onChange={event => selectProvider(event.target.value)} disabled={providers.length === 0} className="setup-input mt-2 w-full"><option value="">Select a provider</option>{providers.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
           </label>
           {selectedProvider?.description !== undefined ? <p className="setup-help -mt-2 mb-4">{selectedProvider.description}</p> : null}
           <label className="setup-label mb-4">Base URL<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} type="url" required className="setup-input mt-2 w-full" /></label>
-          <label className="setup-label mb-4">API key or access token<input value={apiKey} onChange={event => setApiKey(event.target.value)} type="password" autoComplete="off" required className="setup-input mt-2 w-full" /></label>
+           <label className="setup-label mb-4">{selectedProvider?.authType === "aws_sdk" ? "AWS credentials JSON" : selectedProvider?.authType === "oauth" ? "Access token" : "API key"}<input value={apiKey} onChange={event => setApiKey(event.target.value)} type="password" autoComplete="off" required className="setup-input mt-2 w-full" /></label>
           <label className="setup-label mb-5">Default model<input value={model} onChange={event => setModel(event.target.value)} required className="setup-input mt-2 w-full" /></label>
           {error !== null ? <p role="alert" className="setup-error mb-4">{error}</p> : null}
           <button disabled={busy || providers.length === 0} className="setup-primary w-full">{busy ? "Working..." : "Continue"}</button>

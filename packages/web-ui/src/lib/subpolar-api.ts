@@ -65,11 +65,11 @@ export function setupProviders(): Promise<{ readonly providers: readonly ModelPr
   return subpolarRequest("/v1/setup/providers");
 }
 
-export function configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): Promise<{ readonly configured: true }> {
-  return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ provider, baseUrl, apiKey, model }) });
+export function configureProvider(providerId: string, baseUrl: string, apiKey: string, model: string): Promise<{ readonly configured: true }> {
+  return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ providerId, baseUrl, apiKey, model }) });
 }
 
-export type SubpolarModelProvider = { readonly slug: string; readonly models: readonly { readonly id: string; readonly label: string }[] };
+export type SubpolarModelProvider = { readonly id: string; readonly models: readonly { readonly id: string; readonly label: string }[] };
 
 export function availableModels(): Promise<{ readonly providers: readonly SubpolarModelProvider[] }> {
   return subpolarRequest("/v1/models");

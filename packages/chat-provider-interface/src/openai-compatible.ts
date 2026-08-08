@@ -52,6 +52,8 @@ export type OpenAICompatibleProviderOptions = {
   readonly resolveCredentialHandle?: OpenAICompatibleCredentialResolver;
   readonly fetch: OpenAICompatibleFetch;
   readonly headers?: Readonly<Record<string, string>>;
+  /** Declarative provider-specific fields merged into the request body. */
+  readonly extraBody?: Readonly<Record<string, unknown>>;
   /** Maximum non-streaming response and streaming response bytes. */
   readonly maxResponseBytes?: number;
   /** Maximum bytes in one SSE event, including an unterminated final event. */
@@ -323,7 +325,7 @@ function serializeResponseFormat(
   };
 }
 
-function serializeRequest(request: ProviderRequest, stream = false): JsonRecord {
+function serializeRequest(request: ProviderRequest, stream = false, extraBody?: Readonly<Record<string, unknown>>): JsonRecord {
   const options = request.options;
   const cacheMetadata = request.cacheHints === undefined ? undefined : {
     ...(request.cacheHints.key === undefined ? {} : { key: request.cacheHints.key }),
@@ -332,6 +334,7 @@ function serializeRequest(request: ProviderRequest, stream = false): JsonRecord 
     ...(request.cacheHints.write === undefined ? {} : { write: request.cacheHints.write })
   };
   return {
+    ...(extraBody ?? {}),
     model: request.model,
     messages: request.messages.map(serializeMessage),
     stream,
@@ -728,7 +731,7 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
 
       let body: string;
       try {
-        body = JSON.stringify(serializeRequest(request));
+        body = JSON.stringify(serializeRequest(request, false, options.extraBody));
       } catch (error) {
         context.dispose();
         throw requestError(
@@ -822,7 +825,7 @@ export function createOpenAICompatibleProvider(options: OpenAICompatibleProvider
           const response = await abortable(options.fetch(endpoint, {
             method: "POST",
             headers,
-            body: JSON.stringify(serializeRequest(request, true)),
+            body: JSON.stringify(serializeRequest(request, true, options.extraBody)),
             signal: context.signal,
             redirect: "error"
           }), context.signal);

@@ -1172,3 +1172,23 @@ export {
   type OpenAICompatibleFetch,
   type OpenAICompatibleProviderOptions
 } from "./openai-compatible";
+
+export {
+  createAnthropicProvider,
+  type AnthropicCredentials,
+  type AnthropicFetch,
+  type AnthropicProviderOptions
+} from "./anthropic";
+
+export {
+  createResponsesProvider,
+  type ResponsesCredentials,
+  type ResponsesProviderOptions
+} from "./responses";
+
+export {
+  createBedrockConverseProvider,
+  type BedrockCredentials,
+  type BedrockProviderOptions,
+  type BedrockSignedRequest
+} from "./bedrock";

@@ -91,6 +91,21 @@
         "responses": { "200": { "description": "Provider catalog", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderCatalog" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
       }
     },
+    "/v1/providers": {
+      "get": {
+        "summary": "List authenticated provider profiles",
+        "security": [{ "sessionCookie": [] }],
+        "responses": { "200": { "description": "Provider catalog", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderCatalog" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/v1/providers/{providerId}/models": {
+      "get": {
+        "summary": "List models for one provider profile",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ProviderId" }],
+        "responses": { "200": { "description": "Provider models", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderModels" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      }
+    },
     "/v1/models": {
       "get": {
         "summary": "List models from the configured provider",
@@ -192,7 +207,8 @@
     },
     "parameters": {
       "ProjectId": { "name": "projectId", "in": "query", "required": false, "schema": { "type": "string", "minLength": 1 } },
-      "SessionId": { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+      "SessionId": { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "ProviderId": { "name": "providerId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
     },
     "requestBodies": {
       "Credentials": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Credentials" } } } },
@@ -233,9 +249,9 @@
       "UserEnvelope": { "type": "object", "required": ["user"], "properties": { "user": { "$ref": "#/components/schemas/User" } }, "additionalProperties": false },
       "SessionCreated": { "type": "object", "required": ["user", "expiresAt"], "properties": { "user": { "$ref": "#/components/schemas/User" }, "expiresAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "SetupStatus": { "type": "object", "required": ["complete", "providerConfigured"], "properties": { "complete": { "type": "boolean" }, "providerConfigured": { "type": "boolean" } }, "additionalProperties": false },
-      "Provider": { "type": "object", "required": ["slug", "label", "description", "authType"], "properties": { "slug": { "type": "string" }, "label": { "type": "string" }, "description": { "type": "string" }, "authType": { "enum": ["api_key", "oauth", "external_process", "virtual"] }, "baseUrl": { "type": "string", "format": "uri" } }, "additionalProperties": false },
+      "Provider": { "type": "object", "required": ["id", "label", "description", "apiMode", "authType"], "properties": { "id": { "type": "string" }, "aliases": { "type": "array", "items": { "type": "string" } }, "label": { "type": "string" }, "description": { "type": "string" }, "apiMode": { "enum": ["chat_completions", "anthropic_messages", "codex_responses", "bedrock_converse"] }, "authType": { "enum": ["api_key", "oauth", "copilot", "aws_sdk", "external_process"] }, "baseUrl": { "type": "string", "format": "uri" }, "modelsUrl": { "type": "string", "format": "uri" }, "fallbackModels": { "type": "array", "items": { "type": "string" } }, "defaultHeaders": { "type": "object", "additionalProperties": { "type": "string" } }, "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } }, "request": { "type": "object", "additionalProperties": true } }, "additionalProperties": false },
       "ProviderCatalog": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/Provider" } } }, "additionalProperties": false },
-      "ProviderSetup": { "type": "object", "required": ["provider", "baseUrl", "apiKey", "model"], "properties": { "provider": { "type": "string" }, "baseUrl": { "type": "string", "format": "uri" }, "apiKey": { "type": "string" }, "model": { "type": "string" } }, "additionalProperties": true },
+      "ProviderSetup": { "type": "object", "required": ["providerId", "apiKey", "model"], "properties": { "providerId": { "type": "string" }, "baseUrl": { "type": "string", "format": "uri" }, "apiKey": { "type": "string" }, "model": { "type": "string" } }, "additionalProperties": true },
       "Configured": { "type": "object", "required": ["configured"], "properties": { "configured": { "const": true } }, "additionalProperties": false },
       "Project": { "type": "object", "required": ["id", "ownerId", "name", "createdAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "name": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "Agent": { "type": "object", "required": ["id", "ownerId", "projectId", "name", "icon", "instructions", "createdAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "projectId": { "type": "string" }, "name": { "type": "string" }, "icon": { "type": "string", "pattern": "^[a-z-]{2,32}$" }, "instructions": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
@@ -243,8 +259,9 @@
       "Projects": { "type": "object", "required": ["projects"], "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "additionalProperties": false },
       "Agents": { "type": "object", "required": ["agents"], "properties": { "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } } }, "additionalProperties": false },
       "Model": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string" }, "label": { "type": "string" } }, "additionalProperties": false },
-      "ModelProvider": { "type": "object", "required": ["slug", "models"], "properties": { "slug": { "type": "string" }, "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } } }, "additionalProperties": false },
+      "ModelProvider": { "type": "object", "required": ["id", "models"], "properties": { "id": { "type": "string" }, "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } } }, "additionalProperties": false },
       "ModelCatalog": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/ModelProvider" } } }, "additionalProperties": false },
+      "ProviderModels": { "type": "object", "required": ["providerId", "models"], "properties": { "providerId": { "type": "string" }, "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } } }, "additionalProperties": false },
       "Sessions": { "type": "object", "required": ["sessions"], "properties": { "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/OwnedSession" } } }, "additionalProperties": false },
       "ProjectEnvelope": { "type": "object", "required": ["project"], "properties": { "project": { "$ref": "#/components/schemas/Project" } }, "additionalProperties": false },
       "AgentEnvelope": { "type": "object", "required": ["agent"], "properties": { "agent": { "$ref": "#/components/schemas/Agent" } }, "additionalProperties": false },

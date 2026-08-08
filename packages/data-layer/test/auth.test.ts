@@ -34,7 +34,7 @@ test("provider credentials are ciphertext behind an opaque handle", () => {
   try {
     repository.configureProvider("openai-api", "https://api.example.test/v1", "secret-api-key", "model");
     assert.deepEqual(repository.providerConnection(), {
-      provider: "openai-api",
+      providerId: "openai-api",
       baseUrl: "https://api.example.test/v1",
       credentialHandle: "openai-api:default",
       model: "model",

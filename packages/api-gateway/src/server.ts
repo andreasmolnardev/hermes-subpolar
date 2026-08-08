@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { createGateway, createGatewayPersistenceAdapter, type GatewayProtocolEvent } from "./index";
-import { createOpenAICompatibleProvider, type ChatProvider, type ProviderMessage } from "chat-provider-interface";
+import { type ChatProvider, type ProviderMessage } from "chat-provider-interface";
 import {
   AuthenticationError,
   IdempotencyConflictError,
@@ -16,7 +16,8 @@ import {
 import type { HarnessApprovalPolicy } from "harness";
 import type { ToolDefinition, ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
-import { MODEL_PROVIDER_CATALOG, modelProvider } from "../../shared/src/model-providers";
+import { modelProvider } from "@hermes/shared/model-providers";
+import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
@@ -230,8 +231,9 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const prepared = await prepareTurn(principal, input);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
+    const runtime = connection === null ? null : await resolveProvider(connection, handle => identity.resolveCredentialHandle(handle));
     return gateway.executeRequest({
-      model: prepared.input.model === "default" && connection !== null ? connection.model : prepared.input.model,
+      model: prepared.input.model === "default" && runtime !== null ? runtime.model : prepared.input.model,
       messages: prepared.input.messages,
       toolPolicies: [],
       toolDefinitions: options.toolDefinitions ?? [],
@@ -263,16 +265,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         await sessions.resolvePendingApproval(approvalRequestId, decision, new Date().toISOString());
         return decision;
       },
-    }, options.provider ?? (() => {
-      // The connection has been validated above and is never returned to clients.
-      const configured = connection as NonNullable<typeof connection>;
-      return createOpenAICompatibleProvider({
-        baseUrl: configured.baseUrl,
-        credentialHandle: configured.credentialHandle,
-        resolveCredentialHandle: handle => identity.resolveCredentialHandle(handle),
-        fetch,
-      });
-    })());
+    }, options.provider ?? createProvider(runtime as NonNullable<typeof runtime>, { resolveCredential: handle => identity.resolveCredentialHandle(handle) }));
   };
 
   const server = Bun.serve<WebSocketData>({
@@ -340,9 +333,9 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         return auth instanceof Response ? auth : json(identity.setupStatus(auth.principal.id));
       }
 
-      if (url.pathname === "/v1/setup/providers" && request.method === "GET") {
+      if ((url.pathname === "/v1/setup/providers" || url.pathname === "/v1/providers") && request.method === "GET") {
         const auth = authenticated(request, identity);
-        return auth instanceof Response ? auth : json({ providers: MODEL_PROVIDER_CATALOG });
+        return auth instanceof Response ? auth : json({ providers: listProviderProfiles() });
       }
 
       if (url.pathname === "/v1/setup/provider" && request.method === "POST") {
@@ -350,9 +343,10 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (auth instanceof Response) return auth;
         try {
           const value = await body(request, maxRequestBytes);
-          const provider = String(value.provider ?? "openai-api");
-          if (modelProvider(provider) === undefined) throw new Error("provider is invalid");
-          identity.configureProvider(provider, String(value.baseUrl ?? ""), String(value.apiKey ?? ""), String(value.model ?? ""));
+          const provider = String(value.providerId ?? value.provider ?? "openai-api");
+          const profile = modelProvider(provider);
+          if (profile === undefined) throw new Error("provider is invalid");
+          identity.configureProvider(profile.id, String(value.baseUrl ?? profile.baseUrl ?? ""), String(value.apiKey ?? ""), String(value.model ?? ""));
           return json({ configured: true });
         } catch { return json({ error: "invalid_provider" }, 400); }
       }
@@ -362,21 +356,21 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (auth instanceof Response) return auth;
         const connection = identity.providerConnection();
         if (connection === null) return json({ providers: [] });
-          const fallback = [{ id: connection.model, label: connection.model }];
-          try {
-            const response = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/models`, {
-              headers: { authorization: `Bearer ${identity.resolveCredentialHandle(connection.credentialHandle).apiKey}` },
-              signal: AbortSignal.timeout(10_000),
-            });
-          if (!response.ok) return json({ providers: [{ slug: connection.provider, models: fallback }] });
-          const payload = await response.json() as { data?: Array<{ id?: unknown }> };
-          const models = [...new Set((payload.data ?? []).map(item => typeof item.id === "string" ? item.id : "").filter(Boolean))]
-            .sort()
-            .map(id => ({ id, label: id }));
-          return json({ providers: [{ slug: connection.provider, models: models.length ? models : fallback }] });
-        } catch {
-          return json({ providers: [{ slug: connection.provider, models: fallback }] });
-        }
+        const runtime = await resolveProvider(connection, handle => identity.resolveCredentialHandle(handle));
+        const models = await listProviderModels(runtime);
+        return json({ providers: [{ id: connection.providerId, models }] });
+      }
+
+      const providerModelsPath = /^\/v1\/providers\/([^/]+)\/models$/.exec(url.pathname);
+      if (providerModelsPath !== null && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        const connection = identity.providerConnection();
+        const profile = modelProvider(decodeURIComponent(providerModelsPath[1] as string));
+        if (profile === undefined) return json({ error: "provider_not_found" }, 404);
+        if (connection === null || connection.providerId !== profile.id) return json({ providerId: profile.id, models: (profile.fallbackModels ?? []).map(id => ({ id, label: id })) });
+        const runtime = await resolveProvider(connection, handle => identity.resolveCredentialHandle(handle));
+        return json({ providerId: profile.id, models: await listProviderModels(runtime) });
       }
 
       if (url.pathname === "/v1/setup/agents" && request.method === "POST") {

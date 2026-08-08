@@ -357,6 +357,28 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         } catch { return json({ error: "invalid_provider" }, 400); }
       }
 
+      if (url.pathname === "/v1/models" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        const connection = identity.providerConnection();
+        if (connection === null) return json({ providers: [] });
+          const fallback = [{ id: connection.model, label: connection.model }];
+          try {
+            const response = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/models`, {
+              headers: { authorization: `Bearer ${identity.resolveCredentialHandle(connection.credentialHandle).apiKey}` },
+              signal: AbortSignal.timeout(10_000),
+            });
+          if (!response.ok) return json({ providers: [{ slug: connection.provider, models: fallback }] });
+          const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+          const models = [...new Set((payload.data ?? []).map(item => typeof item.id === "string" ? item.id : "").filter(Boolean))]
+            .sort()
+            .map(id => ({ id, label: id }));
+          return json({ providers: [{ slug: connection.provider, models: models.length ? models : fallback }] });
+        } catch {
+          return json({ providers: [{ slug: connection.provider, models: fallback }] });
+        }
+      }
+
       if (url.pathname === "/v1/setup/agents" && request.method === "POST") {
         const auth = authenticated(request, identity, true);
         if (auth instanceof Response) return auth;
@@ -382,7 +404,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (auth instanceof Response) return auth;
         if (request.method === "GET") return json({ agents: identity.listAgents(auth.principal.id, url.searchParams.get("projectId") ?? undefined) });
         if (request.method === "POST") {
-          try { const value = await body(request, maxRequestBytes); return json({ agent: identity.createAgent(auth.principal.id, String(value.projectId ?? ""), String(value.name ?? ""), String(value.instructions ?? "")) }, 201); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400); }
+          try { const value = await body(request, maxRequestBytes); return json({ agent: identity.createAgent(auth.principal.id, String(value.projectId ?? ""), String(value.name ?? ""), String(value.instructions ?? ""), String(value.icon ?? "")) }, 201); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400); }
         }
         return json({ error: "method_not_allowed" }, 405);
       }

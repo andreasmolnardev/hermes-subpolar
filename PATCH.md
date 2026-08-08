@@ -2,6 +2,15 @@
 
 ## Current State
 
+- Reworked Subpolar navigation around persistent project/thread sidebar,
+  agent and automation galleries, and collapsed contextual detail rails; agent
+  creation now requires a persisted icon selection.
+- Added provider-backed model discovery and model, effort, agent, and permission
+  controls to the expanded thread composer.
+ - Added shared Hermes model-provider catalog and authenticated setup catalog
+   endpoint. First-run setup now lists same provider universe as provider
+   settings and persists selected provider alongside connection credentials.
+
 - Subpolar is a Bun-only monorepo. Active packages are `api-gateway`, `data-layer`,
   `harness`, `chat-provider-interface`, `tool-resolver`, `tool-runtime`,
   `web-ui`, and `@hermes/shared`.

@@ -29,6 +29,7 @@ export type AgentRecord = {
   readonly ownerId: string;
   readonly projectId: string;
   readonly name: string;
+  readonly icon: string;
   readonly instructions: string;
   readonly createdAt: string;
 };
@@ -80,6 +81,7 @@ type Row = {
   owner_id?: string;
   project_id?: string;
   name?: string;
+  icon?: string;
   instructions?: string;
   created_at?: string;
 };
@@ -112,6 +114,7 @@ CREATE TABLE IF NOT EXISTS agents (
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  icon TEXT NOT NULL DEFAULT 'bot',
   instructions TEXT NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE(owner_id, project_id, name)
@@ -269,6 +272,11 @@ export class SQLiteIdentityRepository {
       this.db.close();
       throw error;
     }
+    try {
+      this.db.exec("ALTER TABLE agents ADD COLUMN icon TEXT NOT NULL DEFAULT 'bot'");
+    } catch {
+      // Existing databases already have icon column.
+    }
   }
 
   close(): void {
@@ -384,23 +392,23 @@ export class SQLiteIdentityRepository {
 
   listAgents(userId: string, projectId?: string): readonly AgentRecord[] {
     const query = projectId === undefined
-      ? "SELECT id, owner_id AS ownerId, project_id AS projectId, name, instructions, created_at AS createdAt FROM agents WHERE owner_id = ? ORDER BY created_at, id"
-      : "SELECT id, owner_id AS ownerId, project_id AS projectId, name, instructions, created_at AS createdAt FROM agents WHERE owner_id = ? AND project_id = ? ORDER BY created_at, id";
+      ? "SELECT id, owner_id AS ownerId, project_id AS projectId, name, icon, instructions, created_at AS createdAt FROM agents WHERE owner_id = ? ORDER BY created_at, id"
+      : "SELECT id, owner_id AS ownerId, project_id AS projectId, name, icon, instructions, created_at AS createdAt FROM agents WHERE owner_id = ? AND project_id = ? ORDER BY created_at, id";
     return projectId === undefined ? this.db.query<AgentRecord, [string]>(query).all(userId) : this.db.query<AgentRecord, [string, string]>(query).all(userId, projectId);
   }
 
-  createAgent(userId: string, projectId: string, name: string, instructions: string): AgentRecord {
+  createAgent(userId: string, projectId: string, name: string, instructions: string, icon = "bot"): AgentRecord {
     const project = this.db.query<{ id: string }, [string, string]>("SELECT id FROM projects WHERE id = ? AND owner_id = ?").get(projectId, userId);
     if (project === null) throw new OwnershipError("Project is not owned by the authenticated user");
-    if (name.trim().length === 0 || name.length > 128 || instructions.length > 100_000) throw new Error("agent is invalid");
-    const agent = { id: randomUUID(), ownerId: userId, projectId, name: name.trim(), instructions, createdAt: now() };
-    this.db.run("INSERT INTO agents (id, owner_id, project_id, name, instructions, created_at) VALUES (?, ?, ?, ?, ?, ?)", [agent.id, agent.ownerId, agent.projectId, agent.name, agent.instructions, agent.createdAt]);
+    if (name.trim().length === 0 || name.length > 128 || instructions.length > 100_000 || !/^[a-z-]{2,32}$/.test(icon)) throw new Error("agent is invalid");
+    const agent = { id: randomUUID(), ownerId: userId, projectId, name: name.trim(), icon, instructions, createdAt: now() };
+    this.db.run("INSERT INTO agents (id, owner_id, project_id, name, icon, instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [agent.id, agent.ownerId, agent.projectId, agent.name, agent.icon, agent.instructions, agent.createdAt]);
     return agent;
   }
 
   getAgent(userId: string, agentId: string): AgentRecord | null {
     return this.db.query<AgentRecord, [string, string]>(
-      "SELECT id, owner_id AS ownerId, project_id AS projectId, name, instructions, created_at AS createdAt FROM agents WHERE id = ? AND owner_id = ?",
+      "SELECT id, owner_id AS ownerId, project_id AS projectId, name, icon, instructions, created_at AS createdAt FROM agents WHERE id = ? AND owner_id = ?",
     ).get(agentId, userId);
   }
 

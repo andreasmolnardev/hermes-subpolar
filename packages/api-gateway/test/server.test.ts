@@ -87,6 +87,14 @@ test("server authenticates users before dispatching owned chat turns", async () 
 
 test("server completes first-run provider and agent setup before dispatch", async () => {
   const dataDir = testDataDir();
+  const upstream = Bun.serve({
+    port: 0,
+    fetch(request) {
+      assert.equal(new URL(request.url).pathname, "/v1/models");
+      assert.equal(request.headers.get("authorization"), "Bearer local-key");
+      return Response.json({ data: [{ id: "zeta" }, { id: "alpha" }, { id: "alpha" }] });
+    },
+  });
   const server = startApiGatewayServer({ port: 0, dataDir });
   try {
     const origin = new URL(server.url).origin;
@@ -100,8 +108,11 @@ test("server completes first-run provider and agent setup before dispatch", asyn
     assert.ok(catalog.providers.some(provider => provider.slug === "openai-api"));
     const invalidProvider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "not-a-hermes-provider", baseUrl: "https://example.test/v1", apiKey: "key", model: "model" }) });
     assert.equal(invalidProvider.status, 400);
-    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "openai-api", baseUrl: "http://127.0.0.1:11434/v1", apiKey: "local-key", model: "local-model" }) });
+    const provider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "openai-api", baseUrl: `${upstream.url}v1`, apiKey: "local-key", model: "local-model" }) });
     assert.equal(provider.status, 200);
+    const models = await fetch(`${server.url}v1/models`, { headers: { cookie: cookies } });
+    assert.equal(models.status, 200);
+    assert.deepEqual(await models.json(), { providers: [{ slug: "openai-api", models: [{ id: "alpha", label: "alpha" }, { id: "zeta", label: "zeta" }] }] });
     const agents = await fetch(`${server.url}v1/setup/agents`, { method: "POST", headers, body: JSON.stringify({ templates: ["research"] }) });
     assert.equal(agents.status, 201);
     const created = await agents.json() as { agents: readonly { name: string }[] };
@@ -109,6 +120,7 @@ test("server completes first-run provider and agent setup before dispatch", asyn
     assert.deepEqual(await (await fetch(`${server.url}v1/setup`, { headers: { cookie: cookies } })).json(), { complete: true, providerConfigured: true });
   } finally {
     await server.shutdown();
+    upstream.stop();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

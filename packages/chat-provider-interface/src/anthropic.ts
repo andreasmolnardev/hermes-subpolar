@@ -27,6 +27,7 @@ export type AnthropicProviderOptions = {
   readonly resolveCredentialHandle?: (handle: string) => AnthropicCredentials | Promise<AnthropicCredentials>;
   readonly fetch: AnthropicFetch;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly credentialHeader?: "x-api-key" | "authorization";
 };
 
 type RecordValue = Record<string, unknown>;
@@ -91,6 +92,7 @@ function serializeTool(tool: ProviderTool): RecordValue {
 
 function requestBody(request: ProviderRequest, stream: boolean): RecordValue {
   const system = request.messages.filter(message => message.role === "system").map(message => text(message.content)).join("\n\n");
+  const cachedSystem = request.providerOptions?.anthropic_cache === true;
   const messages = request.messages.filter(message => message.role !== "system").map(serializeMessage);
   const options = request.options;
   return {
@@ -98,7 +100,7 @@ function requestBody(request: ProviderRequest, stream: boolean): RecordValue {
     messages,
     max_tokens: options?.maxOutputTokens ?? options?.maxTokens ?? 4096,
     stream,
-    ...(system.length === 0 ? {} : { system }),
+    ...(system.length === 0 ? {} : { system: cachedSystem ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] : system }),
     ...(request.tools.length === 0 ? {} : { tools: request.tools.map(serializeTool) }),
     ...(options?.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options?.topP === undefined ? {} : { top_p: options.topP })
@@ -161,7 +163,8 @@ async function credentials(options: AnthropicProviderOptions, signal: AbortSigna
 function headers(options: AnthropicProviderOptions, credential: AnthropicCredentials): Headers {
   const result = new Headers(options.headers);
   result.set("content-type", "application/json");
-  result.set("x-api-key", credential.apiKey);
+  if (options.credentialHeader === "authorization") result.set("authorization", `Bearer ${credential.apiKey}`);
+  else result.set("x-api-key", credential.apiKey);
   result.set("anthropic-version", "2023-06-01");
   return result;
 }

@@ -73,11 +73,14 @@ metadata only:
   label: string;
   description: string;
   apiMode: "chat_completions" | "anthropic_messages" | "codex_responses" | "bedrock_converse";
-  authType: "api_key" | "oauth" | "copilot" | "aws_sdk" | "external_process";
+  authType: "api_key" | "oauth" | "copilot" | "aws_sdk" | "gcp" | "external_process";
+  requiresCredential?: boolean;
   baseUrl?: string;
   modelsUrl?: string;
   fallbackModels?: readonly string[];
   capabilities?: { vision?: boolean; toolCalling?: boolean; reasoning?: boolean };
+  credentialHeader?: "authorization" | "x-api-key" | "x-goog-api-key";
+  oauth?: { clientIdEnv: string; authorizationUrl?: string; tokenUrl?: string };
   request?: Record<string, unknown>;
 };
 ```
@@ -93,6 +96,21 @@ adapters. The configured endpoint and credentials are never returned by setup,
 is available through `GET /v1/models` and
 `GET /v1/providers/:providerId/models`; live catalogs fall back to the model
 profile and the configured model.
+
+OAuth profiles use server-configured client IDs and endpoints, PKCE state stored
+encrypted in the data layer, and refresh-token rotation. Copilot uses the
+GitHub device flow and a server-side Copilot token exchange. `aws_sdk` accepts
+encrypted JSON credentials or the explicit `env` marker with AWS environment
+credentials; `gcp` accepts an access token or encrypted service-account JSON.
+External-process profiles require an executable in
+`SUBPOLAR_PROVIDER_EXECUTABLES` and exchange one JSON request/result per
+process invocation.
+
+OAuth client configuration is server-side. Codex uses
+`SUBPOLAR_OPENAI_CODEX_CLIENT_ID`; Anthropic, Nous, Qwen, MiniMax, and xAI use
+their profile-specific `SUBPOLAR_*_OAUTH_CLIENT_ID`,
+`SUBPOLAR_*_OAUTH_AUTH_URL`, and `SUBPOLAR_*_OAUTH_TOKEN_URL` variables. The
+provider catalog exposes the variable names but never their values.
 
 ## Failure Boundary
 

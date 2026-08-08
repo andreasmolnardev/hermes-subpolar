@@ -70,3 +70,27 @@ test("provider runtime selects Bedrock Converse with AWS credentials", async () 
   assert.equal(seenUrl, "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.test/converse");
   assert.equal(result.message.content, "bedrock");
 });
+
+test("provider behaviors materialize reasoning options and provider credential headers", async () => {
+  let payload: Record<string, unknown> | undefined;
+  const runtime = await resolveProvider({ providerId: "openrouter", baseUrl: "https://provider.test/v1", credentialHandle: "openrouter:default", model: "router-model" }, () => ({ apiKey: "secret" }));
+  const provider = createProvider(runtime, {
+    resolveCredential: () => ({ apiKey: "secret" }),
+    fetch: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    }
+  });
+  await provider.complete({ ...request, options: { reasoningEffort: "high" } });
+  assert.deepEqual(payload?.reasoning, { effort: "high" });
+
+  const gemini = await resolveProvider({ providerId: "gemini", baseUrl: "https://provider.test/v1", credentialHandle: "gemini:default", model: "gemini-test" }, () => ({ apiKey: "secret" }));
+  const geminiProvider = createProvider(gemini, {
+    resolveCredential: () => ({ apiKey: "secret" }),
+    fetch: async (_input, init) => {
+      assert.equal(new Headers(init?.headers).get("x-goog-api-key"), "secret");
+      return Response.json({ choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    }
+  });
+  await geminiProvider.complete(request);
+});

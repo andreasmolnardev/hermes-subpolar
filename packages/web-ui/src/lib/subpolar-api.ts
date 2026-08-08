@@ -69,6 +69,18 @@ export function configureProvider(providerId: string, baseUrl: string, apiKey: s
   return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ providerId, baseUrl, apiKey, model }) });
 }
 
+export function startProviderOAuth(providerId: string, baseUrl: string, model: string): Promise<{ readonly authorizationUrl: string }> {
+  return subpolarRequest(`/v1/providers/${encodeURIComponent(providerId)}/auth/start?${new URLSearchParams({ baseUrl, model })}`);
+}
+
+export function startProviderDeviceAuth(providerId: string): Promise<{ readonly deviceCode: string; readonly userCode?: string; readonly verificationUri?: string; readonly verificationUriComplete?: string }> {
+  return subpolarRequest(`/v1/providers/${encodeURIComponent(providerId)}/auth/device/start`, { method: "POST" });
+}
+
+export function completeProviderDeviceAuth(providerId: string, deviceCode: string): Promise<{ readonly configured: true }> {
+  return subpolarRequest(`/v1/providers/${encodeURIComponent(providerId)}/auth/device/complete`, { method: "POST", body: JSON.stringify({ deviceCode }) });
+}
+
 export type SubpolarModelProvider = { readonly id: string; readonly models: readonly { readonly id: string; readonly label: string }[] };
 
 export function availableModels(): Promise<{ readonly providers: readonly SubpolarModelProvider[] }> {

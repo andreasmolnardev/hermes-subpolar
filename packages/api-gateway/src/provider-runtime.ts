@@ -15,6 +15,8 @@ import {
   type ProviderProfile
 } from "@hermes/shared/model-providers";
 import type { ProviderConnection, ProviderCredentials } from "data-layer";
+import { providerBehavior } from "./provider-behaviors";
+import { createExternalProcessProvider } from "./process-provider";
 
 export type ResolvedProvider = {
   readonly providerId: string;
@@ -32,9 +34,11 @@ export type ProviderRuntimeOptions = {
 
 export type ProviderModel = { readonly id: string; readonly label: string };
 
-function requiredApiKey(credentials: ProviderCredentials): { readonly apiKey: string } {
-  if (credentials.apiKey === undefined || credentials.apiKey.trim().length === 0) throw new Error("provider credential is unavailable");
-  return { apiKey: credentials.apiKey };
+function requiredApiKey(credentials: ProviderCredentials, allowAnonymous = false): { readonly apiKey: string } {
+  const apiKey = credentials.apiKey ?? credentials.copilotToken ?? credentials.accessToken;
+  if (allowAnonymous && (apiKey === undefined || apiKey.trim().length === 0)) return { apiKey: "" };
+  if (apiKey === undefined || apiKey.trim().length === 0) throw new Error("provider credential is unavailable");
+  return { apiKey };
 }
 
 function requiredAwsCredentials(credentials: ProviderCredentials, baseUrl: string): { accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string } {
@@ -97,57 +101,72 @@ export async function resolveProvider(
   };
 }
 
-function requestForProfile(request: ProviderRequest, profile: ProviderProfile): ProviderRequest {
-  const behavior = profile.request;
-  if (behavior === undefined) return request;
-  const current = request.options ?? {};
+function requestForProfile(request: ProviderRequest, runtime: ResolvedProvider): ProviderRequest {
+  const behavior = providerBehavior(runtime.providerId);
+  const messagePrepared = behavior?.prepareMessages?.(request.messages, runtime);
+  const withMessages = messagePrepared === undefined ? request : { ...request, messages: messagePrepared };
+  const prepared = behavior?.prepareRequest?.(withMessages, runtime) ?? withMessages;
+  const profile = runtime.profile;
+  const profileBehavior = profile.request;
+  if (profileBehavior === undefined) return prepared;
+  const current = prepared.options ?? {};
   const { temperature: _temperature, ...withoutTemperature } = current;
   const options: ProviderModelOptions = {
     ...withoutTemperature,
-    ...(behavior.omitTemperature ? {} : behavior.fixedTemperature === undefined ? (current.temperature === undefined ? {} : { temperature: current.temperature }) : { temperature: behavior.fixedTemperature }),
-    ...(behavior.defaultMaxTokens !== undefined && current.maxTokens === undefined && current.maxOutputTokens === undefined ? { maxTokens: behavior.defaultMaxTokens } : {})
+    ...(profileBehavior.omitTemperature ? {} : profileBehavior.fixedTemperature === undefined ? (current.temperature === undefined ? {} : { temperature: current.temperature }) : { temperature: profileBehavior.fixedTemperature }),
+    ...(profileBehavior.defaultMaxTokens !== undefined && current.maxTokens === undefined && current.maxOutputTokens === undefined ? { maxTokens: profileBehavior.defaultMaxTokens } : {})
   };
-  return { ...request, options };
+  return { ...prepared, options };
 }
 
-function wrapProfile(provider: ChatProvider, profile: ProviderProfile): ChatProvider {
-  const adapt = (request: ProviderRequest): ProviderRequest => requestForProfile(request, profile);
+function wrapProfile(provider: ChatProvider, runtime: ResolvedProvider): ChatProvider {
+  const adapt = (request: ProviderRequest): ProviderRequest => requestForProfile(request, runtime);
   if (provider.stream === undefined) return { complete: request => provider.complete(adapt(request)) };
   return { complete: request => provider.complete(adapt(request)), stream: request => provider.stream!(adapt(request)) };
 }
 
 export function createProvider(runtime: ResolvedProvider, options: ProviderRuntimeOptions): ChatProvider {
   const fetcher = options.fetch ?? fetch;
+  if (runtime.profile.authType === "external_process") return createExternalProcessProvider(runtime.credential);
   switch (runtime.apiMode) {
     case "chat_completions":
       return wrapProfile(createOpenAICompatibleProvider({
         baseUrl: runtime.baseUrl,
-        credentials: requiredApiKey(runtime.credential),
+        credentials: requiredApiKey(runtime.credential, runtime.profile.requiresCredential === false),
         fetch: fetcher,
+        ...(runtime.profile.credentialHeader === undefined ? {} : { credentialHeader: runtime.profile.credentialHeader }),
+        ...(runtime.profile.requiresCredential === false ? { omitCredential: true } : {}),
         ...(runtime.profile.defaultHeaders === undefined ? {} : { headers: runtime.profile.defaultHeaders }),
         ...(runtime.profile.request?.extraBody === undefined ? {} : { extraBody: runtime.profile.request.extraBody })
-      }), runtime.profile);
+      }), runtime);
     case "anthropic_messages":
       return wrapProfile(createAnthropicProvider({
         baseUrl: runtime.baseUrl,
         credentials: requiredApiKey(runtime.credential),
         fetch: fetcher,
+        ...(runtime.profile.credentialHeader === undefined ? {} : { credentialHeader: runtime.profile.credentialHeader === "x-goog-api-key" ? "x-api-key" : runtime.profile.credentialHeader }),
         ...(runtime.profile.defaultHeaders === undefined ? {} : { headers: runtime.profile.defaultHeaders })
-      }), runtime.profile);
+      }), runtime);
     case "codex_responses":
       return wrapProfile(createResponsesProvider({
         baseUrl: runtime.baseUrl,
         credentials: requiredApiKey(runtime.credential),
         fetch: fetcher,
+        ...(runtime.profile.credentialHeader === undefined ? {} : { credentialHeader: runtime.profile.credentialHeader === "x-goog-api-key" ? "x-api-key" : runtime.profile.credentialHeader }),
         ...(runtime.profile.defaultHeaders === undefined ? {} : { headers: runtime.profile.defaultHeaders })
-      }), runtime.profile);
+      }), runtime);
     case "bedrock_converse":
+      {
+        const credentials = requiredAwsCredentials(runtime.credential, runtime.baseUrl);
+        const endpoint = new URL(runtime.baseUrl);
+        endpoint.hostname = endpoint.hostname.replace(/bedrock-runtime\.[^.]+\./, `bedrock-runtime.${credentials.region}.`);
       return createBedrockConverseProvider({
-        baseUrl: runtime.baseUrl,
-        credentials: requiredAwsCredentials(runtime.credential, runtime.baseUrl),
+        baseUrl: endpoint.toString().replace(/\/$/, ""),
+        credentials,
         fetch: fetcher,
         signRequest: signBedrockRequest
       });
+      }
   }
 }
 
@@ -164,13 +183,19 @@ export async function listProviderModels(
   options: Pick<ProviderRuntimeOptions, "fetch"> = {}
 ): Promise<readonly ProviderModel[]> {
   const fallback = [...new Set([runtime.model, ...(runtime.profile.fallbackModels ?? [])])].map(id => ({ id, label: id }));
+  const behaviorModels = await providerBehavior(runtime.providerId)?.discoverModels?.(runtime, options.fetch ?? fetch);
+  if (behaviorModels !== undefined && behaviorModels.length > 0) return behaviorModels;
   const endpoint = modelsEndpoint(runtime.profile, runtime.baseUrl);
   if (endpoint === undefined) return fallback;
-  const apiKey = runtime.credential.apiKey;
+  const apiKey = runtime.credential.apiKey ?? runtime.credential.copilotToken ?? runtime.credential.accessToken;
   if (apiKey === undefined || apiKey.trim().length === 0) return fallback;
   try {
+    const credentialHeader = runtime.profile.credentialHeader ?? "authorization";
+    const authorization = runtime.profile.requiresCredential === false
+      ? {}
+      : credentialHeader === "authorization" ? { authorization: `Bearer ${apiKey}` } : { [credentialHeader]: apiKey };
     const response = await (options.fetch ?? fetch)(endpoint, {
-      headers: { ...runtime.profile.defaultHeaders, authorization: `Bearer ${apiKey}` },
+      headers: { ...runtime.profile.defaultHeaders, ...authorization },
       signal: AbortSignal.timeout(10_000)
     });
     if (!response.ok) return fallback;

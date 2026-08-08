@@ -184,6 +184,7 @@ interface NavProps {
   open: boolean
   close: () => void
   logout: () => void
+  onSettings: () => void
 }
 function GlobalSidebar(props: NavProps) {
   const nav = [
@@ -261,8 +262,9 @@ function GlobalSidebar(props: NavProps) {
         ))}
       </div>
       <div className="flex items-center gap-2 border-t border-white/10 p-3">
-        <Settings size={15} className="text-[#829b92]" />
+        <button onClick={props.onSettings} className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-white"><Settings size={15} className="text-[#829b92]" />
         <span className="min-w-0 flex-1 truncate text-xs">{props.user.username}</span>
+        </button>
         <button onClick={props.logout} aria-label="Log out">
           <LogOut size={15} />
         </button>
@@ -589,7 +591,7 @@ function Chat({
   )
 }
 
-function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => void }) {
+function Workspace({ user, onLogout, onSettings }: { user: SubpolarUser; onLogout: () => void; onSettings: () => void }) {
   const [projectList, setProjectList] = useState<readonly SubpolarProject[]>([]),
     [agentList, setAgentList] = useState<readonly SubpolarAgent[]>([]),
     [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([])
@@ -772,7 +774,8 @@ function Workspace({ user, onLogout }: { user: SubpolarUser; onLogout: () => voi
           }}
           open={mobileOpen}
           close={() => setMobileOpen(false)}
-          logout={onLogout}
+           logout={onLogout}
+           onSettings={onSettings}
         />
       )}
       {detailOpen && (
@@ -968,6 +971,7 @@ export default function SubpolarApp() {
   const [user, setUser] = useState<SubpolarUser | null>(null),
     [authMode, setAuthMode] = useState<AuthMode>('login'),
     [setupComplete, setSetupComplete] = useState(false),
+    [providerSettings, setProviderSettings] = useState(false),
     [loading, setLoading] = useState(true)
 
   function navigate(path: string, replace = false): void {
@@ -981,6 +985,7 @@ export default function SubpolarApp() {
         const setup = await setupStatus()
         setUser(r.user)
         setSetupComplete(setup.complete)
+        setProviderSettings(typeof window !== 'undefined' && window.location.pathname === '/settings/providers')
         if (!setup.complete) navigate('/setup', true)
       })
       .catch(async reason => {
@@ -1012,9 +1017,11 @@ export default function SubpolarApp() {
       />
     )
   if (!setupComplete) return <ProviderSetupScreen onComplete={() => { setSetupComplete(true); navigate('/', true) }} />
+  if (providerSettings) return <ProviderSetupScreen editing onComplete={() => { setProviderSettings(false); navigate('/', true) }} />
   return (
     <Workspace
       user={user}
+      onSettings={() => { setProviderSettings(true); navigate('/settings/providers') }}
       onLogout={() => {
         void logout().finally(() => {
           setUser(null)

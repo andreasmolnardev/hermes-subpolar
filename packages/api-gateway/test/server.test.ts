@@ -106,6 +106,7 @@ test("server completes first-run provider and agent setup before dispatch", asyn
     assert.equal(providerCatalog.status, 200);
     const catalog = await providerCatalog.json() as { providers: readonly { id: string }[] };
     assert.ok(catalog.providers.some(provider => provider.id === "openai-api"));
+    assert.ok(catalog.providers.length >= 40);
     const publicCatalog = await fetch(`${server.url}v1/providers`, { headers: { cookie: cookies } });
     assert.equal(publicCatalog.status, 200);
     const invalidProvider = await fetch(`${server.url}v1/setup/provider`, { method: "POST", headers, body: JSON.stringify({ provider: "not-a-hermes-provider", baseUrl: "https://example.test/v1", apiKey: "key", model: "model" }) });
@@ -166,6 +167,29 @@ test("server exposes provider deltas as an authenticated SSE stream", async () =
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("server begins an authenticated provider OAuth flow without exposing credentials", async () => {
+  const dataDir = testDataDir();
+  const previous = process.env.SUBPOLAR_OPENAI_CODEX_CLIENT_ID;
+  process.env.SUBPOLAR_OPENAI_CODEX_CLIENT_ID = "test-client";
+  const server = startApiGatewayServer({ port: 0, dataDir });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ username: "oauth-user", password: "correct horse" }) });
+    const cookies = sessionCookies(bootstrap);
+    const response = await fetch(`${server.url}v1/providers/openai-codex/auth/start?model=gpt-test`, { headers: { cookie: cookies } });
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { authorizationUrl: string; state: string };
+    assert.match(payload.authorizationUrl, /client_id=test-client/);
+    assert.match(payload.authorizationUrl, /code_challenge=/);
+    assert.equal(payload.authorizationUrl.includes("secret"), false);
+  } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.SUBPOLAR_OPENAI_CODEX_CLIENT_ID;
+    else process.env.SUBPOLAR_OPENAI_CODEX_CLIENT_ID = previous;
   }
 });
 

@@ -51,10 +51,32 @@ export type ProviderConnection = {
 
 export type ProviderCredentials = {
   readonly apiKey?: string;
+  readonly accessToken?: string;
+  readonly copilotToken?: string;
+  readonly refreshToken?: string;
+  readonly tokenType?: string;
+  readonly expiresAt?: number;
+  readonly subject?: string;
   readonly accessKeyId?: string;
   readonly secretAccessKey?: string;
   readonly sessionToken?: string;
   readonly region?: string;
+  readonly projectId?: string;
+  readonly clientEmail?: string;
+  readonly privateKey?: string;
+  readonly executable?: string;
+  readonly arguments?: readonly string[];
+};
+
+export type ProviderOAuthState = {
+  readonly state: string;
+  readonly ownerId: string;
+  readonly providerId: string;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly redirectUri: string;
+  readonly codeVerifier: string;
+  readonly expiresAt: string;
 };
 
 export type SetupStatus = {
@@ -139,13 +161,29 @@ CREATE TABLE IF NOT EXISTS provider_connections (
   model TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS provider_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  model TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  code_verifier_ciphertext TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_oauth_states_expiry ON provider_oauth_states(expires_at);
 `;
 
 // Keep persistence independent from the runtime/profile package boundary.
 const SUPPORTED_PROVIDER_IDS = new Set([
-  "openai-api", "openrouter", "deepseek", "xai", "nvidia", "fireworks", "groq",
-  "together", "mistral", "perplexity", "moonshot", "anthropic", "openai-responses",
-  "bedrock", "custom"
+  "openai-api", "openrouter", "deepseek", "xai", "xai-oauth", "nvidia", "fireworks", "groq",
+  "together", "mistral", "perplexity", "moonshot", "kimi-coding", "kimi-coding-cn",
+  "ai-gateway", "novita", "zai", "arcee", "gmi", "actual-computer", "minimax", "minimax-cn",
+  "minimax-oauth", "alibaba-dashscope", "alibaba-coding-plan", "kilo-code", "xiaomi-mimo",
+  "tencent-tokenhub", "opencode-zen", "opencode-go", "huggingface", "gemini", "vertex-ai",
+  "ollama-cloud", "stepfun", "lm-studio", "anthropic", "anthropic-oauth", "nous-portal", "qwen-oauth",
+  "copilot", "copilot-acp", "relay", "moa", "openai-responses", "openai-codex", "bedrock", "custom"
 ]);
 
 const CREDENTIAL_KEY_BYTES = 32;
@@ -255,6 +293,12 @@ function providerCredential(value: unknown): ProviderCredentials {
     // API keys and OAuth access tokens are intentionally opaque strings.
   }
   return { apiKey: value };
+}
+
+function validCredentials(credentials: ProviderCredentials): ProviderCredentials {
+  const hasSecret = [credentials.apiKey, credentials.accessToken, credentials.secretAccessKey, credentials.executable].some(value => typeof value === "string" && value.trim().length > 0);
+  if (!hasSecret) throw new Error("provider credential is invalid");
+  return credentials;
 }
 
 function providerModel(value: unknown): string {
@@ -486,13 +530,55 @@ export class SQLiteIdentityRepository {
   configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): void {
     const normalizedProvider = providerSlug(provider);
     const normalizedBaseUrl = providerBaseUrl(baseUrl);
-    const credential = providerCredential(apiKey);
+    const credential = validCredentials(providerCredential(apiKey));
+    const normalizedModel = providerModel(model);
+    this.configureProviderCredentials(normalizedProvider, normalizedBaseUrl, credential, normalizedModel);
+  }
+
+  configureProviderCredentials(provider: string, baseUrl: string, credentials: ProviderCredentials, model: string): void {
+    const normalizedProvider = providerSlug(provider);
+    const normalizedBaseUrl = providerBaseUrl(baseUrl);
+    const credential = validCredentials(credentials);
     const normalizedModel = providerModel(model);
     const ciphertext = encryptCredential(credential, this.key(true));
     this.db.run(
       "INSERT INTO provider_connections (id, provider, base_url, credential_ciphertext, model, updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, credential_ciphertext = excluded.credential_ciphertext, model = excluded.model, updated_at = excluded.updated_at",
       [normalizedProvider, normalizedBaseUrl, ciphertext, normalizedModel, now()],
     );
+  }
+
+  beginProviderOAuth(ownerId: string, provider: string, baseUrl: string, model: string, redirectUri: string, codeVerifier: string): ProviderOAuthState {
+    const normalizedProvider = providerSlug(provider);
+    const normalizedBaseUrl = providerBaseUrl(baseUrl);
+    const normalizedModel = providerModel(model);
+    if (redirectUri.trim().length === 0 || codeVerifier.trim().length < 43) throw new Error("provider OAuth state is invalid");
+    const state = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    this.db.run("DELETE FROM provider_oauth_states WHERE expires_at <= ?", [now()]);
+    this.db.run(
+      "INSERT INTO provider_oauth_states (state_hash, owner_id, provider, base_url, model, redirect_uri, code_verifier_ciphertext, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [hashToken(state), ownerId, normalizedProvider, normalizedBaseUrl, normalizedModel, redirectUri, encryptCredential({ apiKey: codeVerifier }, this.key(true)), expiresAt, now()]
+    );
+    return { state, ownerId, providerId: normalizedProvider, baseUrl: normalizedBaseUrl, model: normalizedModel, redirectUri, codeVerifier, expiresAt };
+  }
+
+  consumeProviderOAuthState(ownerId: string, provider: string, state: string): ProviderOAuthState {
+    const normalizedProvider = providerSlug(provider);
+    const row = this.db.query<{ owner_id: string; provider: string; base_url: string; model: string; redirect_uri: string; code_verifier_ciphertext: string; expires_at: string }, [string]>(
+      "SELECT owner_id, provider, base_url, model, redirect_uri, code_verifier_ciphertext, expires_at FROM provider_oauth_states WHERE state_hash = ?"
+    ).get(hashToken(state));
+    if (row === null || row.owner_id !== ownerId || row.provider !== normalizedProvider || Date.parse(row.expires_at) <= Date.now()) throw new Error("provider OAuth state is invalid");
+    this.db.run("DELETE FROM provider_oauth_states WHERE state_hash = ?", [hashToken(state)]);
+    const credentials = decryptCredential(row.code_verifier_ciphertext, this.key());
+    if (credentials.apiKey === undefined) throw new Error("provider OAuth state is invalid");
+    return { state, ownerId, providerId: normalizedProvider, baseUrl: row.base_url, model: row.model, redirectUri: row.redirect_uri, codeVerifier: credentials.apiKey, expiresAt: row.expires_at };
+  }
+
+  saveProviderCredential(handle: string, credentials: ProviderCredentials): void {
+    if (typeof handle !== "string" || !/^[-a-z0-9]+:default$/.test(handle)) throw new Error("credential handle is invalid");
+    const provider = handle.slice(0, -":default".length);
+    if (this.db.query<{ provider: string }, []>("SELECT provider FROM provider_connections WHERE id = 1").get()?.provider !== provider) throw new Error("provider credential is unavailable");
+    this.db.run("UPDATE provider_connections SET credential_ciphertext = ?, updated_at = ? WHERE id = 1", [encryptCredential(validCredentials(credentials), this.key(true)), now()]);
   }
 
   resolveCredentialHandle(handle: string): ProviderCredentials {

@@ -18,6 +18,15 @@ import type { ToolDefinition, ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
+import {
+  beginDeviceOAuth,
+  beginProviderOAuth,
+  completeDeviceOAuth,
+  completeProviderOAuth,
+  refreshProviderCredential,
+  resolveAwsCredential,
+  resolveGcpCredential
+} from "./provider-auth";
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
@@ -197,6 +206,23 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const socketTurns = new Map<object, Map<string, AbortController>>();
   let shutdownPromise: Promise<void> | undefined;
 
+  const configuredCredential = async (connection: NonNullable<ReturnType<SQLiteIdentityRepository["providerConnection"]>>) => {
+    const profile = modelProvider(connection.providerId);
+    if (profile === undefined) throw new Error("provider_not_configured");
+    let credentials = identity.resolveCredentialHandle(connection.credentialHandle);
+    const envMarker = credentials.apiKey === "env";
+    if (profile.authType === "aws_sdk" && envMarker) credentials = resolveAwsCredential(credentials);
+    if (profile.authType === "gcp" && envMarker && process.env.GOOGLE_OAUTH_ACCESS_TOKEN !== undefined) {
+      credentials = { accessToken: process.env.GOOGLE_OAUTH_ACCESS_TOKEN };
+    }
+    if (profile.authType === "external_process" && credentials.executable === undefined) {
+      const executable = process.env[`SUBPOLAR_${profile.id.toUpperCase().replace(/-/g, "_")}_EXECUTABLE`];
+      if (executable !== undefined) credentials = { executable, arguments: [] };
+    }
+    if (profile.authType === "gcp") return resolveGcpCredential(credentials);
+    return profile.authType === "oauth" ? refreshProviderCredential(identity, profile.id, connection.credentialHandle, credentials) : credentials;
+  };
+
   const trackTurn = (controller: AbortController): (() => void) => {
     activeTurns.add(controller);
     return () => activeTurns.delete(controller);
@@ -231,7 +257,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const prepared = await prepareTurn(principal, input);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
-    const runtime = connection === null ? null : await resolveProvider(connection, handle => identity.resolveCredentialHandle(handle));
+    const runtime = connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
     return gateway.executeRequest({
       model: prepared.input.model === "default" && runtime !== null ? runtime.model : prepared.input.model,
       messages: prepared.input.messages,
@@ -351,12 +377,57 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         } catch { return json({ error: "invalid_provider" }, 400); }
       }
 
+      const providerAuthPath = /^\/v1\/providers\/([^/]+)\/auth\/(start|callback|device\/start|device\/complete)$/.exec(url.pathname);
+      if (providerAuthPath !== null) {
+        const provider = modelProvider(decodeURIComponent(providerAuthPath[1] as string));
+        if (provider === undefined) return json({ error: "provider_not_found" }, 404);
+        if (providerAuthPath[2] === "start" && request.method === "GET") {
+          const auth = authenticated(request, identity);
+          if (auth instanceof Response) return auth;
+          try {
+            const model = url.searchParams.get("model") ?? provider.fallbackModels?.[0] ?? "default";
+            const baseUrl = url.searchParams.get("baseUrl") ?? provider.baseUrl ?? "";
+            return json(beginProviderOAuth(identity, provider.id, baseUrl, model, url.origin, auth.principal.id));
+          } catch (error) {
+            return json({ error: error instanceof Error ? error.message : "provider_oauth_failed" }, 400);
+          }
+        }
+        if (providerAuthPath[2] === "callback" && request.method === "GET") {
+          const auth = authenticated(request, identity);
+          if (auth instanceof Response) return auth;
+          const state = url.searchParams.get("state");
+          const code = url.searchParams.get("code");
+          if (state === null || code === null) return json({ error: "provider_oauth_callback_invalid" }, 400);
+          try {
+            await completeProviderOAuth(identity, provider.id, state, code, auth.principal.id);
+            return Response.redirect(`${url.origin}/setup?provider=${encodeURIComponent(provider.id)}&connected=1`, 303);
+          } catch { return json({ error: "provider_oauth_exchange_failed" }, 400); }
+        }
+        if (providerAuthPath[2] === "device/start" && request.method === "POST") {
+          const auth = authenticated(request, identity, true);
+          if (auth instanceof Response) return auth;
+          try { return json(await beginDeviceOAuth(provider.id)); } catch { return json({ error: "provider_device_flow_failed" }, 400); }
+        }
+        if (providerAuthPath[2] === "device/complete" && request.method === "POST") {
+          const auth = authenticated(request, identity, true);
+          if (auth instanceof Response) return auth;
+          try {
+            const value = await body(request, maxRequestBytes);
+            if (typeof value.deviceCode !== "string" || value.deviceCode.trim().length === 0) throw new Error("device code is invalid");
+            const credentials = await completeDeviceOAuth(provider.id, value.deviceCode);
+            identity.configureProviderCredentials(provider.id, provider.baseUrl ?? "", credentials, provider.fallbackModels?.[0] ?? "default");
+            return json({ configured: true });
+          } catch { return json({ error: "provider_device_flow_failed" }, 400); }
+        }
+        return json({ error: "method_not_allowed" }, 405);
+      }
+
       if (url.pathname === "/v1/models" && request.method === "GET") {
         const auth = authenticated(request, identity);
         if (auth instanceof Response) return auth;
         const connection = identity.providerConnection();
         if (connection === null) return json({ providers: [] });
-        const runtime = await resolveProvider(connection, handle => identity.resolveCredentialHandle(handle));
+        const runtime = await resolveProvider(connection, () => configuredCredential(connection));
         const models = await listProviderModels(runtime);
         return json({ providers: [{ id: connection.providerId, models }] });
       }
@@ -369,7 +440,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const profile = modelProvider(decodeURIComponent(providerModelsPath[1] as string));
         if (profile === undefined) return json({ error: "provider_not_found" }, 404);
         if (connection === null || connection.providerId !== profile.id) return json({ providerId: profile.id, models: (profile.fallbackModels ?? []).map(id => ({ id, label: id })) });
-        const runtime = await resolveProvider(connection, handle => identity.resolveCredentialHandle(handle));
+        const runtime = await resolveProvider(connection, () => configuredCredential(connection));
         return json({ providerId: profile.id, models: await listProviderModels(runtime) });
       }
 

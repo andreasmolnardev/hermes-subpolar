@@ -15,6 +15,14 @@
 - Added authenticated `/v1/providers` and `/v1/providers/:providerId/models`
   endpoints. First-run setup and model settings consume provider IDs and the
   same registry, while model discovery falls back to profile catalogs.
+- Expanded the catalog with Hermes API-key families, distinct Kimi coding
+  endpoints, xAI Responses routing, Codex/Anthropic/Nous/Qwen/MiniMax/xAI
+  OAuth profiles, Copilot device auth, Vertex service-account auth, and safe
+  external-process profiles. Added provider parity manifest coverage.
+- Added server-only provider behavior hooks for reasoning and prompt caching,
+  encrypted PKCE OAuth state, refresh-token rotation, GitHub Copilot token
+  exchange, GCP service-account JWT exchange, provider settings UI, and
+  explicit executable allowlisting for process-backed providers.
 - First-run authentication now routes incomplete accounts through `/setup` and
   `/setup/agents` inside one theme-aware card. The existing ThemeProvider is
   mounted for the web UI, with Tokyo Night remaining the default theme.

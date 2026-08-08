@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
-import { configureProvider, createInitialAgents, setupProviders, setupStatus } from "@/lib/subpolar-api";
+import { completeProviderDeviceAuth, configureProvider, createInitialAgents, setupProviders, setupStatus, startProviderDeviceAuth, startProviderOAuth } from "@/lib/subpolar-api";
 
 type SetupStep = "provider" | "agents";
 
@@ -9,7 +9,7 @@ function stepFromPath(): SetupStep {
   return typeof window !== "undefined" && window.location.pathname === "/setup/agents" ? "agents" : "provider";
 }
 
-function SetupCard({ step, canOpenAgents, onStep, children }: { step: SetupStep; canOpenAgents: boolean; onStep: (next: SetupStep) => void; children: ReactNode }) {
+function SetupCard({ step, canOpenAgents, onStep, children, editing }: { step: SetupStep; canOpenAgents: boolean; onStep: (next: SetupStep) => void; children: ReactNode; editing: boolean }) {
   return (
     <main className="setup-page flex min-h-screen items-center justify-center px-5 py-8">
       <section className="setup-card w-full max-w-xl rounded-2xl p-8 shadow-2xl">
@@ -17,10 +17,10 @@ function SetupCard({ step, canOpenAgents, onStep, children }: { step: SetupStep;
           <div className="setup-icon flex h-11 w-11 items-center justify-center rounded-xl"><Sparkles size={21} /></div>
           <div>
             <p className="setup-eyebrow">Subpolar setup</p>
-            <h1 className="text-2xl font-semibold">{step === "provider" ? "Connect a model provider" : "Choose your agent team"}</h1>
+            <h1 className="text-2xl font-semibold">{editing ? "Provider settings" : step === "provider" ? "Connect a model provider" : "Choose your agent team"}</h1>
           </div>
         </div>
-        <nav aria-label="Setup steps" className="mb-7 grid grid-cols-2 gap-2">
+        {!editing ? <nav aria-label="Setup steps" className="mb-7 grid grid-cols-2 gap-2">
           {(["provider", "agents"] as const).map((item, index) => (
             <button
               key={item}
@@ -33,14 +33,14 @@ function SetupCard({ step, canOpenAgents, onStep, children }: { step: SetupStep;
               {item === "provider" ? "Provider" : "Agents"}
             </button>
           ))}
-        </nav>
+        </nav> : null}
         {children}
       </section>
     </main>
   );
 }
 
-export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) {
+export function ProviderSetupScreen({ onComplete, editing = false }: { onComplete: () => void; editing?: boolean }) {
   const [step, setStep] = useState<SetupStep>(stepFromPath);
   const [providers, setProviders] = useState<readonly ModelProviderDefinition[]>([]);
   const [providerId, setProviderId] = useState("openai-api");
@@ -51,6 +51,8 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
   const [providerConfigured, setProviderConfigured] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [device, setDevice] = useState<{ readonly deviceCode: string; readonly userCode?: string; readonly verificationUri?: string; readonly verificationUriComplete?: string } | null>(null);
+  const [deviceInput, setDeviceInput] = useState("");
 
   useEffect(() => {
     const onPopState = () => setStep(stepFromPath());
@@ -92,11 +94,44 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
     setBusy(true);
     setError(null);
     try {
-      await configureProvider(providerId, baseUrl, apiKey, model);
+      if (selectedProvider?.authType === "oauth") {
+        const result = await startProviderOAuth(providerId, baseUrl, model);
+        window.location.assign(result.authorizationUrl);
+        return;
+      }
+      await configureProvider(providerId, baseUrl, selectedProvider?.requiresCredential === false ? "none" : apiKey, model);
       setProviderConfigured(true);
-      navigate("agents");
+      if (editing) onComplete();
+      else navigate("agents");
     } catch {
       setError("Could not save that provider connection. Check the provider, URL, credential, and model.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function beginDevice(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      setDevice(await startProviderDeviceAuth(providerId));
+    } catch {
+      setError("Could not start the device authorization flow.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finishDevice(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await completeProviderDeviceAuth(providerId, deviceInput || device?.deviceCode || "");
+      setProviderConfigured(true);
+      setDevice(null);
+      navigate("agents");
+    } catch {
+      setError("Could not complete the device authorization flow.");
     } finally {
       setBusy(false);
     }
@@ -119,7 +154,7 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
   const selectedProvider = providers.find(item => item.id === providerId);
 
   return (
-    <SetupCard step={step} canOpenAgents={providerConfigured} onStep={next => navigate(next)}>
+    <SetupCard step={step} canOpenAgents={providerConfigured} onStep={next => navigate(next)} editing={editing}>
       {step === "provider" ? (
         <form onSubmit={submitProvider}>
           <p className="setup-copy mb-6">Choose from the same provider catalog used by Hermes provider settings. Credentials stay on this server and are never sent back to the browser.</p>
@@ -127,11 +162,13 @@ export function ProviderSetupScreen({ onComplete }: { onComplete: () => void }) 
               <select value={providerId} onChange={event => selectProvider(event.target.value)} disabled={providers.length === 0} className="setup-input mt-2 w-full"><option value="">Select a provider</option>{providers.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
           </label>
           {selectedProvider?.description !== undefined ? <p className="setup-help -mt-2 mb-4">{selectedProvider.description}</p> : null}
-          <label className="setup-label mb-4">Base URL<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} type="url" required className="setup-input mt-2 w-full" /></label>
-           <label className="setup-label mb-4">{selectedProvider?.authType === "aws_sdk" ? "AWS credentials JSON" : selectedProvider?.authType === "oauth" ? "Access token" : "API key"}<input value={apiKey} onChange={event => setApiKey(event.target.value)} type="password" autoComplete="off" required className="setup-input mt-2 w-full" /></label>
+           <label className="setup-label mb-4">Base URL<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} type="url" required className="setup-input mt-2 w-full" /></label>
+           {selectedProvider?.authType !== "oauth" && selectedProvider?.authType !== "copilot" && selectedProvider?.requiresCredential !== false ? <label className="setup-label mb-4">{selectedProvider?.authType === "aws_sdk" ? "AWS credentials JSON or env" : selectedProvider?.authType === "gcp" ? "GCP access token or env" : selectedProvider?.authType === "external_process" ? "Process credentials JSON" : "API key"}<input value={apiKey} onChange={event => setApiKey(event.target.value)} type="password" autoComplete="off" required className="setup-input mt-2 w-full" /></label> : null}
+           {selectedProvider?.authType === "copilot" && device === null ? <button type="button" onClick={() => void beginDevice()} disabled={busy} className="setup-primary mb-4 w-full">{busy ? "Working..." : "Connect with GitHub device login"}</button> : null}
+           {device !== null ? <div className="setup-option mb-4 rounded-xl p-4"><p className="setup-help">Open {device.verificationUriComplete ?? device.verificationUri ?? "the GitHub verification URL"} and enter {device.userCode ?? "the displayed code"}.</p><input value={deviceInput} onChange={event => setDeviceInput(event.target.value)} placeholder="Device code" className="setup-input mt-3 w-full" /><button type="button" onClick={() => void finishDevice()} disabled={busy} className="setup-primary mt-3 w-full">Complete device login</button></div> : null}
           <label className="setup-label mb-5">Default model<input value={model} onChange={event => setModel(event.target.value)} required className="setup-input mt-2 w-full" /></label>
           {error !== null ? <p role="alert" className="setup-error mb-4">{error}</p> : null}
-          <button disabled={busy || providers.length === 0} className="setup-primary w-full">{busy ? "Working..." : "Continue"}</button>
+           {selectedProvider?.authType !== "copilot" ? <button disabled={busy || providers.length === 0} className="setup-primary w-full">{busy ? "Working..." : selectedProvider?.authType === "oauth" ? "Continue to sign in" : "Continue"}</button> : null}
         </form>
       ) : (
         <form onSubmit={finish}>

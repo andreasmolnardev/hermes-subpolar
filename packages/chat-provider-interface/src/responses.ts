@@ -25,6 +25,7 @@ export type ResponsesProviderOptions = {
   readonly resolveCredentialHandle?: (handle: string) => ResponsesCredentials | Promise<ResponsesCredentials>;
   readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly credentialHeader?: "authorization" | "x-api-key";
 };
 
 type RecordValue = Record<string, unknown>;
@@ -50,6 +51,7 @@ function tool(tool: ProviderTool): RecordValue {
 function body(request: ProviderRequest, stream: boolean): RecordValue {
   const options = request.options;
   return {
+    ...(request.providerOptions ?? {}),
     model: request.model,
     input: request.messages.map(inputMessage),
     stream,
@@ -135,7 +137,7 @@ export function createResponsesProvider(options: ResponsesProviderOptions): Chat
       try {
         const credential = options.credentials ?? await options.resolveCredentialHandle?.(options.credentialHandle as string);
         if (credential === undefined || credential.apiKey.trim().length === 0) throw new ProviderError("Responses credentials are unavailable", { category: "authentication" });
-        const headers = new Headers(options.headers); headers.set("content-type", "application/json"); headers.set("authorization", `Bearer ${credential.apiKey}`);
+        const headers = new Headers(options.headers); headers.set("content-type", "application/json"); if (options.credentialHeader === "x-api-key") headers.set("x-api-key", credential.apiKey); else headers.set("authorization", `Bearer ${credential.apiKey}`);
         const response = await options.fetch(endpoint(options.baseUrl), { method: "POST", headers, body: JSON.stringify(body(request, false)), signal: context.signal });
         if (!response.ok) throw responseError(response, await response.text());
         return parsed(await response.json() as unknown, request);
@@ -147,7 +149,7 @@ export function createResponsesProvider(options: ResponsesProviderOptions): Chat
       try {
         const credential = options.credentials ?? await options.resolveCredentialHandle?.(options.credentialHandle as string);
         if (credential === undefined || credential.apiKey.trim().length === 0) throw new ProviderError("Responses credentials are unavailable", { category: "authentication" });
-        const headers = new Headers(options.headers); headers.set("content-type", "application/json"); headers.set("authorization", `Bearer ${credential.apiKey}`);
+        const headers = new Headers(options.headers); headers.set("content-type", "application/json"); if (options.credentialHeader === "x-api-key") headers.set("x-api-key", credential.apiKey); else headers.set("authorization", `Bearer ${credential.apiKey}`);
         const response = await options.fetch(endpoint(options.baseUrl), { method: "POST", headers, body: JSON.stringify(body(request, true)), signal: context.signal });
         if (!response.ok) throw responseError(response, await response.text());
         yield* streamResponse(response, request, context.signal);

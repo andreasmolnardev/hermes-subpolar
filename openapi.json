@@ -106,6 +106,39 @@
         "responses": { "200": { "description": "Provider models", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderModels" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "$ref": "#/components/responses/NotFound" } }
       }
     },
+    "/v1/providers/{providerId}/auth/start": {
+      "get": {
+        "summary": "Begin provider OAuth with PKCE",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ProviderId" }, { "$ref": "#/components/parameters/ProviderModel" }, { "$ref": "#/components/parameters/ProviderBaseUrl" }],
+        "responses": { "200": { "description": "OAuth authorization URL", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OAuthStart" } } } }, "400": { "$ref": "#/components/responses/InvalidProvider" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/v1/providers/{providerId}/auth/callback": {
+      "get": {
+        "summary": "Complete provider OAuth callback",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ProviderId" }, { "$ref": "#/components/parameters/OAuthState" }, { "$ref": "#/components/parameters/OAuthCode" }],
+        "responses": { "303": { "description": "Redirect to setup" }, "400": { "$ref": "#/components/responses/InvalidProvider" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/v1/providers/{providerId}/auth/device/start": {
+      "post": {
+        "summary": "Begin provider device authorization",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ProviderId" }],
+        "responses": { "200": { "description": "Device authorization", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceStart" } } } }, "400": { "$ref": "#/components/responses/InvalidProvider" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
+      }
+    },
+    "/v1/providers/{providerId}/auth/device/complete": {
+      "post": {
+        "summary": "Complete provider device authorization",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ProviderId" }],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceComplete" },
+        "responses": { "200": { "$ref": "#/components/responses/Configured" }, "400": { "$ref": "#/components/responses/InvalidProvider" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
+      }
+    },
     "/v1/models": {
       "get": {
         "summary": "List models from the configured provider",
@@ -208,12 +241,17 @@
     "parameters": {
       "ProjectId": { "name": "projectId", "in": "query", "required": false, "schema": { "type": "string", "minLength": 1 } },
       "SessionId": { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
-      "ProviderId": { "name": "providerId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+      "ProviderId": { "name": "providerId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "ProviderModel": { "name": "model", "in": "query", "required": false, "schema": { "type": "string" } },
+      "ProviderBaseUrl": { "name": "baseUrl", "in": "query", "required": false, "schema": { "type": "string", "format": "uri" } },
+      "OAuthState": { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } },
+      "OAuthCode": { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } }
     },
     "requestBodies": {
       "Credentials": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Credentials" } } } },
       "PasswordChange": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PasswordChange" } } } },
       "ProviderSetup": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderSetup" } } } },
+      "DeviceComplete": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceComplete" } } } },
       "InitialAgents": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InitialAgentsRequest" } } } },
       "ProjectCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectCreate" } } } },
       "AgentCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentCreate" } } } },
@@ -233,6 +271,7 @@
       "BootstrapFailed": { "description": "Bootstrap failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidPassword": { "description": "Invalid password", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidProvider": { "description": "Invalid provider", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Configured": { "description": "Provider configured", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Configured" } } } },
       "InvalidTemplates": { "description": "Invalid templates", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidProject": { "description": "Invalid project", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidAgent": { "description": "Invalid agent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
@@ -249,9 +288,12 @@
       "UserEnvelope": { "type": "object", "required": ["user"], "properties": { "user": { "$ref": "#/components/schemas/User" } }, "additionalProperties": false },
       "SessionCreated": { "type": "object", "required": ["user", "expiresAt"], "properties": { "user": { "$ref": "#/components/schemas/User" }, "expiresAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "SetupStatus": { "type": "object", "required": ["complete", "providerConfigured"], "properties": { "complete": { "type": "boolean" }, "providerConfigured": { "type": "boolean" } }, "additionalProperties": false },
-      "Provider": { "type": "object", "required": ["id", "label", "description", "apiMode", "authType"], "properties": { "id": { "type": "string" }, "aliases": { "type": "array", "items": { "type": "string" } }, "label": { "type": "string" }, "description": { "type": "string" }, "apiMode": { "enum": ["chat_completions", "anthropic_messages", "codex_responses", "bedrock_converse"] }, "authType": { "enum": ["api_key", "oauth", "copilot", "aws_sdk", "external_process"] }, "baseUrl": { "type": "string", "format": "uri" }, "modelsUrl": { "type": "string", "format": "uri" }, "fallbackModels": { "type": "array", "items": { "type": "string" } }, "defaultHeaders": { "type": "object", "additionalProperties": { "type": "string" } }, "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } }, "request": { "type": "object", "additionalProperties": true } }, "additionalProperties": false },
+      "Provider": { "type": "object", "required": ["id", "label", "description", "apiMode", "authType"], "properties": { "id": { "type": "string" }, "aliases": { "type": "array", "items": { "type": "string" } }, "label": { "type": "string" }, "description": { "type": "string" }, "apiMode": { "enum": ["chat_completions", "anthropic_messages", "codex_responses", "bedrock_converse"] }, "authType": { "enum": ["api_key", "oauth", "copilot", "aws_sdk", "gcp", "external_process"] }, "requiresCredential": { "type": "boolean" }, "baseUrl": { "type": "string", "format": "uri" }, "modelsUrl": { "type": "string", "format": "uri" }, "fallbackModels": { "type": "array", "items": { "type": "string" } }, "defaultHeaders": { "type": "object", "additionalProperties": { "type": "string" } }, "credentialHeader": { "enum": ["authorization", "x-api-key", "x-goog-api-key"] }, "oauth": { "type": "object", "additionalProperties": true }, "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } }, "request": { "type": "object", "additionalProperties": true } }, "additionalProperties": false },
       "ProviderCatalog": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/Provider" } } }, "additionalProperties": false },
-      "ProviderSetup": { "type": "object", "required": ["providerId", "apiKey", "model"], "properties": { "providerId": { "type": "string" }, "baseUrl": { "type": "string", "format": "uri" }, "apiKey": { "type": "string" }, "model": { "type": "string" } }, "additionalProperties": true },
+      "ProviderSetup": { "type": "object", "required": ["providerId", "model"], "properties": { "providerId": { "type": "string" }, "baseUrl": { "type": "string", "format": "uri" }, "apiKey": { "type": "string" }, "model": { "type": "string" } }, "additionalProperties": true },
+      "OAuthStart": { "type": "object", "required": ["authorizationUrl", "state", "expiresAt"], "properties": { "authorizationUrl": { "type": "string", "format": "uri" }, "state": { "type": "string" }, "expiresAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "DeviceStart": { "type": "object", "required": ["deviceCode"], "properties": { "deviceCode": { "type": "string" }, "userCode": { "type": "string" }, "verificationUri": { "type": "string", "format": "uri" }, "verificationUriComplete": { "type": "string", "format": "uri" }, "expiresIn": { "type": "number" }, "interval": { "type": "number" } }, "additionalProperties": false },
+      "DeviceComplete": { "type": "object", "required": ["deviceCode"], "properties": { "deviceCode": { "type": "string" } }, "additionalProperties": false },
       "Configured": { "type": "object", "required": ["configured"], "properties": { "configured": { "const": true } }, "additionalProperties": false },
       "Project": { "type": "object", "required": ["id", "ownerId", "name", "createdAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "name": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "Agent": { "type": "object", "required": ["id", "ownerId", "projectId", "name", "icon", "instructions", "createdAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "projectId": { "type": "string" }, "name": { "type": "string" }, "icon": { "type": "string", "pattern": "^[a-z-]{2,32}$" }, "instructions": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },

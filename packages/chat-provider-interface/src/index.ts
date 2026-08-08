@@ -202,6 +202,8 @@ export type ProviderRequest = {
   requestId?: string;
   identity?: ProviderRequestIdentity;
   metadata?: ProviderMetadata;
+  /** Server-side provider behavior extensions; never populated by browser clients. */
+  providerOptions?: ProviderJsonObject;
 };
 
 export type ProviderFinishReason =
@@ -618,6 +620,7 @@ export function validateProviderRequest(request: ProviderRequest): void {
     throw new TypeError("request.identity.requestId must match request.requestId");
   }
   assertMetadata(request.metadata, "request.metadata");
+  if (request.providerOptions !== undefined) assertProviderJsonValue(request.providerOptions, "request.providerOptions");
 
   request.messages.forEach((message, index) => assertMessage(message, `request.messages[${index}]`));
   request.tools.forEach((tool, index) => {

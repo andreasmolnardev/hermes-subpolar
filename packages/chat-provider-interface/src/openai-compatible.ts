@@ -52,6 +52,8 @@ export type OpenAICompatibleProviderOptions = {
   readonly resolveCredentialHandle?: OpenAICompatibleCredentialResolver;
   readonly fetch: OpenAICompatibleFetch;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly credentialHeader?: "authorization" | "x-api-key" | "x-goog-api-key";
+  readonly omitCredential?: boolean;
   /** Declarative provider-specific fields merged into the request body. */
   readonly extraBody?: Readonly<Record<string, unknown>>;
   /** Maximum non-streaming response and streaming response bytes. */
@@ -335,6 +337,7 @@ function serializeRequest(request: ProviderRequest, stream = false, extraBody?: 
   };
   return {
     ...(extraBody ?? {}),
+    ...(request.providerOptions ?? {}),
     model: request.model,
     messages: request.messages.map(serializeMessage),
     stream,
@@ -680,7 +683,11 @@ function requestHeaders(
 ): Headers {
   const headers = new Headers(options.headers);
   headers.set("content-type", "application/json");
-  headers.set("authorization", `Bearer ${credentials.apiKey}`);
+  if (!options.omitCredential) {
+    const credentialHeader = options.credentialHeader ?? "authorization";
+    if (credentialHeader === "authorization") headers.set("authorization", `Bearer ${credentials.apiKey}`);
+    else headers.set(credentialHeader, credentials.apiKey);
+  }
   if (credentials.organization !== undefined) headers.set("OpenAI-Organization", credentials.organization);
   if (credentials.project !== undefined) headers.set("OpenAI-Project", credentials.project);
   if (requestId !== undefined) headers.set("X-Request-ID", requestId);

@@ -12,7 +12,8 @@ test("identity repository scopes projects, agents, and sessions to their owner",
   try {
     const session = await repository.bootstrap("operator", "correct horse");
     const project = repository.createProject(session.principal.id, "private");
-    const agent = repository.createAgent(session.principal.id, project.id, "default", "private instructions");
+    const agent = repository.createAgent(session.principal.id, project.id, "default", "private instructions", "code");
+    assert.equal(agent.icon, "code");
     repository.claimSession(session.principal.id, "session-1", project.id, agent.id);
     assert.equal(repository.listProjects("other-user").length, 0);
     assert.equal(repository.listAgents("other-user").length, 0);

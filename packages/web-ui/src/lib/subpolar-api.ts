@@ -2,7 +2,7 @@ import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
 
 export type SubpolarUser = { readonly id: string; readonly username: string };
 export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly createdAt: string };
-export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly instructions: string; readonly createdAt: string };
+export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly icon: string; readonly instructions: string; readonly createdAt: string };
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
@@ -69,6 +69,12 @@ export function configureProvider(provider: string, baseUrl: string, apiKey: str
   return subpolarRequest("/v1/setup/provider", { method: "POST", body: JSON.stringify({ provider, baseUrl, apiKey, model }) });
 }
 
+export type SubpolarModelProvider = { readonly slug: string; readonly models: readonly { readonly id: string; readonly label: string }[] };
+
+export function availableModels(): Promise<{ readonly providers: readonly SubpolarModelProvider[] }> {
+  return subpolarRequest("/v1/models");
+}
+
 export function createInitialAgents(templates: readonly string[]): Promise<{ readonly project: SubpolarProject; readonly agents: readonly SubpolarAgent[] }> {
   return subpolarRequest("/v1/setup/agents", { method: "POST", body: JSON.stringify({ templates }) });
 }
@@ -85,8 +91,8 @@ export function agents(projectId?: string): Promise<{ readonly agents: readonly 
   return subpolarRequest(`/v1/agents${projectId === undefined ? "" : `?projectId=${encodeURIComponent(projectId)}`}`);
 }
 
-export function createAgent(projectId: string, name: string, instructions: string): Promise<{ readonly agent: SubpolarAgent }> {
-  return subpolarRequest("/v1/agents", { method: "POST", body: JSON.stringify({ projectId, name, instructions }) });
+export function createAgent(projectId: string, name: string, instructions: string, icon: string): Promise<{ readonly agent: SubpolarAgent }> {
+  return subpolarRequest("/v1/agents", { method: "POST", body: JSON.stringify({ projectId, name, instructions, icon }) });
 }
 
 export function sessions(): Promise<{ readonly sessions: readonly SubpolarSession[] }> {

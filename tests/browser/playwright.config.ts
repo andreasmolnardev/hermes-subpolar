@@ -21,7 +21,7 @@ export default defineConfig({
     video: 'retain-on-failure',
   },
   webServer: {
-    command: 'bun run tests/browser/server.ts',
+    command: 'bun run build:web && bun run tests/browser/server.ts',
     cwd: root,
     url: `http://127.0.0.1:${port}/api/health`,
     timeout: 120_000,
@@ -30,6 +30,7 @@ export default defineConfig({
     stderr: 'pipe',
     env: {
       HERMES_E2E_PORT: String(port),
+      HERMES_E2E_STATIC_ROOT: 'packages/web-ui/dist',
     },
   },
 })

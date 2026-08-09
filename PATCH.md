@@ -25,7 +25,9 @@
   explicit executable allowlisting for process-backed providers.
 - First-run authentication now routes incomplete accounts through `/setup` and
   `/setup/agents` inside one theme-aware card. The existing ThemeProvider is
-  mounted for the web UI, with Tokyo Night remaining the default theme.
+  mounted for the web UI, with Tokyo Night remaining the default theme. Setup
+  initialization now runs once, so navigation to agent selection is not reset
+  back to provider defaults.
 - Added client-side routing for authentication, setup, chat threads, projects,
   agents, automations, apps, settings, resource creation, and themed 404s.
   Sidebar, thread, resource, setup-step, and settings navigation now uses
@@ -65,4 +67,6 @@
 - `bun run test` passed.
 - `bun run build:web` passed.
 - `git diff --check` passed.
-- Browser Playwright E2E was not run per user request.
+- Browser Playwright E2E covers bootstrap, provider setup, agent setup, and
+  workspace transition using built web UI. Current environment lacks Playwright
+  Chromium, so this coverage could not execute locally.

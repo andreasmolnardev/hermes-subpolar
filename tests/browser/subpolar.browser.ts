@@ -16,21 +16,19 @@ test('serves static content, authenticates, enforces CSRF, and completes setup',
   expect(health.status()).toBe(200)
   expect(await health.json()).toEqual({ status: 'ok' })
 
-  const staticPage = await page.goto('/')
+  const staticPage = await page.goto('/setup')
   expect(staticPage?.status()).toBe(200)
-  await expect(page).toHaveTitle('Hermes API Gateway E2E')
-  await expect(page.getByRole('heading', { name: 'Hermes API Gateway E2E' })).toBeVisible()
+  await expect(page).toHaveTitle('Hermes Agent - Dashboard')
+  await expect(page.getByRole('heading', { name: 'Create administrator' })).toBeVisible()
 
   const bootstrapStatus = await page.request.get('/v1/auth/bootstrap')
   expect(bootstrapStatus.status()).toBe(200)
   expect(await bootstrapStatus.json()).toEqual({ required: true })
 
-  const bootstrap = await page.request.post('/v1/auth/bootstrap', {
-    headers: { origin },
-    data: { username, password },
-  })
-  expect(bootstrap.status()).toBe(201)
-  expect((await bootstrap.json()).user.username).toBe(username)
+  await page.getByPlaceholder('Username').fill(username)
+  await page.getByPlaceholder('Password').fill(password)
+  await page.getByRole('button', { name: 'Create account' }).click()
+  await expect(page.getByRole('heading', { name: 'Connect a model provider' })).toBeVisible()
 
   const cookies = await page.context().cookies()
   const csrf = csrfCookie(cookies)
@@ -52,30 +50,20 @@ test('serves static content, authenticates, enforces CSRF, and completes setup',
   expect(setupBefore.status()).toBe(200)
   expect(await setupBefore.json()).toEqual({ complete: false, providerConfigured: false })
 
-  const authHeaders = { origin, 'x-csrf-token': csrf }
-  const provider = await page.request.post('/v1/setup/provider', {
-    headers: authHeaders,
-    data: {
-      provider: 'openai-api',
-      baseUrl: 'https://example.invalid/v1',
-      apiKey: 'browser-e2e-key',
-      model: 'browser-e2e-model',
-    },
-  })
-  expect(provider.status()).toBe(200)
-  expect(await provider.json()).toEqual({ configured: true })
-
-  const agents = await page.request.post('/v1/setup/agents', {
-    headers: authHeaders,
-    data: { templates: ['research'] },
-  })
-  expect(agents.status()).toBe(201)
-  expect((await agents.json()).agents.length).toBeGreaterThan(0)
+  await page.getByLabel('Base URL').fill('https://example.invalid/v1')
+  await page.getByLabel('API key').fill('browser-e2e-key')
+  await page.getByLabel('Default model').fill('browser-e2e-model')
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page).toHaveURL(/\/setup\/agents$/)
+  await expect(page.getByRole('heading', { name: 'Choose your agent team' })).toBeVisible()
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await expect(page).toHaveURL(/\/chat\/new$/)
 
   const setupAfter = await page.request.get('/v1/setup')
   expect(setupAfter.status()).toBe(200)
   expect(await setupAfter.json()).toEqual({ complete: true, providerConfigured: true })
 
+  const authHeaders = { origin, 'x-csrf-token': csrf }
   const logout = await page.request.post('/v1/auth/logout', { headers: authHeaders })
   expect(logout.status()).toBe(200)
   expect((await page.request.get('/v1/me')).status()).toBe(401)

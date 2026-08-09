@@ -8,7 +8,7 @@ const port = Number(process.env.HERMES_E2E_PORT ?? '19119')
 if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('HERMES_E2E_PORT must be a valid TCP port')
 
 const dataDir = mkdtempSync(join(tmpdir(), 'hermes-browser-e2e-'))
-const staticRoot = resolve(import.meta.dir, 'fixtures')
+const staticRoot = resolve(process.cwd(), process.env.HERMES_E2E_STATIC_ROOT ?? 'tests/browser/fixtures')
 
 const cleanup = () => {
   rmSync(dataDir, { recursive: true, force: true })

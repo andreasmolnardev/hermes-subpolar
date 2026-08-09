@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent } from 'react'
 import {
   AppWindow,
   Bot,
@@ -1121,8 +1121,8 @@ export default function SubpolarApp() {
     [setupComplete, setSetupComplete] = useState(false),
     [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    void currentUser()
+  const initialize = useEffectEvent(() => {
+    return currentUser()
       .then(async r => {
         const setup = await setupStatus()
         setUser(r.user)
@@ -1139,7 +1139,10 @@ export default function SubpolarApp() {
         }
       })
       .finally(() => setLoading(false))
-  }, [routerNavigate])
+  })
+  useEffect(() => {
+    void initialize()
+  }, [])
   useEffect(() => {
     if (!loading && user === null && location.pathname !== '/login') routerNavigate('/login', { replace: true })
   }, [loading, location.pathname, routerNavigate, user])

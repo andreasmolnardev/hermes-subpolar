@@ -2,9 +2,16 @@
 
 ## Current State
 
+- Split settings into User and Agent scopes. User settings now own account and
+  interface preferences; Agent settings expose models, integrations, tools,
+  skills, plugins, memory, runtime, and global safety infrastructure without
+  duplicating first-class agent profiles. Provider setup now lives under Models.
 - Reworked Subpolar navigation around persistent project/thread sidebar,
   agent and automation galleries, and collapsed contextual detail rails; agent
   creation now requires a persisted icon selection.
+- New chats now present a vertically centered composer without a title bar;
+  sending the first message restores the thread header. Removed sparkle icons
+  from the web UI.
 - Added provider-backed model discovery and model, effort, agent, and permission
   controls to the expanded thread composer.
 - Added a declarative Hermes-style provider registry with API mode, auth,

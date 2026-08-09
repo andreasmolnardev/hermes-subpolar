@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Sparkles } from "lucide-react";
+import { Bot } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
 import { completeProviderDeviceAuth, configureProvider, createInitialAgents, setupProviders, setupStatus, startProviderDeviceAuth, startProviderOAuth } from "@/lib/subpolar-api";
@@ -11,7 +11,7 @@ function SetupCard({ step, canOpenAgents, children, editing }: { step: SetupStep
     <main className="setup-page flex min-h-screen items-center justify-center px-5 py-8">
       <section className="setup-card w-full max-w-xl rounded-2xl p-8 shadow-2xl">
         <div className="mb-8 flex items-center gap-3">
-          <div className="setup-icon flex h-11 w-11 items-center justify-center rounded-xl"><Sparkles size={21} /></div>
+          <div className="setup-icon flex h-11 w-11 items-center justify-center rounded-xl"><Bot size={21} /></div>
           <div>
             <p className="setup-eyebrow">Subpolar setup</p>
             <h1 className="text-2xl font-semibold">{editing ? "Provider settings" : step === "provider" ? "Connect a model provider" : "Choose your agent team"}</h1>

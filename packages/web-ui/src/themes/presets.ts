@@ -229,6 +229,49 @@ export const nousBlueTheme: DashboardTheme = {
   swatchColors: ["#170d02", "#0053FD", "#E8F2FD"],
 };
 
+export const highContrastDarkTheme: DashboardTheme = {
+  ...defaultTheme,
+  name: "high-contrast-dark",
+  label: "High Contrast Dark",
+  description: "Dark mode with maximum contrast",
+  palette: {
+    ...defaultTheme.palette,
+    background: { hex: "#000000", alpha: 1 },
+    midground: { hex: "#ffffff", alpha: 1 },
+    foreground: { hex: "#ffffff", alpha: 1 },
+  },
+  colorOverrides: {
+    ...defaultTheme.colorOverrides,
+    primary: "#ffffff",
+    primaryForeground: "#000000",
+    mutedForeground: "#ffffff",
+    border: "#ffffff",
+    input: "#ffffff",
+    ring: "#ffffff",
+  },
+};
+
+export const highContrastLightTheme: DashboardTheme = {
+  ...nousBlueTheme,
+  name: "high-contrast-light",
+  label: "High Contrast Light",
+  description: "Light mode with maximum contrast",
+  palette: {
+    ...nousBlueTheme.palette,
+    background: { hex: "#ffffff", alpha: 1 },
+    midground: { hex: "#000000", alpha: 1 },
+    foreground: { hex: "#000000", alpha: 1 },
+  },
+  colorOverrides: {
+    primary: "#000000",
+    primaryForeground: "#ffffff",
+    mutedForeground: "#000000",
+    border: "#000000",
+    input: "#000000",
+    ring: "#000000",
+  },
+};
+
 /**
  * Same look as ``defaultTheme`` but with a larger root font size, looser
  * line-height, and ``spacious`` density so every rem-based size in the
@@ -259,4 +302,17 @@ export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,
   rose: roseTheme,
+  "high-contrast-dark": highContrastDarkTheme,
+  "high-contrast-light": highContrastLightTheme,
+};
+
+export const THEME_VARIANTS: Record<string, Record<"light" | "dark" | "high-contrast-light" | "high-contrast-dark", string>> = {
+  default: { light: "nous-blue", dark: "default", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  "default-large": { light: "nous-blue", dark: "default-large", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  "nous-blue": { light: "nous-blue", dark: "default", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  midnight: { light: "nous-blue", dark: "midnight", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  ember: { light: "nous-blue", dark: "ember", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  mono: { light: "nous-blue", dark: "mono", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  cyberpunk: { light: "nous-blue", dark: "cyberpunk", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
+  rose: { light: "nous-blue", dark: "rose", "high-contrast-light": "high-contrast-light", "high-contrast-dark": "high-contrast-dark" },
 };

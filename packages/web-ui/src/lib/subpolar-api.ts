@@ -6,6 +6,7 @@ export type SubpolarAgent = { readonly id: string; readonly ownerId: string; rea
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
+export type SubpolarModelDefaults = { readonly conversation: string; readonly internal: string; readonly voice: string; readonly image: string };
 
 export class SubpolarApiError extends Error {
   readonly status: number;
@@ -59,6 +60,14 @@ export function currentUser(): Promise<{ readonly user: SubpolarUser }> {
 
 export function setupStatus(): Promise<SubpolarSetupStatus> {
   return subpolarRequest("/v1/setup");
+}
+
+export function modelDefaults(): Promise<SubpolarModelDefaults> {
+  return subpolarRequest("/v1/settings/models");
+}
+
+export function saveModelDefaults(defaults: SubpolarModelDefaults): Promise<SubpolarModelDefaults> {
+  return subpolarRequest("/v1/settings/models", { method: "PUT", body: JSON.stringify(defaults) });
 }
 
 export function setupProviders(): Promise<{ readonly providers: readonly ModelProviderDefinition[] }> {

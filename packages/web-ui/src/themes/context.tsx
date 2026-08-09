@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { BUILTIN_THEMES, defaultTheme } from "./presets";
+import { BUILTIN_THEMES, defaultTheme, THEME_VARIANTS } from "./presets";
 import {
   FONT_CHOICES,
   THEME_DEFAULT_FONT_ID,
@@ -19,11 +19,13 @@ import type {
   ThemeAssets,
   ThemeColorOverrides,
   ThemeComponentStyles,
+  CustomThemeInput,
   ThemeDensity,
   ThemeLayer,
   ThemeLayout,
   ThemeLayoutVariant,
   ThemeListEntry,
+  ThemeMode,
   ThemePalette,
   ThemeSeriesColors,
   ThemeTypography,
@@ -32,6 +34,21 @@ import type {
 /** LocalStorage key — pre-applied before the React tree mounts to avoid
  *  a visible flash of the default palette on theme-overridden installs. */
 const STORAGE_KEY = "hermes-dashboard-theme";
+const MODE_STORAGE_KEY = "hermes-dashboard-theme-mode";
+const CUSTOM_THEMES_STORAGE_KEY = "hermes-dashboard-custom-themes";
+
+function isThemeMode(value: string | null): value is ThemeMode {
+  return value === "system" || value === "light" || value === "dark" || value === "high-contrast-light" || value === "high-contrast-dark";
+}
+
+function systemThemeMode(): Exclude<ThemeMode, "system"> {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function themeNameForSelection(baseName: string, mode: ThemeMode, currentSystemMode = systemThemeMode()): string {
+  const effectiveMode = mode === "system" ? currentSystemMode : mode;
+  return THEME_VARIANTS[baseName]?.[effectiveMode] ?? baseName;
+}
 
 /** LocalStorage key for the font override (independent of theme). Holds a
  *  font id from the catalog in `fonts.ts`, or the `THEME_DEFAULT_FONT_ID`
@@ -52,6 +69,16 @@ const THEME_NAME_ALIASES: Record<string, string> = {
 
 function migrateThemeName(name: string): string {
   return THEME_NAME_ALIASES[name] ?? name;
+}
+
+function loadCustomThemes(): Record<string, DashboardTheme> {
+  if (typeof window === "undefined") return {};
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY) ?? "{}");
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, DashboardTheme> : {};
+  } catch {
+    return {};
+  }
 }
 
 /** Tracks fontUrls we've already injected so multiple theme switches don't
@@ -102,9 +129,10 @@ function typographyVars(typo: ThemeTypography): Record<string, string> {
 }
 
 function layoutVars(layout: ThemeLayout): Record<string, string> {
+  const radius = layout.radius === "0" ? "0" : `calc(${layout.radius} * 0.85)`;
   return {
-    "--radius": layout.radius,
-    "--theme-radius": layout.radius,
+    "--radius": radius,
+    "--theme-radius": radius,
     "--theme-spacing-mul": DENSITY_MULTIPLIERS[layout.density] ?? "1",
     "--theme-density": layout.density,
   };
@@ -410,20 +438,27 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
     return migrated;
   });
+  const [themeMode, setThemeModeState] = useState<ThemeMode>(() => {
+    if (typeof window === "undefined") return "system";
+    const storedMode = window.localStorage.getItem(MODE_STORAGE_KEY);
+    if (isThemeMode(storedMode)) return storedMode;
+    return "system";
+  });
+  const [currentSystemMode, setCurrentSystemMode] = useState<Exclude<ThemeMode, "system">>(() => systemThemeMode());
+
+  /** Full definitions for optional client-side custom themes. */
+  const [userThemeDefs, setUserThemeDefs] = useState<Record<string, DashboardTheme>>(loadCustomThemes);
 
   /** All selectable themes available in the active client. */
-  const [availableThemes] = useState<ThemeListEntry[]>(() =>
-    Object.values(BUILTIN_THEMES).map((t) => ({
+  const availableThemes = useMemo<ThemeListEntry[]>(
+    () => [...Object.values(BUILTIN_THEMES), ...Object.values(userThemeDefs)].map((t) => ({
       name: t.name,
       label: t.label,
       description: t.description,
+      definition: t,
     })),
+    [userThemeDefs],
   );
-
-  /** Full definitions for optional client-side custom themes. */
-  const [userThemeDefs] = useState<
-    Record<string, DashboardTheme>
-  >({});
 
   /** Active font-override id (independent of theme). `THEME_DEFAULT_FONT_ID`
    *  = no override. Seeded from localStorage so it's applied flash-free. */
@@ -452,10 +487,17 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // whenever the theme, the resolver, OR the font override changes. Folding
   // font into the same effect means clearing the override re-runs applyTheme,
   // which restores the theme's own font; setting it re-asserts the override.
+  const activeThemeName = themeNameForSelection(themeName, themeMode, currentSystemMode);
+
   useEffect(() => {
     _ACTIVE_FONT_OVERRIDE = fontId;
-    applyTheme(resolveTheme(themeName));
-  }, [themeName, resolveTheme, fontId]);
+    applyTheme(resolveTheme(activeThemeName));
+    if (themeMode !== "system" || typeof window === "undefined") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemMode = () => setCurrentSystemMode(systemThemeMode());
+    media.addEventListener("change", updateSystemMode);
+    return () => media.removeEventListener("change", updateSystemMode);
+  }, [activeThemeName, themeMode, resolveTheme, fontId]);
 
   const setTheme = useCallback(
     (name: string) => {
@@ -474,6 +516,46 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     [availableThemes, userThemeDefs],
   );
 
+  const setThemeMode = useCallback((mode: ThemeMode) => {
+    setThemeModeState(mode);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(MODE_STORAGE_KEY, mode);
+    }
+  }, []);
+
+  const createCustomTheme = useCallback((input: CustomThemeInput) => {
+    const label = input.label.trim();
+    if (!label || !/^#[0-9a-f]{6}$/i.test(input.background) || !/^#[0-9a-f]{6}$/i.test(input.foreground) || !/^#[0-9a-f]{6}$/i.test(input.accent)) return;
+    const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "theme";
+    const name = `custom-${slug}`;
+    const base = resolveTheme(themeName);
+    const custom: DashboardTheme = {
+      ...base,
+      name,
+      label,
+      description: "Custom theme",
+      palette: {
+        ...base.palette,
+        background: { ...base.palette.background, hex: input.background },
+        midground: { ...base.palette.midground, hex: input.foreground },
+      },
+      colorOverrides: {
+        ...base.colorOverrides,
+        primary: input.accent,
+        accent: input.accent,
+        ring: input.accent,
+      },
+      swatchColors: [input.background, input.foreground, input.accent],
+    };
+    const nextThemes = { ...userThemeDefs, [name]: custom };
+    setUserThemeDefs(nextThemes);
+    setThemeName(name);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(nextThemes));
+      window.localStorage.setItem(STORAGE_KEY, name);
+    }
+  }, [resolveTheme, themeName, userThemeDefs]);
+
   const setFont = useCallback((id: string) => {
     const next = getFontChoice(id) ? id : THEME_DEFAULT_FONT_ID;
     setFontId(next);
@@ -484,15 +566,19 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ThemeContextValue>(
     () => ({
-      theme: resolveTheme(themeName),
-      themeName,
+      theme: resolveTheme(activeThemeName),
+      baseThemeName: themeName,
+      themeName: activeThemeName,
+      themeMode,
       availableThemes,
       setTheme,
+      setThemeMode,
+      createCustomTheme,
       fontId,
       fontChoices: FONT_CHOICES,
       setFont,
     }),
-    [themeName, availableThemes, setTheme, resolveTheme, fontId, setFont],
+    [activeThemeName, themeName, themeMode, availableThemes, setTheme, setThemeMode, createCustomTheme, resolveTheme, fontId, setFont],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
@@ -504,13 +590,17 @@ export function useTheme(): ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: defaultTheme,
+  baseThemeName: "default",
   themeName: "default",
+  themeMode: "system",
   availableThemes: Object.values(BUILTIN_THEMES).map((t) => ({
     name: t.name,
     label: t.label,
     description: t.description,
   })),
   setTheme: () => {},
+  setThemeMode: () => {},
+  createCustomTheme: () => {},
   fontId: THEME_DEFAULT_FONT_ID,
   fontChoices: FONT_CHOICES,
   setFont: () => {},
@@ -519,8 +609,12 @@ const ThemeContext = createContext<ThemeContextValue>({
 interface ThemeContextValue {
   availableThemes: ThemeListEntry[];
   setTheme: (name: string) => void;
+  setThemeMode: (mode: ThemeMode) => void;
+  createCustomTheme: (input: CustomThemeInput) => void;
   theme: DashboardTheme;
+  baseThemeName: string;
   themeName: string;
+  themeMode: ThemeMode;
   /** Active font-override id (`THEME_DEFAULT_FONT_ID` = no override). */
   fontId: string;
   /** Curated font catalog for the picker. */

@@ -42,8 +42,8 @@
   --theme-letter-spacing: 0;
 
   /* Layout tokens. */
-  --radius: 0.75rem;
-  --theme-radius: 0.75rem;
+  --radius: 0.625rem;
+  --theme-radius: 0.625rem;
   --theme-spacing-mul: 1;
   --theme-density: comfortable;
 
@@ -191,6 +191,11 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
 .setup-option {
   border: 1px solid var(--color-border, color-mix(in srgb, var(--midground-base) 28%, transparent));
   background: var(--background-base);
+}
+
+.setup-theme-selected {
+  border-color: var(--color-primary, var(--midground-base));
+  background: var(--color-secondary, color-mix(in srgb, var(--midground-base) 8%, transparent));
 }
 
 .setup-option input {

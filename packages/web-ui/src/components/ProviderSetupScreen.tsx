@@ -6,7 +6,7 @@ import { completeProviderDeviceAuth, configureProvider, createInitialAgents, set
 
 type SetupStep = "provider" | "agents";
 
-function SetupCard({ step, canOpenAgents, children, editing }: { step: SetupStep; canOpenAgents: boolean; children: ReactNode; editing: boolean }) {
+function SetupCard({ step, canOpenAgents, children, editing, backTo }: { step: SetupStep; canOpenAgents: boolean; children: ReactNode; editing: boolean; backTo: string }) {
   return (
     <main className="setup-page flex min-h-screen items-center justify-center px-5 py-8">
       <section className="setup-card w-full max-w-xl rounded-2xl p-8 shadow-2xl">
@@ -17,7 +17,7 @@ function SetupCard({ step, canOpenAgents, children, editing }: { step: SetupStep
             <h1 className="text-2xl font-semibold">{editing ? "Provider settings" : step === "provider" ? "Connect a model provider" : "Choose your agent team"}</h1>
           </div>
         </div>
-        {editing ? <Link to="/settings/account" className="setup-help mb-6 inline-block text-sm hover:underline">Back to settings</Link> : null}
+        {editing ? <Link to={backTo} className="setup-help mb-6 inline-block text-sm hover:underline">Back to settings</Link> : null}
         {!editing ? <nav aria-label="Setup steps" className="mb-7 grid grid-cols-2 gap-2">
           {(["provider", "agents"] as const).map((item, index) => (
             <Link
@@ -44,6 +44,7 @@ export function ProviderSetupScreen({ onComplete, editing = false }: { onComplet
   const location = useLocation();
   const routerNavigate = useNavigate();
   const step: SetupStep = editing ? "provider" : location.pathname === "/setup/agents" ? "agents" : "provider";
+  const initialProviderId = new URLSearchParams(location.search).get("provider");
   const [providers, setProviders] = useState<readonly ModelProviderDefinition[]>([]);
   const [providerId, setProviderId] = useState("openai-api");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
@@ -68,14 +69,14 @@ export function ProviderSetupScreen({ onComplete, editing = false }: { onComplet
         if (!status.providerConfigured && step === "agents") {
           navigate("provider", true);
         }
-        const selected = catalog.providers.find(item => item.id === "openai-api") ?? catalog.providers[0];
+        const selected = catalog.providers.find(item => item.id === initialProviderId) ?? catalog.providers.find(item => item.id === "openai-api") ?? catalog.providers[0];
         if (selected === undefined) return;
         setProviderId(selected.id);
         setBaseUrl(selected.baseUrl ?? "");
         setModel(selected.fallbackModels?.[0] ?? "");
       })
       .catch(() => setError("Could not load setup configuration."));
-  }, [navigate, step]);
+  }, [initialProviderId, navigate, step]);
 
   function selectProvider(slug: string): void {
     const selected = providers.find(item => item.id === slug);
@@ -149,7 +150,7 @@ export function ProviderSetupScreen({ onComplete, editing = false }: { onComplet
   const selectedProvider = providers.find(item => item.id === providerId);
 
   return (
-    <SetupCard step={step} canOpenAgents={providerConfigured} editing={editing}>
+    <SetupCard step={step} canOpenAgents={providerConfigured} editing={editing} backTo="/settings/agent/models/providers">
       {step === "provider" ? (
         <form onSubmit={submitProvider}>
           <p className="setup-copy mb-6">Choose from the same provider catalog used by Hermes provider settings. Credentials stay on this server and are never sent back to the browser.</p>

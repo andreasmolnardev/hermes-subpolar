@@ -35,6 +35,6 @@ test("settings separate user preferences from agent infrastructure", () => {
     "account", "appearance", "chat", "voice", "notifications", "keybinds", "about",
   ]);
   assert.deepEqual(SETTINGS_SECTIONS.agent.map(section => section.id), [
-    "models", "integrations", "tools", "skills", "plugins", "memory", "runtime", "safety",
+    "models", "tools", "skills", "plugins", "memory",
   ]);
 });

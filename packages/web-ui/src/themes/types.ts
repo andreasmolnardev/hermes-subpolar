@@ -57,6 +57,15 @@ export interface ThemeTypography {
 
 export type ThemeDensity = "compact" | "comfortable" | "spacious";
 
+export type ThemeMode = "system" | "light" | "dark" | "high-contrast-light" | "high-contrast-dark";
+
+export interface CustomThemeInput {
+  label: string;
+  background: string;
+  foreground: string;
+  accent: string;
+}
+
 export interface ThemeLayout {
   /** Corner-radius token. Example: `"0"`, `"0.25rem"`, `"0.5rem"`,
    *  `"1rem"`. Maps to `--radius` and cascades into every component. */

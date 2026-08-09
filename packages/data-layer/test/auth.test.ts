@@ -128,3 +128,37 @@ test("invalid provider inputs reject before persistence", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("model defaults persist per user and use provider model on first load", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    repository.configureProvider("openai-api", "https://api.example.test/v1", "key", "conversation-model");
+    assert.deepEqual(repository.modelDefaults(session.principal.id), {
+      conversation: "conversation-model",
+      internal: "conversation-model",
+      voice: "conversation-model",
+      image: "conversation-model",
+    });
+    assert.deepEqual(repository.setModelDefaults(session.principal.id, {
+      conversation: "chat-model",
+      internal: "task-model",
+      voice: "voice-model",
+      image: "image-model",
+    }), {
+      conversation: "chat-model",
+      internal: "task-model",
+      voice: "voice-model",
+      image: "image-model",
+    });
+    assert.equal(repository.modelDefaults(session.principal.id).image, "image-model");
+    assert.throws(() => repository.setModelDefaults(session.principal.id, {
+      conversation: "",
+      internal: "task-model",
+      voice: "voice-model",
+      image: "image-model",
+    }));
+  } finally {
+    repository.close();
+  }
+});

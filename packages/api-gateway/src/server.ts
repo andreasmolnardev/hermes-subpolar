@@ -359,6 +359,25 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         return auth instanceof Response ? auth : json(identity.setupStatus(auth.principal.id));
       }
 
+      if (url.pathname === "/v1/settings/models" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        return auth instanceof Response ? auth : json(identity.modelDefaults(auth.principal.id));
+      }
+
+      if (url.pathname === "/v1/settings/models" && request.method === "PUT") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const value = await body(request, maxRequestBytes);
+          return json(identity.setModelDefaults(auth.principal.id, {
+            conversation: value.conversation,
+            internal: value.internal,
+            voice: value.voice,
+            image: value.image,
+          }));
+        } catch { return json({ error: "invalid_model_defaults" }, 400); }
+      }
+
       if ((url.pathname === "/v1/setup/providers" || url.pathname === "/v1/providers") && request.method === "GET") {
         const auth = authenticated(request, identity);
         return auth instanceof Response ? auth : json({ providers: listProviderProfiles() });

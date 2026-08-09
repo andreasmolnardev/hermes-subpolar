@@ -84,6 +84,13 @@ export type SetupStatus = {
   readonly providerConfigured: boolean;
 };
 
+export type ModelDefaults = {
+  readonly conversation: string;
+  readonly internal: string;
+  readonly voice: string;
+  readonly image: string;
+};
+
 export class AuthenticationError extends Error {
   constructor(message = "Authentication required") {
     super(message);
@@ -173,6 +180,14 @@ CREATE TABLE IF NOT EXISTS provider_oauth_states (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_provider_oauth_states_expiry ON provider_oauth_states(expires_at);
+CREATE TABLE IF NOT EXISTS user_model_defaults (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  conversation TEXT NOT NULL,
+  internal TEXT NOT NULL,
+  voice TEXT NOT NULL,
+  image TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 // Keep persistence independent from the runtime/profile package boundary.
@@ -304,6 +319,19 @@ function validCredentials(credentials: ProviderCredentials): ProviderCredentials
 function providerModel(value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) throw new Error("provider configuration is invalid");
   return value.trim();
+}
+
+function modelDefaults(value: Record<keyof ModelDefaults, unknown>): ModelDefaults {
+  const requiredModel = (model: unknown): string => {
+    if (typeof model !== "string" || model.trim().length === 0 || model.length > 256) throw new Error("model defaults are invalid");
+    return model.trim();
+  };
+  return {
+    conversation: requiredModel(value.conversation),
+    internal: requiredModel(value.internal),
+    voice: requiredModel(value.voice),
+    image: requiredModel(value.image),
+  };
 }
 
 function hashToken(token: string): string {
@@ -525,6 +553,24 @@ export class SQLiteIdentityRepository {
     const provider = providerSlug(row.provider);
     decryptCredential(row.credential_ciphertext, this.key());
     return { providerId: provider, baseUrl: row.base_url, credentialHandle: `${provider}:default`, model: row.model };
+  }
+
+  modelDefaults(userId: string): ModelDefaults {
+    const connection = this.providerConnection();
+    const fallback = connection?.model ?? "default";
+    const row = this.db.query<{ conversation: string; internal: string; voice: string; image: string }, [string]>(
+      "SELECT conversation, internal, voice, image FROM user_model_defaults WHERE user_id = ?",
+    ).get(userId);
+    return row === null ? { conversation: fallback, internal: fallback, voice: fallback, image: fallback } : row;
+  }
+
+  setModelDefaults(userId: string, value: Record<keyof ModelDefaults, unknown>): ModelDefaults {
+    const defaults = modelDefaults(value);
+    this.db.run(
+      "INSERT INTO user_model_defaults (user_id, conversation, internal, voice, image, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET conversation = excluded.conversation, internal = excluded.internal, voice = excluded.voice, image = excluded.image, updated_at = excluded.updated_at",
+      [userId, defaults.conversation, defaults.internal, defaults.voice, defaults.image, now()],
+    );
+    return defaults;
   }
 
   configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): void {

@@ -57,6 +57,15 @@ test("server authenticates users before dispatching owned chat turns", async () 
       body: JSON.stringify({ name: "Private project" }),
     });
     assert.equal(project.status, 201);
+    const initialDefaults = await fetch(`${server.url}v1/settings/models`, { headers: { cookie: cookies } });
+    assert.deepEqual(await initialDefaults.json(), { conversation: "default", internal: "default", voice: "default", image: "default" });
+    const updatedDefaults = await fetch(`${server.url}v1/settings/models`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin: new URL(server.url).origin },
+      body: JSON.stringify({ conversation: "chat", internal: "tasks", voice: "voice", image: "image" }),
+    });
+    assert.equal(updatedDefaults.status, 200);
+    assert.deepEqual(await updatedDefaults.json(), { conversation: "chat", internal: "tasks", voice: "voice", image: "image" });
     const completion = await fetch(`${server.url}v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin: new URL(server.url).origin },

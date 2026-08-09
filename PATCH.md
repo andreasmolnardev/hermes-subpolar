@@ -15,6 +15,8 @@
 - New chat composer now asks what to work on and provides project context
   selection from the prompt itself.
 - Settings navigation now shows icons for every scope and section tab.
+- Route-level React pages now live in dedicated `web-ui/src/pages` files, leaving
+  `SubpolarApp` responsible for authentication and route orchestration.
 - Settings layout now uses responsive split navigation with compact mobile tab
   expansion, scrollable section lists, and a bottom-aligned conversation link.
 - Appearance settings now support named color themes, system/light/dark and

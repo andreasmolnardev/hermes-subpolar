@@ -321,7 +321,8 @@ function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automa
     const inventoryPolicy = new Map(inventory.map(item => [item.capabilityId, item.defaultPolicy]))
     const policy = (id: string) => draft.permissions.find(item => item.capabilityId === id)?.policy ?? inventoryPolicy.get(id) ?? 'deny'
     const capabilityMutating = (capability: SubpolarCapability): boolean | undefined => {
-      if (!Array.isArray(capability.capabilities) && typeof capability.capabilities.mutating === 'boolean') return capability.capabilities.mutating
+      const metadata = capability.capabilities
+      if (!Array.isArray(metadata) && typeof metadata['mutating'] === 'boolean') return metadata['mutating'] as boolean
       if (Array.isArray(capability.capabilities) && capability.capabilities.includes('mutating')) return true
       return undefined
     }
@@ -1030,7 +1031,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
             setModel={setModel}
             modelProviders={modelProviders}
             effort={effort}
-            setEffort={setEffort}
+            setEffort={value => setEffort(value === '' || value === 'low' || value === 'medium' || value === 'high' ? value : '')}
             permission={permission}
             setPermission={setPermission}
             agents={agentList}

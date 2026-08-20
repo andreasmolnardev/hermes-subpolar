@@ -144,9 +144,14 @@ function parseAgentUpdate(value: unknown): AgentConfigurationInput {
   const allowed = new Set(["name", "description", "icon", "instructions", "model", "reasoningEffort", "capabilities", "permissions", "skillIds"]);
   const unsupported = Object.keys(record).find(key => !allowed.has(key));
   if (unsupported !== undefined) throw new TypeError("agent field is unsupported");
-  const optionalString = (key: string, max: number): string | null | undefined => {
+  const optionalString = (key: string, max: number): string | undefined => {
     if (record[key] === undefined) return undefined;
-    if (record[key] === null && (key === "model" || key === "reasoningEffort")) return null;
+    if (typeof record[key] !== "string" || record[key].length > max) throw new TypeError("agent string field is invalid");
+    return record[key];
+  };
+  const optionalNullableString = (key: string, max: number): string | null | undefined => {
+    if (record[key] === undefined) return undefined;
+    if (record[key] === null) return null;
     if (typeof record[key] !== "string" || record[key].length > max) throw new TypeError("agent string field is invalid");
     return record[key];
   };
@@ -175,8 +180,8 @@ function parseAgentUpdate(value: unknown): AgentConfigurationInput {
     ...(optionalString("description", 10_000) === undefined ? {} : { description: optionalString("description", 10_000) }),
     ...(optionalString("icon", 64) === undefined ? {} : { icon: optionalString("icon", 64) }),
     ...(optionalString("instructions", 100_000) === undefined ? {} : { instructions: optionalString("instructions", 100_000) }),
-    ...(optionalString("model", 256) === undefined ? {} : { model: optionalString("model", 256) }),
-    ...(optionalString("reasoningEffort", 32) === undefined ? {} : { reasoningEffort: optionalString("reasoningEffort", 32) }),
+    ...(optionalNullableString("model", 256) === undefined ? {} : { model: optionalNullableString("model", 256) }),
+    ...(optionalNullableString("reasoningEffort", 32) === undefined ? {} : { reasoningEffort: optionalNullableString("reasoningEffort", 32) }),
     ...(capabilities === undefined ? {} : { capabilities }),
     ...(permissions === undefined ? {} : { permissions }),
     ...(skillIds === undefined ? {} : { skillIds }),
@@ -297,7 +302,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       ...(permissionMode === undefined ? {} : { sessionMode: permissionMode }),
     });
     const configuredEffort = requestedReasoning ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
-    const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort : undefined;
+    const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort as "low" | "medium" | "high" : undefined;
     return { projectOverride, model, tools, reasoningEffort };
   };
 
@@ -748,7 +753,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             } finally {
               const approvals = pendingApprovals.get(socket);
               for (const approval of approvals?.keys() ?? []) {
-                if (approval.startsWith(`${requestId}:`)) approvals.get(approval)?.resolve("deny");
+                if (approval.startsWith(`${requestId}:`)) approvals?.get(approval)?.resolve("deny");
               }
               turns.delete(requestId);
               untrackTurn();

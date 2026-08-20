@@ -37,7 +37,7 @@ export type GatewayProtocolEvent =
     provider_request_id?: string;
     metadata?: HarnessProviderMetadata;
   } }
-  | { type: "approval.request"; session_id: string; payload: { call_id: string; name: string } }
+  | { type: "approval.request"; session_id: string; payload: { call_id: string; name: string; arguments: string } }
   | { type: "tool.start"; session_id: string; payload: { call_id: string; name: string } }
   | { type: "tool.generating"; session_id: string; payload: { call_id: string; name: string; arguments?: string } }
   | { type: "tool.complete"; session_id: string; payload: { call_id: string; is_error: boolean } }

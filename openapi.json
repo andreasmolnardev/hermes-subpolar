@@ -203,12 +203,39 @@
       }
     },
     "/v1/agents/{agentId}": {
+      "get": {
+        "summary": "Retrieve an owned agent",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/AgentId" }],
+        "responses": { "200": { "description": "Agent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentEnvelope" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "Not found" } }
+      },
       "patch": {
         "summary": "Update an owned agent configuration",
         "security": [{ "sessionCookie": [] }],
         "parameters": [{ "$ref": "#/components/parameters/AgentId" }],
         "requestBody": { "$ref": "#/components/requestBodies/AgentUpdate" },
         "responses": { "200": { "description": "Agent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidAgent" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } }
+      },
+      "delete": {
+        "summary": "Delete an owned agent",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/AgentId" }],
+        "responses": { "200": { "description": "Deleted" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } }
+      }
+    },
+    "/v1/agents/{agentId}/effective": {
+      "get": {
+        "summary": "Inspect effective Agent configuration",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/AgentId" }, { "$ref": "#/components/parameters/ProjectId" }],
+        "responses": { "200": { "description": "Effective configuration", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "summary": "List server-exposed capabilities",
+        "security": [{ "sessionCookie": [] }],
+        "responses": { "200": { "description": "Capabilities", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
       }
     },
     "/v1/sessions": {
@@ -323,7 +350,7 @@
       "DeviceComplete": { "type": "object", "required": ["deviceCode"], "properties": { "deviceCode": { "type": "string" } }, "additionalProperties": false },
       "Configured": { "type": "object", "required": ["configured"], "properties": { "configured": { "const": true } }, "additionalProperties": false },
       "Project": { "type": "object", "required": ["id", "ownerId", "name", "createdAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "name": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
-      "Agent": { "type": "object", "required": ["id", "ownerId", "projectId", "name", "description", "icon", "instructions", "capabilities", "permissions", "skillIds", "createdAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "projectId": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "icon": { "type": "string", "pattern": "^[a-z-]{2,32}$" }, "instructions": { "type": "string" }, "model": { "type": "string" }, "reasoningEffort": { "type": "string" }, "capabilities": { "type": "array", "items": { "type": "object", "required": ["capabilityId", "enabled"], "properties": { "capabilityId": { "type": "string" }, "enabled": { "type": "boolean" } }, "additionalProperties": false } }, "permissions": { "type": "array", "items": { "type": "object", "required": ["capabilityId", "policy"], "properties": { "capabilityId": { "type": "string" }, "policy": { "enum": ["allow", "ask", "deny"] } }, "additionalProperties": false } }, "skillIds": { "type": "array", "items": { "type": "string" } }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "Agent": { "type": "object", "required": ["id", "ownerId", "projectId", "name", "description", "icon", "instructions", "capabilities", "permissions", "skillIds", "createdAt", "capabilityMode"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "projectId": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "icon": { "type": "string", "pattern": "^[a-z-]{2,32}$" }, "instructions": { "type": "string" }, "model": { "type": "string" }, "reasoningEffort": { "type": "string" }, "capabilities": { "type": "array", "items": { "type": "object", "required": ["capabilityId", "enabled"], "properties": { "capabilityId": { "type": "string" }, "enabled": { "type": "boolean" } }, "additionalProperties": false } }, "permissions": { "type": "array", "items": { "type": "object", "required": ["capabilityId", "policy"], "properties": { "capabilityId": { "type": "string" }, "policy": { "enum": ["allow", "ask", "deny"] } }, "additionalProperties": false } }, "skillIds": { "type": "array", "items": { "type": "string" } }, "createdAt": { "type": "string", "format": "date-time" }, "capabilityMode": { "enum": ["legacy", "explicit"] } }, "additionalProperties": false },
       "OwnedSession": { "type": "object", "required": ["sessionId", "ownerId", "createdAt"], "properties": { "sessionId": { "type": "string" }, "ownerId": { "type": "string" }, "projectId": { "type": "string" }, "agentId": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "Projects": { "type": "object", "required": ["projects"], "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "additionalProperties": false },
       "Agents": { "type": "object", "required": ["agents"], "properties": { "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } } }, "additionalProperties": false },
@@ -340,7 +367,7 @@
       "AgentCreate": { "type": "object", "required": ["projectId", "name", "instructions", "icon"], "properties": { "projectId": { "type": "string" }, "name": { "type": "string" }, "instructions": { "type": "string" }, "icon": { "type": "string", "pattern": "^[a-z-]{2,32}$" } }, "additionalProperties": true },
       "AgentUpdate": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "icon": { "type": "string" }, "instructions": { "type": "string" }, "model": { "type": "string" }, "reasoningEffort": { "type": "string" }, "capabilities": { "type": "array" }, "permissions": { "type": "array" }, "skillIds": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
       "ChatMessage": { "type": "object", "required": ["role", "content"], "properties": { "role": { "enum": ["system", "user", "assistant"] }, "content": { "type": "string" } }, "additionalProperties": true },
-      "ChatRequest": { "type": "object", "required": ["model", "messages"], "properties": { "model": { "type": "string", "minLength": 1 }, "messages": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/ChatMessage" } }, "stream": { "type": "boolean" }, "sessionId": { "type": "string" }, "projectId": { "type": "string" }, "agentId": { "type": "string" }, "permissionMode": { "enum": ["full", "ask", "read-only"] }, "requestId": { "type": "string" } }, "additionalProperties": true },
+      "ChatRequest": { "type": "object", "required": ["model", "messages"], "properties": { "model": { "type": "string", "minLength": 1 }, "messages": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/ChatMessage" } }, "stream": { "type": "boolean" }, "sessionId": { "type": "string" }, "projectId": { "type": "string" }, "agentId": { "type": "string" }, "permissionMode": { "enum": ["full", "ask", "read-only"] }, "reasoningEffort": { "enum": ["low", "medium", "high"] }, "requestId": { "type": "string" } }, "additionalProperties": true },
       "Transcript": { "type": "object", "required": ["session", "messages"], "properties": { "session": { "type": "object", "additionalProperties": true }, "messages": { "type": "array", "items": { "type": "object", "additionalProperties": true } } }, "additionalProperties": false },
       "Completion": { "type": "object", "required": ["message", "usage"], "properties": { "message": { "type": "object", "additionalProperties": true }, "usage": { "type": "object", "required": ["inputTokens", "outputTokens"], "properties": { "inputTokens": { "type": "number", "minimum": 0 }, "outputTokens": { "type": "number", "minimum": 0 }, "totalTokens": { "type": "number", "minimum": 0 }, "cachedInputTokens": { "type": "number", "minimum": 0 }, "reasoningTokens": { "type": "number", "minimum": 0 }, "cacheCreationInputTokens": { "type": "number", "minimum": 0 }, "cacheReadInputTokens": { "type": "number", "minimum": 0 } }, "additionalProperties": false }, "finishReason": { "type": "string" }, "reasoning": { "type": "string" }, "toolResults": { "type": "array" }, "requestId": { "type": "string" }, "identity": { "type": "object", "additionalProperties": true }, "metadata": { "type": "object", "additionalProperties": true } }, "additionalProperties": true }
     }

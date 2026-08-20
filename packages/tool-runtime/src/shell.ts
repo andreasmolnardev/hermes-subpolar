@@ -282,6 +282,7 @@ export function createShellTool(options: ShellToolOptions): ToolDefinition {
   const auditSink = options.audit;
   return {
     name: options.name ?? "shell.exec",
+    capabilityId: "shell.execute",
     description: options.description ?? "Run one verified allowlisted command without a shell.",
     inputSchema: {
       type: "object",

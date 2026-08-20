@@ -1463,6 +1463,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         readonly callKey: string;
         readonly tool: HarnessTool;
         readonly arguments: HarnessJsonObject;
+        readonly precomputed?: HarnessToolResult;
       };
       const pendingTools: PendingTool[] = [];
       for (const call of providerResult.message.toolCalls) {
@@ -1495,11 +1496,21 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           return terminal(failureOutcome("tool_failure", new Error(`Malformed arguments for tool: ${call.name}`), "tool"));
         }
         if (tool.policy === "deny") {
-          return terminal(failureOutcome("approval_rejected", new Error(`Tool denied by policy: ${call.name}`), "approval"));
+          pendingTools.push({ call, callKey, tool, arguments: parsed, precomputed: {
+            content: `Tool ${call.name} was denied because the capability is not permitted for this Agent/session.`,
+            isError: true,
+            synthetic: true
+          } });
+          continue;
         }
         if (tool.policy === "ask") {
           if (request.approvalPolicy === undefined) {
-            return terminal(failureOutcome("approval_rejected", new Error(`Approval required for tool: ${call.name}`), "approval"));
+            pendingTools.push({ call, callKey, tool, arguments: parsed, precomputed: {
+              content: `Tool ${call.name} was not run because interactive approval is unavailable on this transport.`,
+              isError: true,
+              synthetic: true
+            } });
+            continue;
           }
           await emit({ type: "approval.requested", requestId: request.requestId, sessionId: request.sessionId, call });
           let decision: HarnessApprovalDecision;
@@ -1508,11 +1519,21 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           } catch (error) {
             const stopAfterApproval = stopped();
             if (stopAfterApproval !== undefined) return terminal(stopAfterApproval);
-            return terminal(failureOutcome("approval_rejected", new Error(errorMessage(typeof error === "object" && error !== null ? error : new Error(String(error)))), "approval"));
+            pendingTools.push({ call, callKey, tool, arguments: parsed, precomputed: {
+              content: `Tool ${call.name} was not run because approval was cancelled or unavailable.`,
+              isError: true,
+              synthetic: true
+            } });
+            continue;
           }
           await emit({ type: "approval.resolved", requestId: request.requestId, sessionId: request.sessionId, callId: call.id, decision });
           if (decision === "deny") {
-            return terminal(failureOutcome("approval_rejected", new Error(`Tool approval rejected: ${call.name}`), "approval"));
+            pendingTools.push({ call, callKey, tool, arguments: parsed, precomputed: {
+              content: `The user denied permission to run ${call.name}.`,
+              isError: true,
+              synthetic: true
+            } });
+            continue;
           }
         }
         const stopBeforeTool = stopped();
@@ -1567,6 +1588,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         if (stopStarting || controller.signal.aborted) {
           return { task, error: abortError() } as const;
         }
+        if (task.precomputed !== undefined) return { task, result: task.precomputed } as const;
         try {
           const raw = await withToolDeadline(
             signal => request.toolExecutor!({

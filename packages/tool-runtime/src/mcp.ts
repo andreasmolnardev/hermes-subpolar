@@ -122,10 +122,11 @@ export async function createMcpToolDefinitions(options: McpToolOptions): Promise
     names.add(name);
     return {
       name,
+      capabilityId: `mcp:${options.serverName}:${tool.name}`,
       description: tool.description ?? `MCP tool ${tool.name}`,
       inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
       source: `tool-runtime:mcp:${options.serverName}`,
-      capabilities: ["mcp"],
+      capabilities: { mcp: true, mutating: true },
       executable: { handle: createToolHandle(async (argumentsValue, signal) => {
         if (!isRecord(argumentsValue)) throw new TypeError("MCP tool arguments must be an object");
         assertMessage(argumentsValue, maxBytes);

@@ -79,6 +79,16 @@
 - Provider credentials remain encrypted at rest; AWS credentials for Bedrock
   are accepted as a server-side credential object and signed with SigV4.
 
+- Agents now persist descriptions, instructions, model/reasoning defaults,
+  normalized capability assignments, permission policies, and skill IDs.
+- Agent sessions resolve canonical capability IDs through the server-side Tool
+  Resolver, including native, MCP, and OpenAPI identities, session permission
+  overlays, and a legacy compatibility marker for pre-capability agents.
+- WebSocket turns now support scoped interactive permission approval and the
+  agent editor exposes general, instruction, model, tool, skill, and permission
+  settings. Non-interactive turns return a model-visible approval-unavailable
+  tool result instead of auto-allowing.
+
 ## Verification
 
 - `bun run check:monorepo` passed.

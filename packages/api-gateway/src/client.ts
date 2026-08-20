@@ -193,7 +193,7 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       return {
         type: "approval.request",
         session_id: event.sessionId,
-        payload: { call_id: event.call.id, name: event.call.name }
+        payload: { call_id: event.call.id, name: event.call.name, arguments: event.call.arguments }
       };
     case "approval.resolved":
       return {

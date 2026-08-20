@@ -6,6 +6,7 @@ export type SubpolarChatRequest = {
   readonly projectId?: string;
   readonly agentId?: string;
   readonly permissionMode?: "full" | "ask" | "read-only";
+  readonly reasoningEffort?: "low" | "medium" | "high";
 };
 
 export type SubpolarSocketEvent = {
@@ -126,6 +127,11 @@ export class SubpolarWebSocketClient {
   async cancel(requestId: string): Promise<void> {
     await this.opened;
     this.send({ type: "chat.cancel", requestId });
+  }
+
+  async respondPermission(requestId: string, callId: string, decision: "allow" | "deny"): Promise<void> {
+    await this.opened;
+    this.send({ type: "permission_response", requestId, callId, decision });
   }
 
   close(): void {

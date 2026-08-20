@@ -123,6 +123,19 @@ export function updateAgent(agentId: string, changes: SubpolarAgentUpdate): Prom
   return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: JSON.stringify(changes) });
 }
 
+export function getAgent(agentId: string): Promise<{ readonly agent: SubpolarAgent }> {
+  return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`);
+}
+
+export function deleteAgent(agentId: string): Promise<{ readonly deleted: true }> {
+  return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+}
+
+export function effectiveAgent(agentId: string, projectId?: string): Promise<Record<string, unknown>> {
+  const query = projectId === undefined ? "" : `?projectId=${encodeURIComponent(projectId)}`;
+  return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}/effective${query}`);
+}
+
 export function sessions(): Promise<{ readonly sessions: readonly SubpolarSession[] }> {
   return subpolarRequest("/v1/sessions");
 }

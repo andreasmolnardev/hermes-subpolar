@@ -825,9 +825,9 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   function handleEvent(requestId: string, event: SubpolarSocketEvent) {
     if (event.requestId !== undefined && event.requestId !== requestId) return
     const type = subpolarEventType(event)
-    const payload = record(event.event) ?? event
-    const approvalPayload = record(payload.payload) ?? payload
-    if ((type === 'approval.request' || type === 'approval.requested') && typeof approvalPayload.call_id === 'string' && typeof approvalPayload.name === 'string') {
+    const eventPayload = record(event.event)
+    const approvalPayload = record(eventPayload?.payload) ?? eventPayload
+    if (approvalPayload !== undefined && (type === 'approval.request' || type === 'approval.requested') && typeof approvalPayload.call_id === 'string' && typeof approvalPayload.name === 'string') {
       setPermissionRequest({ requestId, callId: approvalPayload.call_id, tool: approvalPayload.name, arguments: typeof approvalPayload.arguments === 'string' ? approvalPayload.arguments : JSON.stringify(approvalPayload.arguments ?? {}) })
     }
     const activity = projectSubpolarActivity(event)

@@ -175,13 +175,19 @@ function parseAgentUpdate(value: unknown): AgentConfigurationInput {
     if (!Array.isArray(record.skillIds) || record.skillIds.some(item => typeof item !== "string")) throw new TypeError("skills are invalid");
     return record.skillIds as string[];
   })();
+  const name = optionalString("name", 128);
+  const description = optionalString("description", 10_000);
+  const icon = optionalString("icon", 64);
+  const instructions = optionalString("instructions", 100_000);
+  const model = optionalNullableString("model", 256);
+  const reasoningEffort = optionalNullableString("reasoningEffort", 32);
   return {
-    ...(optionalString("name", 128) === undefined ? {} : { name: optionalString("name", 128) }),
-    ...(optionalString("description", 10_000) === undefined ? {} : { description: optionalString("description", 10_000) }),
-    ...(optionalString("icon", 64) === undefined ? {} : { icon: optionalString("icon", 64) }),
-    ...(optionalString("instructions", 100_000) === undefined ? {} : { instructions: optionalString("instructions", 100_000) }),
-    ...(optionalNullableString("model", 256) === undefined ? {} : { model: optionalNullableString("model", 256) }),
-    ...(optionalNullableString("reasoningEffort", 32) === undefined ? {} : { reasoningEffort: optionalNullableString("reasoningEffort", 32) }),
+    ...(name === undefined ? {} : { name }),
+    ...(description === undefined ? {} : { description }),
+    ...(icon === undefined ? {} : { icon }),
+    ...(instructions === undefined ? {} : { instructions }),
+    ...(model === undefined ? {} : { model }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(capabilities === undefined ? {} : { capabilities }),
     ...(permissions === undefined ? {} : { permissions }),
     ...(skillIds === undefined ? {} : { skillIds }),

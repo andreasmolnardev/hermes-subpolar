@@ -6,10 +6,12 @@
   "description": "Browser-based Hermes Agent dashboard.",
   "browserDependencies": [
     "@nous-research/ui",
+    "@radix-ui/react-select",
     "@tailwindcss/vite",
     "lucide-react",
     "react",
     "react-dom",
+    "react-router-dom",
     "tailwindcss"
   ],
   "dependencies": {

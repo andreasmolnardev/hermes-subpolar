@@ -32,8 +32,8 @@ export type AgentRecord = {
   readonly description: string;
   readonly icon: string;
   readonly instructions: string;
-  readonly model?: string;
-  readonly reasoningEffort?: string;
+  readonly model?: string | null;
+  readonly reasoningEffort?: string | null;
   readonly capabilities: readonly AgentCapabilityAssignment[];
   readonly permissions: readonly AgentPermissionPolicy[];
   readonly skillIds: readonly string[];
@@ -49,8 +49,8 @@ export type AgentConfigurationInput = {
   readonly description?: string;
   readonly icon?: string;
   readonly instructions?: string;
-  readonly model?: string;
-  readonly reasoningEffort?: string;
+  readonly model?: string | null;
+  readonly reasoningEffort?: string | null;
   readonly capabilities?: readonly AgentCapabilityAssignment[];
   readonly permissions?: readonly AgentPermissionPolicy[];
   readonly skillIds?: readonly string[];
@@ -633,7 +633,7 @@ export class SQLiteIdentityRepository {
     this.db.run("BEGIN IMMEDIATE");
     try {
       this.db.run("UPDATE agents SET name = ?, description = ?, icon = ?, instructions = ?, capability_mode = 'explicit' WHERE id = ?", [name, description, icon, instructions, agentId]);
-      if (input.model !== undefined || input.reasoningEffort !== undefined) this.db.run("INSERT INTO agent_model_config (agent_id, model, reasoning_effort) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET model = excluded.model, reasoning_effort = excluded.reasoning_effort", [agentId, input.model ?? existing.model ?? null, input.reasoningEffort ?? existing.reasoningEffort ?? null]);
+      if (input.model !== undefined || input.reasoningEffort !== undefined) this.db.run("INSERT INTO agent_model_config (agent_id, model, reasoning_effort) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET model = excluded.model, reasoning_effort = excluded.reasoning_effort", [agentId, input.model === null ? null : input.model ?? existing.model ?? null, input.reasoningEffort === null ? null : input.reasoningEffort ?? existing.reasoningEffort ?? null]);
       if (input.capabilities !== undefined) { this.validateCapabilities(input.capabilities); this.db.run("DELETE FROM agent_capabilities WHERE agent_id = ?", [agentId]); for (const item of input.capabilities) this.db.run("INSERT INTO agent_capabilities (agent_id, capability_id, enabled) VALUES (?, ?, ?)", [agentId, item.capabilityId, item.enabled ? 1 : 0]); }
       if (input.permissions !== undefined) { this.validatePermissions(input.permissions); this.db.run("DELETE FROM agent_permissions WHERE agent_id = ?", [agentId]); for (const item of input.permissions) this.db.run("INSERT INTO agent_permissions (agent_id, capability_id, policy) VALUES (?, ?, ?)", [agentId, item.capabilityId, item.policy]); }
       if (input.skillIds !== undefined) { this.validateSkills(input.skillIds); this.db.run("DELETE FROM agent_skills WHERE agent_id = ?", [agentId]); for (const skillId of input.skillIds) this.db.run("INSERT INTO agent_skills (agent_id, skill_id) VALUES (?, ?)", [agentId, skillId]); }

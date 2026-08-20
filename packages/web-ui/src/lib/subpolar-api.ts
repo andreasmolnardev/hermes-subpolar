@@ -4,8 +4,9 @@ export type SubpolarUser = { readonly id: string; readonly username: string };
 export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly createdAt: string };
 export type AgentCapabilityAssignment = { readonly capabilityId: string; readonly enabled: boolean };
 export type AgentPermissionPolicy = { readonly capabilityId: string; readonly policy: "allow" | "ask" | "deny" };
+export type SubpolarCapability = { readonly capabilityId: string; readonly name: string; readonly description: string; readonly source: string; readonly capabilities: readonly unknown[]; readonly defaultPolicy: "allow" | "ask" | "deny" };
 export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly description: string; readonly icon: string; readonly instructions: string; readonly model?: string; readonly reasoningEffort?: string; readonly capabilities: readonly AgentCapabilityAssignment[]; readonly permissions: readonly AgentPermissionPolicy[]; readonly skillIds: readonly string[]; readonly createdAt: string };
-export type SubpolarAgentUpdate = Partial<Pick<SubpolarAgent, "name" | "description" | "icon" | "instructions" | "model" | "reasoningEffort" | "capabilities" | "permissions" | "skillIds">>;
+export type SubpolarAgentUpdate = Partial<Pick<SubpolarAgent, "name" | "description" | "icon" | "instructions" | "capabilities" | "permissions" | "skillIds">> & { readonly model?: string | null; readonly reasoningEffort?: string | null };
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
@@ -134,6 +135,10 @@ export function deleteAgent(agentId: string): Promise<{ readonly deleted: true }
 export function effectiveAgent(agentId: string, projectId?: string): Promise<Record<string, unknown>> {
   const query = projectId === undefined ? "" : `?projectId=${encodeURIComponent(projectId)}`;
   return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}/effective${query}`);
+}
+
+export function capabilities(): Promise<{ readonly capabilities: readonly SubpolarCapability[] }> {
+  return subpolarRequest("/v1/capabilities");
 }
 
 export function sessions(): Promise<{ readonly sessions: readonly SubpolarSession[] }> {

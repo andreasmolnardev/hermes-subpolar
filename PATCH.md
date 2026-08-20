@@ -88,6 +88,9 @@
   agent editor exposes general, instruction, model, tool, skill, and permission
   settings. Non-interactive turns return a model-visible approval-unavailable
   tool result instead of auto-allowing.
+- The Agent editor now consumes the server capability inventory, groups tools by
+  source, and initializes explicit permission policies from capability defaults.
+  Agent model and reasoning PATCH fields support `null` to clear an override.
 
 ## Verification
 

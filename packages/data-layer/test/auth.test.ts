@@ -49,6 +49,9 @@ test("agent capability assignments and policies persist through updates", async 
     assert.equal(updated.model, "model-a");
     assert.equal(updated.reasoningEffort, "medium");
     assert.equal(updated.capabilityMode, "explicit");
+    const cleared = repository.updateAgent(session.principal.id, agent.id, { model: null, reasoningEffort: null });
+    assert.equal(cleared.model, undefined);
+    assert.equal(cleared.reasoningEffort, undefined);
   } finally {
     repository.close();
   }

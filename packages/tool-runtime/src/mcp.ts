@@ -9,6 +9,8 @@ export type McpToolOptions = {
   readonly serverName: string;
   readonly transport: McpTransport;
   readonly policy?: "allow" | "ask" | "auto" | "deny";
+  /** MCP has no universal trustworthy mutability flag; callers may attest a read-only server/tool set. */
+  readonly mutating?: boolean;
   readonly maxMessageBytes?: number;
   readonly signal?: AbortSignal;
 };
@@ -126,7 +128,7 @@ export async function createMcpToolDefinitions(options: McpToolOptions): Promise
       description: tool.description ?? `MCP tool ${tool.name}`,
       inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
       source: `tool-runtime:mcp:${options.serverName}`,
-      capabilities: { mcp: true, mutating: true },
+      capabilities: { mcp: true, mutating: options.mutating ?? true },
       executable: { handle: createToolHandle(async (argumentsValue, signal) => {
         if (!isRecord(argumentsValue)) throw new TypeError("MCP tool arguments must be an object");
         assertMessage(argumentsValue, maxBytes);

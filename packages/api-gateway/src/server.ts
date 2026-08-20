@@ -144,8 +144,9 @@ function parseAgentUpdate(value: unknown): AgentConfigurationInput {
   const allowed = new Set(["name", "description", "icon", "instructions", "model", "reasoningEffort", "capabilities", "permissions", "skillIds"]);
   const unsupported = Object.keys(record).find(key => !allowed.has(key));
   if (unsupported !== undefined) throw new TypeError("agent field is unsupported");
-  const optionalString = (key: string, max: number): string | undefined => {
+  const optionalString = (key: string, max: number): string | null | undefined => {
     if (record[key] === undefined) return undefined;
+    if (record[key] === null && (key === "model" || key === "reasoningEffort")) return null;
     if (typeof record[key] !== "string" || record[key].length > max) throw new TypeError("agent string field is invalid");
     return record[key];
   };
@@ -278,12 +279,34 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     return () => activeTurns.delete(controller);
   };
 
+  const resolveEffectiveAgentConfiguration = (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {
+    const projectOverride = projectId === undefined ? null : identity.getAgentProjectOverride(principal.id, projectId, agent.id);
+    const model = requestedModel !== "default" ? requestedModel : projectOverride?.model ?? agent.model;
+    const effectiveCapabilities = projectOverride?.capabilities ?? agent.capabilities;
+    const effectivePermissions = projectOverride?.permissions ?? agent.permissions;
+    const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
+      ? (options.toolDefinitions ?? []).map(definition => definition.capabilityId ?? definition.name)
+      : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
+    const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], {
+      userId: principal.id,
+      sessionId,
+      ...(projectId === undefined ? {} : { projectId }),
+      agentId: agent.id,
+      enabledCapabilityIds,
+      agentPolicies: effectivePermissions,
+      ...(permissionMode === undefined ? {} : { sessionMode: permissionMode }),
+    });
+    const configuredEffort = requestedReasoning ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
+    const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort : undefined;
+    return { projectOverride, model, tools, reasoningEffort };
+  };
+
   const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; reasoningEffort?: "low" | "medium" | "high" }> => {
     const sessionId = input.sessionId ?? randomUUID();
     const agent = input.agentId === undefined ? null : identity.getAgent(principal.id, input.agentId);
     if (input.agentId !== undefined && agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
-    const projectOverride = agent !== null && input.projectId !== undefined ? identity.getAgentProjectOverride(principal.id, input.projectId, agent.id) : null;
-    const selectedModel = input.model !== "default" ? input.model : projectOverride?.model ?? agent?.model;
+    const effectiveAgent = agent === null ? null : resolveEffectiveAgentConfiguration(principal, agent, sessionId, input.projectId, input.model, input.reasoningEffort, input.permissionMode);
+    const selectedModel = effectiveAgent?.model ?? agent?.model;
     const effectiveModel = selectedModel ?? (options.provider === undefined ? identity.providerConnection()?.model ?? input.model : input.model);
     const explicitReasoning = input.reasoningEffort;
     const existing = await sessions.getSession(sessionId);
@@ -295,22 +318,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     }
     if (agent !== null) {
       const hasSystem = input.messages.some(message => message.role === "system");
-      const effectiveCapabilities = projectOverride?.capabilities ?? agent.capabilities;
-      const effectivePermissions = projectOverride?.permissions ?? agent.permissions;
-      const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
-        ? (options.toolDefinitions ?? []).map(definition => definition.capabilityId ?? definition.name)
-        : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
-      const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], {
-        userId: principal.id,
-        sessionId,
-        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
-        agentId: agent.id,
-        enabledCapabilityIds,
-        agentPolicies: effectivePermissions,
-        ...(input.permissionMode === undefined ? {} : { sessionMode: input.permissionMode }),
-      });
-      const configuredEffort = input.reasoningEffort ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
-      const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort : undefined;
+      const tools = effectiveAgent?.tools ?? [];
+      const reasoningEffort = effectiveAgent?.reasoningEffort;
       if (!hasSystem && agent.instructions.trim()) {
         return { input: { ...input, model: effectiveModel, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
       }
@@ -525,7 +534,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       if (url.pathname === "/v1/capabilities" && request.method === "GET") {
         const auth = authenticated(request, identity);
         if (auth instanceof Response) return auth;
-        return json({ capabilities: (options.toolDefinitions ?? []).map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [] })) });
+        return json({ capabilities: (options.toolDefinitions ?? []).map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow" })) });
       }
 
       const providerModelsPath = /^\/v1\/providers\/([^/]+)\/models$/.exec(url.pathname);
@@ -601,13 +610,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const sessionId = url.searchParams.get("sessionId") ?? randomUUID();
         const projectId = url.searchParams.get("projectId") ?? agent.projectId;
         if (projectId !== agent.projectId) return json({ error: "forbidden" }, 403);
-        const projectOverride = identity.getAgentProjectOverride(auth.principal.id, projectId, agent.id);
-        const effectiveCapabilities = projectOverride?.capabilities ?? agent.capabilities;
-        const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
-          ? (options.toolDefinitions ?? []).map(definition => definition.capabilityId ?? definition.name)
-          : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
-        const resolved = resolveAgentToolDescriptors(options.toolDefinitions ?? [], { userId: auth.principal.id, sessionId, projectId, agentId: agent.id, enabledCapabilityIds, agentPolicies: projectOverride?.permissions ?? agent.permissions });
-        return json({ agent, model: projectOverride?.model ?? agent.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: projectOverride?.reasoningEffort ?? agent.reasoningEffort, capabilities: resolved.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })) });
+        const effective = resolveEffectiveAgentConfiguration(auth.principal, agent, sessionId, projectId, "default", undefined, undefined);
+        return json({ agent, model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })) });
       }
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {

@@ -27,6 +27,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   agents,
   availableModels,
+  capabilities,
   createAgent,
   createProject,
   modelDefaults,
@@ -35,6 +36,7 @@ import {
   sessions,
   updateAgent,
   type SubpolarAgent,
+  type SubpolarCapability,
   type SubpolarMessage,
   type SubpolarModelProvider,
   type SubpolarProject,
@@ -308,13 +310,16 @@ function Gallery({
   )
 }
 
-function Detail({ kind, name, agent }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent }) {
+function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent; inventory?: readonly SubpolarCapability[] }) {
   const [draft, setDraft] = useState(agent)
   const [saved, setSaved] = useState(false)
   useEffect(() => setDraft(agent), [agent?.id])
   if (kind === 'agent' && draft !== undefined) {
+    const rows = [...inventory.filter(item => !draft.capabilities.some(capability => capability.capabilityId === item.capabilityId)), ...draft.capabilities.map(item => { const meta = inventory.find(candidate => candidate.capabilityId === item.capabilityId); return { ...meta, ...item, name: meta?.name ?? item.capabilityId, description: meta?.description ?? '', source: meta?.source ?? 'other', capabilities: meta?.capabilities ?? [], defaultPolicy: meta?.defaultPolicy ?? 'deny' as const } })]
     const enabled = new Set(draft.capabilities.filter(item => item.enabled).map(item => item.capabilityId))
-    const policy = (id: string) => draft.permissions.find(item => item.capabilityId === id)?.policy ?? 'allow'
+    const inventoryPolicy = new Map(inventory.map(item => [item.capabilityId, item.defaultPolicy]))
+    const policy = (id: string) => draft.permissions.find(item => item.capabilityId === id)?.policy ?? inventoryPolicy.get(id) ?? 'deny'
+    const grouped = (source: string) => rows.filter(item => source === 'MCP' ? item.source.toLowerCase().includes('mcp') : source === 'OpenAPI' ? item.source.toLowerCase().includes('openapi') : source === 'Built-in' ? item.source.toLowerCase().includes('tool-runtime:') && !item.source.toLowerCase().includes('mcp') && !item.source.toLowerCase().includes('openapi') : !item.source.toLowerCase().includes('tool-runtime:'))
     const setBulkPolicy = (mutating: boolean, value: 'allow' | 'ask') => {
       const ids = draft.capabilities.map(item => item.capabilityId).filter(id => mutating === /\.(write|delete|push|execute)$/.test(id) || (!mutating && !/\.(write|delete|push|execute)$/.test(id)))
       const next = [...draft.permissions.filter(item => !ids.includes(item.capabilityId)), ...ids.map(capabilityId => ({ capabilityId, policy: value }))]
@@ -335,8 +340,8 @@ function Detail({ kind, name, agent }: { kind: 'agent' | 'automation'; name: str
           <div className="grid gap-5">
             <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">General</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} onBlur={() => void save({ name: draft.name })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Name" /><input value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })} onBlur={() => void save({ description: draft.description })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Description" /></div></section>
             <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Instructions</h2><textarea value={draft.instructions} onChange={event => setDraft({ ...draft, instructions: event.target.value })} onBlur={() => void save({ instructions: draft.instructions })} className="min-h-40 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3" /></section>
-            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Model</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.model ?? ''} onChange={event => setDraft({ ...draft, model: event.target.value || undefined })} onBlur={() => void save({ model: draft.model })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Conversation default" /><select value={draft.reasoningEffort ?? ''} onChange={event => { const value = event.target.value || undefined; setDraft({ ...draft, reasoningEffort: value }); void save({ reasoningEffort: value }) }} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="">Default reasoning</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div><p className="mt-2 text-xs text-[#829b92]">A conversation can temporarily choose another model.</p></section>
-            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Tools & permissions</h2><p className="mb-3 text-xs text-[#829b92]">Capabilities are references to server-exposed tools; integration setup stays elsewhere.</p><div className="mb-3 flex gap-2"><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(false, 'allow')}>Set reads Allow</button><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(true, 'ask')}>Set writes Ask</button></div>{draft.capabilities.length === 0 ? <p className="text-sm text-[#829b92]">No capabilities exposed yet.</p> : <div className="grid gap-2">{draft.capabilities.map(capability => <div key={capability.capabilityId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 p-3"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled.has(capability.capabilityId)} onChange={event => { const next = draft.capabilities.map(item => item.capabilityId === capability.capabilityId ? { ...item, enabled: event.target.checked } : item); setDraft({ ...draft, capabilities: next }); void save({ capabilities: next }) }} />{capability.capabilityId}</label>{enabled.has(capability.capabilityId) && <select value={policy(capability.capabilityId)} onChange={event => { const next = [...draft.permissions.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, policy: event.target.value as 'allow' | 'ask' | 'deny' }]; setDraft({ ...draft, permissions: next }); void save({ permissions: next }) }} className="rounded border border-white/10 bg-[#091d1e] px-2 py-1 text-xs"><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select>}</div>)}</div>}</section>
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Model</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.model ?? ''} onChange={event => setDraft({ ...draft, model: event.target.value })} onBlur={() => void save({ model: draft.model?.trim() || null })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Conversation default" /><select value={draft.reasoningEffort ?? ''} onChange={event => { const value = event.target.value || null; setDraft({ ...draft, reasoningEffort: value ?? undefined }); void save({ reasoningEffort: value }) }} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="">Default reasoning</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div><p className="mt-2 text-xs text-[#829b92]">A conversation can temporarily choose another model.</p></section>
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Tools & permissions</h2><p className="mb-3 text-xs text-[#829b92]">Capabilities are references to server-exposed tools; integration setup stays elsewhere.</p><div className="mb-3 flex gap-2"><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(false, 'allow')}>Set reads Allow</button><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(true, 'ask')}>Set writes Ask</button></div>{(['Built-in', 'MCP', 'OpenAPI', 'Other'] as const).map(group => { const groupRows = grouped(group); return groupRows.length === 0 ? null : <div key={group} className="mb-4"><p className="mb-2 text-xs uppercase tracking-widest text-[#829b92]">{group}</p><div className="grid gap-2">{groupRows.map(capability => <div key={capability.capabilityId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 p-3"><div><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled.has(capability.capabilityId)} onChange={event => { const next = [...draft.capabilities.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, enabled: event.target.checked }]; const permissions = event.target.checked && !draft.permissions.some(item => item.capabilityId === capability.capabilityId) ? [...draft.permissions, { capabilityId: capability.capabilityId, policy: capability.defaultPolicy }] : draft.permissions; setDraft({ ...draft, capabilities: next, permissions }); void save({ capabilities: next, permissions }) }} />{capability.name}</label><p className="ml-6 text-xs text-[#829b92]">{capability.capabilityId} · {capability.description}</p></div>{enabled.has(capability.capabilityId) && <select value={policy(capability.capabilityId)} onChange={event => { const next = [...draft.permissions.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, policy: event.target.value as 'allow' | 'ask' | 'deny' }]; setDraft({ ...draft, permissions: next }); void save({ permissions: next }) }} className="rounded border border-white/10 bg-[#091d1e] px-2 py-1 text-xs"><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select>}</div>)}</div></div> })}</section>
             <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Skills</h2><textarea value={draft.skillIds.join('\n')} onChange={event => setDraft({ ...draft, skillIds: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} onBlur={() => void save({ skillIds: draft.skillIds })} placeholder="One assigned skill ID per line" className="min-h-20 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3 text-sm" /></section>
           </div>
         </div>
@@ -707,7 +712,8 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   const routerNavigate = useNavigate()
   const [projectList, setProjectList] = useState<readonly SubpolarProject[]>([]),
     [agentList, setAgentList] = useState<readonly SubpolarAgent[]>([]),
-    [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([])
+    [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([]),
+    [capabilityInventory, setCapabilityInventory] = useState<readonly SubpolarCapability[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false),
     [mobileOpen, setMobileOpen] = useState(false),
     [messages, setMessages] = useState<readonly ChatMessage[]>([]),
@@ -786,6 +792,9 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     void availableModels()
       .then(result => setModelProviders(result.providers))
       .catch(() => setModelProviders([]))
+  }, [])
+  useEffect(() => {
+    void capabilities().then(result => setCapabilityInventory(result.capabilities)).catch(() => setCapabilityInventory([]))
   }, [])
   useEffect(() => {
     void modelDefaults()
@@ -1049,6 +1058,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
                 : (AUTOMATIONS.find(automation => automation.id === selectedAutomation)?.name ?? 'Automation')
             }
             agent={activeAgent}
+            inventory={capabilityInventory}
           />
         ) : (
           <Gallery

@@ -354,10 +354,11 @@ export function createOpenApiToolDefinitions(options: OpenApiToolOptions): reado
   if (operations.length !== allowed.size) throw new TypeError("OpenAPI operation allowlist contains an unknown operation");
   return operations.map(operation => ({
     name: `openapi__${options.serviceName.replace(/[^a-zA-Z0-9_.-]/g, "_")}__${operation.id.replace(/[^a-zA-Z0-9_.-]/g, "_")}`,
+    capabilityId: `openapi:${options.serviceName}:${operation.id}`,
     description: `Call ${operation.method} ${operation.path}`,
     inputSchema: parameterSchema(operation),
     source: `tool-runtime:openapi:${options.serviceName}`,
-    capabilities: ["network"],
+    capabilities: { network: true, mutating: operation.method !== "GET" },
      executable: { handle: createToolHandle((input, signal) => callOperation(operation, input, options, signal instanceof AbortSignal ? signal : undefined)) },
     policy: options.policy ?? "ask"
   }));

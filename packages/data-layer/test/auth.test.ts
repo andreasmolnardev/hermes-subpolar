@@ -15,6 +15,7 @@ test("identity repository scopes projects, agents, and sessions to their owner",
     const project = repository.createProject(session.principal.id, "private");
     const agent = repository.createAgent(session.principal.id, project.id, "default", "private instructions", "code");
     assert.equal(agent.icon, "code");
+    assert.equal(agent.capabilityMode, "explicit");
     repository.claimSession(session.principal.id, "session-1", project.id, agent.id);
     assert.equal(repository.listProjects("other-user").length, 0);
     assert.equal(repository.listAgents("other-user").length, 0);
@@ -24,6 +25,49 @@ test("identity repository scopes projects, agents, and sessions to their owner",
   } finally {
     repository.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("agent capability assignments and policies persist through updates", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    const project = repository.createProject(session.principal.id, "private");
+    const agent = repository.createAgent(session.principal.id, project.id, "default", "instructions", "code");
+    const updated = repository.updateAgent(session.principal.id, agent.id, {
+      description: "restricted agent",
+      capabilities: [{ capabilityId: "shell.execute", enabled: true }],
+      permissions: [{ capabilityId: "shell.execute", policy: "ask" }],
+      skillIds: ["code-review"],
+      model: "model-a",
+      reasoningEffort: "medium",
+    });
+    assert.equal(updated.description, "restricted agent");
+    assert.deepEqual(updated.capabilities, [{ capabilityId: "shell.execute", enabled: true }]);
+    assert.deepEqual(updated.permissions, [{ capabilityId: "shell.execute", policy: "ask" }]);
+    assert.deepEqual(updated.skillIds, ["code-review"]);
+    assert.equal(updated.model, "model-a");
+    assert.equal(updated.reasoningEffort, "medium");
+    assert.equal(updated.capabilityMode, "explicit");
+    const cleared = repository.updateAgent(session.principal.id, agent.id, { model: null, reasoningEffort: null });
+    assert.equal(cleared.model, undefined);
+    assert.equal(cleared.reasoningEffort, undefined);
+  } finally {
+    repository.close();
+  }
+});
+
+test("project agent overrides remain owner-scoped and normalized by reference", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    const project = repository.createProject(session.principal.id, "private");
+    const agent = repository.createAgent(session.principal.id, project.id, "default", "instructions", "code");
+    repository.setAgentProjectOverride(session.principal.id, { projectId: project.id, agentId: agent.id, capabilities: [{ capabilityId: "shell.execute", enabled: true }], permissions: [{ capabilityId: "shell.execute", policy: "ask" }] });
+    assert.deepEqual(repository.getAgentProjectOverride(session.principal.id, project.id, agent.id)?.permissions, [{ capabilityId: "shell.execute", policy: "ask" }]);
+    assert.equal(repository.getAgentProjectOverride("other-user", project.id, agent.id), null);
+  } finally {
+    repository.close();
   }
 });
 

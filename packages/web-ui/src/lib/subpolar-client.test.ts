@@ -11,7 +11,7 @@ class FakeSocket extends EventTarget {
   close(code?: number, reason?: string): void { this.closeCode = code; this.closeReason = reason; this.readyState = 3; }
   open(): void { this.readyState = 1; this.dispatchEvent(new Event("open")); }
   message(value: unknown): void { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) })); }
-  closed(): void { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }
+  closed(): void { this.readyState = 3; this.dispatchEvent(new Event("close")); }
 }
 
 afterEach(() => vi.useRealTimers());

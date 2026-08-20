@@ -935,12 +935,16 @@ test("multiple tool calls execute sequentially in provider order", async () => {
   assert.deepEqual(calls, ["first", "second"]);
 });
 
-test("approval denial has no tool effect and one approval terminal", async () => {
+test("approval denial has no tool effect and returns a model-visible result", async () => {
   let executed = false;
   const events: HarnessEvent[] = [];
+  let calls = 0;
   const result = await executeHarness(request({
     async complete() {
-      return response({ role: "assistant", content: "", toolCalls: [{ id: "danger", name: "delete", arguments: "{}" }] });
+      calls += 1;
+      return calls === 1
+        ? response({ role: "assistant", content: "", toolCalls: [{ id: "danger", name: "delete", arguments: "{}" }] })
+        : response({ role: "assistant", content: "The operation was denied." });
     }
   }, {
     tools: [{ name: "delete", policy: "ask" }],
@@ -952,10 +956,10 @@ test("approval denial has no tool effect and one approval terminal", async () =>
     eventSink: event => events.push(event)
   }));
 
-  assert.equal(result.outcome, "approval_rejected");
+  assert.equal(result.outcome, "completed");
   assert.equal(executed, false);
   assert.deepEqual(events.map(event => event.type), [
-    "request.started", "provider.requested", "provider.completed", "approval.requested", "approval.resolved", "terminal"
+    "request.started", "provider.requested", "provider.completed", "approval.requested", "approval.resolved", "tool.completed", "provider.requested", "provider.completed", "terminal"
   ]);
 });
 

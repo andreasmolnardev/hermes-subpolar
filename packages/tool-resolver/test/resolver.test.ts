@@ -4,6 +4,7 @@ import { test } from "bun:test";
 import {
   createToolHandle,
   resolveToolDescriptors,
+  resolveAgentToolDescriptors,
   resolveTools,
   sanitizeJsonSchema,
   sanitizeToolSchemas,
@@ -83,6 +84,28 @@ test("filters denied and disabled tools fail-closed", () => {
   ], policies), []);
 });
 
+test("agent resolution denies unassigned tools and tightens mutating tools", () => {
+  const definitions = [
+    tool("shell.read"),
+    tool("shell.execute"),
+  ];
+  const resolved = resolveAgentToolDescriptors(definitions, {
+    userId: "user",
+    sessionId: "session",
+    enabledCapabilityIds: ["shell.execute"],
+    agentPolicies: [{ capabilityId: "shell.execute", policy: "allow" }],
+    sessionMode: "ask",
+  });
+  assert.deepEqual(resolved.map(item => [item.name, item.policy]), [["shell.execute", "ask"]]);
+  assert.deepEqual(resolveAgentToolDescriptors(definitions, {
+    userId: "user",
+    sessionId: "session",
+    enabledCapabilityIds: ["shell.execute"],
+    agentPolicies: [{ capabilityId: "shell.execute", policy: "allow" }],
+    sessionMode: "read-only",
+  }), []);
+});
+
 test("uses restrictive policy precedence independent of input order", () => {
   const policies: readonly ToolPolicyInput[] = [
     { toolName: "one", policy: "allow" },
@@ -94,6 +117,28 @@ test("uses restrictive policy precedence independent of input order", () => {
   const resolved = resolveToolDescriptors([tool("one"), tool("two")], policies);
 
   assert.deepEqual(resolved.map(item => [item.name, item.policy]), [["two", "ask"]]);
+});
+
+test("authorizes canonical capability IDs independently of model-facing names", () => {
+  const resolved = resolveAgentToolDescriptors([{ ...tool("renamed.execute"), capabilityId: "shell.execute" }], {
+    userId: "user",
+    sessionId: "session",
+    enabledCapabilityIds: ["shell.execute"],
+    agentPolicies: [{ capabilityId: "shell.execute", policy: "allow" }]
+  });
+  assert.equal(resolved[0]?.capabilityId, "shell.execute");
+  assert.equal(resolved[0]?.name, "renamed.execute");
+});
+
+test("full mode cannot override an explicit deny", () => {
+  const resolved = resolveAgentToolDescriptors([tool("shell.execute")], {
+    userId: "user",
+    sessionId: "session",
+    enabledCapabilityIds: ["shell.execute"],
+    agentPolicies: [{ capabilityId: "shell.execute", policy: "deny" }],
+    sessionMode: "full"
+  });
+  assert.deepEqual(resolved, []);
 });
 
 test("rejects incomplete or invalid policy precedence before reducing policies", () => {

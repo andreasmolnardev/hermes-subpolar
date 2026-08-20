@@ -12,9 +12,10 @@ import {
   type AuthenticatedPrincipal,
   type AuthSession,
   type SessionRecord,
+  type AgentConfigurationInput,
 } from "data-layer";
 import type { HarnessApprovalPolicy } from "harness";
-import type { ToolDefinition, ToolPolicyInput } from "tool-resolver";
+import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
@@ -46,11 +47,11 @@ export type ApiGatewayServer = ReturnType<typeof Bun.serve> & {
 };
 
 type WebSocketData = { readonly principal: AuthenticatedPrincipal; readonly token: string };
-type TurnInput = { readonly model: string; readonly messages: readonly ProviderMessage[]; readonly sessionId?: string; readonly projectId?: string; readonly agentId?: string; readonly requestId?: string };
+type TurnInput = { readonly model: string; readonly messages: readonly ProviderMessage[]; readonly sessionId?: string; readonly projectId?: string; readonly agentId?: string; readonly requestId?: string; readonly permissionMode?: PermissionMode; readonly reasoningEffort?: "low" | "medium" | "high" };
 
 const SESSION_COOKIE = "subpolar_session";
 const CSRF_COOKIE = "subpolar_csrf";
-const CHAT_REQUEST_FIELDS = new Set(["model", "messages", "sessionId", "projectId", "agentId", "requestId", "stream"]);
+const CHAT_REQUEST_FIELDS = new Set(["model", "messages", "sessionId", "projectId", "agentId", "requestId", "permissionMode", "reasoningEffort", "stream"]);
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   const responseHeaders = new Headers(headers);
@@ -123,6 +124,8 @@ function turnInput(value: unknown): TurnInput {
   const projectId = stringField("projectId");
   const agentId = stringField("agentId");
   const requestId = stringField("requestId");
+  const permissionMode = body.permissionMode === undefined ? undefined : ["full", "ask", "read-only"].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : (() => { throw new TypeError("permissionMode is invalid"); })();
+  const reasoningEffort = body.reasoningEffort === undefined ? undefined : ["low", "medium", "high"].includes(String(body.reasoningEffort)) ? body.reasoningEffort as "low" | "medium" | "high" : (() => { throw new TypeError("reasoningEffort is invalid"); })();
   return {
     model: body.model,
     messages: parseMessages(body.messages),
@@ -130,6 +133,64 @@ function turnInput(value: unknown): TurnInput {
     ...(projectId === undefined ? {} : { projectId }),
     ...(agentId === undefined ? {} : { agentId }),
     ...(requestId === undefined ? {} : { requestId }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  };
+}
+
+function parseAgentUpdate(value: unknown): AgentConfigurationInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("agent update must be an object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["name", "description", "icon", "instructions", "model", "reasoningEffort", "capabilities", "permissions", "skillIds"]);
+  const unsupported = Object.keys(record).find(key => !allowed.has(key));
+  if (unsupported !== undefined) throw new TypeError("agent field is unsupported");
+  const optionalString = (key: string, max: number): string | undefined => {
+    if (record[key] === undefined) return undefined;
+    if (typeof record[key] !== "string" || record[key].length > max) throw new TypeError("agent string field is invalid");
+    return record[key];
+  };
+  const optionalNullableString = (key: string, max: number): string | null | undefined => {
+    if (record[key] === undefined) return undefined;
+    if (record[key] === null) return null;
+    if (typeof record[key] !== "string" || record[key].length > max) throw new TypeError("agent string field is invalid");
+    return record[key];
+  };
+  const capabilities = record.capabilities === undefined ? undefined : (() => {
+    if (!Array.isArray(record.capabilities)) throw new TypeError("capabilities are invalid");
+    return record.capabilities.map(item => {
+      if (typeof item !== "object" || item === null || Array.isArray(item) || typeof (item as Record<string, unknown>).capabilityId !== "string" || typeof (item as Record<string, unknown>).enabled !== "boolean") throw new TypeError("capability assignment is invalid");
+      return { capabilityId: (item as Record<string, unknown>).capabilityId as string, enabled: (item as Record<string, unknown>).enabled as boolean };
+    });
+  })();
+  const permissions = record.permissions === undefined ? undefined : (() => {
+    if (!Array.isArray(record.permissions)) throw new TypeError("permissions are invalid");
+    return record.permissions.map(item => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) throw new TypeError("permission is invalid");
+      const entry = item as Record<string, unknown>;
+      if (typeof entry.capabilityId !== "string" || !["allow", "ask", "deny"].includes(String(entry.policy))) throw new TypeError("permission is invalid");
+      return { capabilityId: entry.capabilityId, policy: entry.policy as "allow" | "ask" | "deny" };
+    });
+  })();
+  const skillIds = record.skillIds === undefined ? undefined : (() => {
+    if (!Array.isArray(record.skillIds) || record.skillIds.some(item => typeof item !== "string")) throw new TypeError("skills are invalid");
+    return record.skillIds as string[];
+  })();
+  const name = optionalString("name", 128);
+  const description = optionalString("description", 10_000);
+  const icon = optionalString("icon", 64);
+  const instructions = optionalString("instructions", 100_000);
+  const model = optionalNullableString("model", 256);
+  const reasoningEffort = optionalNullableString("reasoningEffort", 32);
+  return {
+    ...(name === undefined ? {} : { name }),
+    ...(description === undefined ? {} : { description }),
+    ...(icon === undefined ? {} : { icon }),
+    ...(instructions === undefined ? {} : { instructions }),
+    ...(model === undefined ? {} : { model }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(capabilities === undefined ? {} : { capabilities }),
+    ...(permissions === undefined ? {} : { permissions }),
+    ...(skillIds === undefined ? {} : { skillIds }),
   };
 }
 
@@ -204,6 +265,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const gateway = createGateway({ sessionRepository: persistence, persistence });
   const activeTurns = new Set<AbortController>();
   const socketTurns = new Map<object, Map<string, AbortController>>();
+  const pendingApprovals = new WeakMap<object, Map<string, { readonly resolve: (decision: "allow" | "deny") => void }>>();
   let shutdownPromise: Promise<void> | undefined;
 
   const configuredCredential = async (connection: NonNullable<ReturnType<SQLiteIdentityRepository["providerConnection"]>>) => {
@@ -228,24 +290,53 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     return () => activeTurns.delete(controller);
   };
 
-  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string }> => {
+  const resolveEffectiveAgentConfiguration = (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {
+    const projectOverride = projectId === undefined ? null : identity.getAgentProjectOverride(principal.id, projectId, agent.id);
+    const model = requestedModel !== "default" ? requestedModel : projectOverride?.model ?? agent.model;
+    const effectiveCapabilities = projectOverride?.capabilities ?? agent.capabilities;
+    const effectivePermissions = projectOverride?.permissions ?? agent.permissions;
+    const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
+      ? (options.toolDefinitions ?? []).map(definition => definition.capabilityId ?? definition.name)
+      : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
+    const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], {
+      userId: principal.id,
+      sessionId,
+      ...(projectId === undefined ? {} : { projectId }),
+      agentId: agent.id,
+      enabledCapabilityIds,
+      agentPolicies: effectivePermissions,
+      ...(permissionMode === undefined ? {} : { sessionMode: permissionMode }),
+    });
+    const configuredEffort = requestedReasoning ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
+    const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort as "low" | "medium" | "high" : undefined;
+    return { projectOverride, model, tools, reasoningEffort };
+  };
+
+  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; reasoningEffort?: "low" | "medium" | "high" }> => {
     const sessionId = input.sessionId ?? randomUUID();
+    const agent = input.agentId === undefined ? null : identity.getAgent(principal.id, input.agentId);
+    if (input.agentId !== undefined && agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
+    const effectiveAgent = agent === null ? null : resolveEffectiveAgentConfiguration(principal, agent, sessionId, input.projectId, input.model, input.reasoningEffort, input.permissionMode);
+    const selectedModel = effectiveAgent?.model ?? agent?.model;
+    const effectiveModel = selectedModel ?? (options.provider === undefined ? identity.providerConnection()?.model ?? input.model : input.model);
+    const explicitReasoning = input.reasoningEffort;
     const existing = await sessions.getSession(sessionId);
     if (existing !== null) {
       identity.assertSessionOwner(principal.id, sessionId);
     } else {
       identity.claimSession(principal.id, sessionId, input.projectId, input.agentId);
-      await sessions.createSession(sessionRecord(sessionId, input.projectId, input.model));
+      await sessions.createSession(sessionRecord(sessionId, input.projectId, effectiveModel));
     }
-    if (input.agentId !== undefined) {
-      const agent = identity.getAgent(principal.id, input.agentId);
-      if (agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
+    if (agent !== null) {
       const hasSystem = input.messages.some(message => message.role === "system");
+      const tools = effectiveAgent?.tools ?? [];
+      const reasoningEffort = effectiveAgent?.reasoningEffort;
       if (!hasSystem && agent.instructions.trim()) {
-        return { input: { ...input, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId };
+        return { input: { ...input, model: effectiveModel, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
       }
+      return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
     }
-    return { input, sessionId };
+    return { input: { ...input, model: effectiveModel }, sessionId, tools: options.toolDefinitions ?? [], ...(explicitReasoning === undefined ? {} : { reasoningEffort: explicitReasoning }) };
   };
 
   const executeTurn = async (
@@ -253,22 +344,25 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     input: TurnInput,
     signal: AbortSignal,
     emit: (event: GatewayProtocolEvent) => void | Promise<void>,
+    turnApprovalPolicy?: HarnessApprovalPolicy,
   ): Promise<unknown> => {
     const prepared = await prepareTurn(principal, input);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
     const runtime = connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
+    const approvalPolicy = turnApprovalPolicy ?? options.approvalPolicy;
     return gateway.executeRequest({
       model: prepared.input.model === "default" && runtime !== null ? runtime.model : prepared.input.model,
       messages: prepared.input.messages,
       toolPolicies: [],
-      toolDefinitions: options.toolDefinitions ?? [],
-      toolPolicyOverrides: options.toolPolicyOverrides ?? [],
+      toolDefinitions: prepared.tools,
+      toolPolicyOverrides: prepared.tools.length === 0 ? options.toolPolicyOverrides ?? [] : [],
       sessionId: prepared.sessionId,
       requestId: prepared.input.requestId ?? randomUUID(),
+      ...(prepared.reasoningEffort === undefined ? {} : { options: { reasoningEffort: prepared.reasoningEffort } }),
       signal,
       eventSink: emit,
-      approvalPolicy: async approval => {
+      ...(approvalPolicy === undefined ? {} : { approvalPolicy: async approval => {
         const approvalRequestId = `${approval.requestId}:${approval.call.id}`;
         const at = new Date().toISOString();
         await sessions.savePendingApproval({
@@ -281,16 +375,13 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           createdAt: at,
           updatedAt: at,
         });
-        if (options.approvalPolicy === undefined) {
-          throw new Error("Explicit tool approval decision required");
-        }
-        const decision = await options.approvalPolicy(approval);
+        const decision = await approvalPolicy(approval);
         if (decision !== "allow" && decision !== "deny") {
           throw new Error("Explicit tool approval decision required");
         }
         await sessions.resolvePendingApproval(approvalRequestId, decision, new Date().toISOString());
         return decision;
-      },
+      } }),
     }, options.provider ?? createProvider(runtime as NonNullable<typeof runtime>, { resolveCredential: handle => identity.resolveCredentialHandle(handle) }));
   };
 
@@ -451,6 +542,12 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         return json({ providers: [{ id: connection.providerId, models }] });
       }
 
+      if (url.pathname === "/v1/capabilities" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        return json({ capabilities: (options.toolDefinitions ?? []).map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow" })) });
+      }
+
       const providerModelsPath = /^\/v1\/providers\/([^/]+)\/models$/.exec(url.pathname);
       if (providerModelsPath !== null && request.method === "GET") {
         const auth = authenticated(request, identity);
@@ -491,6 +588,41 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           try { const value = await body(request, maxRequestBytes); return json({ agent: identity.createAgent(auth.principal.id, String(value.projectId ?? ""), String(value.name ?? ""), String(value.instructions ?? ""), String(value.icon ?? "")) }, 201); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400); }
         }
         return json({ error: "method_not_allowed" }, 405);
+      }
+
+      const agentPath = /^\/v1\/agents\/([^/]+)$/.exec(url.pathname);
+      if (agentPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const agentId = decodeURIComponent(agentPath[1] as string);
+        if (request.method === "GET") {
+          const agent = identity.getAgent(auth.principal.id, agentId);
+          return agent === null ? json({ error: "not_found" }, 404) : json({ agent });
+        }
+        if (request.method === "DELETE") {
+          try { identity.deleteAgent(auth.principal.id, agentId); return json({ deleted: true }); }
+          catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "not_found" }, error instanceof OwnershipError ? 403 : 404); }
+        }
+        if (request.method !== "PATCH") return json({ error: "method_not_allowed" }, 405, { allow: "GET, PATCH, DELETE" });
+        try {
+          const value = await body(request, maxRequestBytes);
+          return json({ agent: identity.updateAgent(auth.principal.id, agentId, parseAgentUpdate(value)) });
+        } catch (error) {
+          return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400);
+        }
+      }
+
+      const effectiveAgentPath = /^\/v1\/agents\/([^/]+)\/effective$/.exec(url.pathname);
+      if (effectiveAgentPath !== null && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        const agent = identity.getAgent(auth.principal.id, decodeURIComponent(effectiveAgentPath[1] as string));
+        if (agent === null) return json({ error: "not_found" }, 404);
+        const sessionId = url.searchParams.get("sessionId") ?? randomUUID();
+        const projectId = url.searchParams.get("projectId") ?? agent.projectId;
+        if (projectId !== agent.projectId) return json({ error: "forbidden" }, 403);
+        const effective = resolveEffectiveAgentConfiguration(auth.principal, agent, sessionId, projectId, "default", undefined, undefined);
+        return json({ agent, model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })) });
       }
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
@@ -589,6 +721,15 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             const value: unknown = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
             if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("message is invalid");
             const record = value as Record<string, unknown>;
+            if (record.type === "permission_response") {
+              if (typeof record.requestId !== "string" || typeof record.callId !== "string" || (record.decision !== "allow" && record.decision !== "deny")) throw new TypeError("permission response is invalid");
+              const approvals = pendingApprovals.get(socket);
+              const pending = approvals?.get(`${record.requestId}:${record.callId}`);
+              if (pending === undefined) throw new TypeError("permission response is not pending");
+              approvals?.delete(`${record.requestId}:${record.callId}`);
+              pending.resolve(record.decision);
+              return;
+            }
             if (record.type === "chat.cancel" && typeof record.requestId === "string") { turns.get(record.requestId)?.abort(); return; }
             if (record.type !== "chat.start" || typeof record.requestId !== "string" || typeof record.csrfToken !== "string") throw new TypeError("message type is invalid");
              if (record.csrfToken !== identity.csrfToken(socket.data.token)) throw new AuthenticationError("CSRF validation failed");
@@ -600,8 +741,26 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             turns.set(requestId, controller);
             try {
               let sequence = 0;
-              await executeTurn(socket.data.principal, { ...input, requestId }, controller.signal, event => { socket.send(eventJson(requestId, sequence++, event)); });
+              const approvalPolicy: HarnessApprovalPolicy = approval => new Promise<"allow" | "deny">(resolveDecision => {
+                const approvals = pendingApprovals.get(socket) ?? new Map();
+                pendingApprovals.set(socket, approvals);
+                const key = `${approval.requestId}:${approval.call.id}`;
+                const finish = (decision: "allow" | "deny") => {
+                  approvals.delete(key);
+                  controller.signal.removeEventListener("abort", onAbort);
+                  resolveDecision(decision);
+                };
+                const onAbort = () => finish("deny");
+                approvals.set(key, { resolve: finish });
+                controller.signal.addEventListener("abort", onAbort, { once: true });
+                if (controller.signal.aborted) finish("deny");
+              });
+              await executeTurn(socket.data.principal, { ...input, requestId }, controller.signal, event => { socket.send(eventJson(requestId, sequence++, event)); }, approvalPolicy);
             } finally {
+              const approvals = pendingApprovals.get(socket);
+              for (const approval of approvals?.keys() ?? []) {
+                if (approval.startsWith(`${requestId}:`)) approvals?.get(approval)?.resolve("deny");
+              }
               turns.delete(requestId);
               untrackTurn();
             }
@@ -612,6 +771,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       },
       close(socket) {
         for (const controller of socketTurns.get(socket)?.values() ?? []) controller.abort();
+        for (const approval of pendingApprovals.get(socket)?.values() ?? []) approval.resolve("deny");
+        pendingApprovals.delete(socket);
         socketTurns.delete(socket);
       },
     },

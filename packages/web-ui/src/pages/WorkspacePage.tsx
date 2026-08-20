@@ -27,13 +27,17 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   agents,
   availableModels,
+  capabilities,
   createAgent,
   createProject,
   modelDefaults,
   projects,
   sessionTranscript,
   sessions,
+  updateAgent,
   type SubpolarAgent,
+  type SubpolarAgentUpdate,
+  type SubpolarCapability,
   type SubpolarMessage,
   type SubpolarModelProvider,
   type SubpolarProject,
@@ -307,7 +311,56 @@ function Gallery({
   )
 }
 
-function Detail({ kind, name, agent }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent }) {
+function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent; inventory?: readonly SubpolarCapability[] }) {
+  const [draft, setDraft] = useState(agent)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => setDraft(agent), [agent?.id])
+  if (kind === 'agent' && draft !== undefined) {
+    const rows = [...inventory.filter(item => !draft.capabilities.some(capability => capability.capabilityId === item.capabilityId)), ...draft.capabilities.map(item => { const meta = inventory.find(candidate => candidate.capabilityId === item.capabilityId); return { ...meta, ...item, name: meta?.name ?? item.capabilityId, description: meta?.description ?? '', source: meta?.source ?? 'other', capabilities: meta?.capabilities ?? [], defaultPolicy: meta?.defaultPolicy ?? 'deny' as const } })]
+    const enabled = new Set(draft.capabilities.filter(item => item.enabled).map(item => item.capabilityId))
+    const inventoryPolicy = new Map(inventory.map(item => [item.capabilityId, item.defaultPolicy]))
+    const policy = (id: string) => draft.permissions.find(item => item.capabilityId === id)?.policy ?? inventoryPolicy.get(id) ?? 'deny'
+    const capabilityMutating = (capability: SubpolarCapability): boolean | undefined => {
+      const metadata = capability.capabilities
+      if (!Array.isArray(metadata)) {
+        const objectMetadata = metadata as Record<string, unknown>
+        if (typeof objectMetadata.mutating === 'boolean') return objectMetadata.mutating
+      }
+      if (Array.isArray(capability.capabilities) && capability.capabilities.includes('mutating')) return true
+      return undefined
+    }
+    const grouped = (source: string) => rows.filter(item => source === 'MCP' ? item.source.toLowerCase().includes('mcp') : source === 'OpenAPI' ? item.source.toLowerCase().includes('openapi') : source === 'Built-in' ? item.source.toLowerCase().includes('tool-runtime:') && !item.source.toLowerCase().includes('mcp') && !item.source.toLowerCase().includes('openapi') : !item.source.toLowerCase().includes('tool-runtime:'))
+    const setBulkPolicy = (mutatingSelection: boolean, value: 'allow' | 'ask') => {
+      const ids = draft.capabilities.filter(item => item.enabled).map(item => item.capabilityId).filter(id => {
+        const capability = rows.find(candidate => candidate.capabilityId === id)
+        return capability !== undefined && capabilityMutating(capability) === mutatingSelection
+      })
+      const next = [...draft.permissions.filter(item => !ids.includes(item.capabilityId)), ...ids.map(capabilityId => ({ capabilityId, policy: value }))]
+      setDraft({ ...draft, permissions: next })
+      void save({ permissions: next })
+    }
+    const save = async (changes: SubpolarAgentUpdate) => {
+      const result = await updateAgent(draft.id, changes)
+      setDraft(result.agent)
+      setSaved(true)
+      window.setTimeout(() => setSaved(false), 1800)
+    }
+    return (
+      <main className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-8">
+        <div className="mx-auto max-w-4xl">
+          <div className="mb-8 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#1d4142] text-[#70d7cc]">{agentIcon(draft)}</div><div><p className="text-xs uppercase tracking-widest text-[#70d7cc]">Agent</p><h1 className="text-2xl font-semibold">{draft.name}</h1></div></div>
+          {saved && <p className="mb-4 text-sm text-[#70d7cc]">Saved</p>}
+          <div className="grid gap-5">
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">General</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} onBlur={() => void save({ name: draft.name })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Name" /><input value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })} onBlur={() => void save({ description: draft.description })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Description" /></div></section>
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Instructions</h2><textarea value={draft.instructions} onChange={event => setDraft({ ...draft, instructions: event.target.value })} onBlur={() => void save({ instructions: draft.instructions })} className="min-h-40 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3" /></section>
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Model</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.model ?? ''} onChange={event => setDraft({ ...draft, model: event.target.value })} onBlur={() => void save({ model: draft.model?.trim() || null })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Conversation default" /><select value={draft.reasoningEffort ?? ''} onChange={event => { const value = event.target.value || null; setDraft({ ...draft, reasoningEffort: value ?? undefined }); void save({ reasoningEffort: value }) }} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="">Default reasoning</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div><p className="mt-2 text-xs text-[#829b92]">A conversation can temporarily choose another model.</p></section>
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Tools & permissions</h2><p className="mb-3 text-xs text-[#829b92]">Capabilities are references to server-exposed tools; integration setup stays elsewhere.</p><div className="mb-3 flex gap-2"><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(false, 'allow')}>Set reads Allow</button><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(true, 'ask')}>Set writes Ask</button></div>{(['Built-in', 'MCP', 'OpenAPI', 'Other'] as const).map(group => { const groupRows = grouped(group); return groupRows.length === 0 ? null : <div key={group} className="mb-4"><p className="mb-2 text-xs uppercase tracking-widest text-[#829b92]">{group}</p><div className="grid gap-2">{groupRows.map(capability => <div key={capability.capabilityId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 p-3"><div><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled.has(capability.capabilityId)} onChange={event => { const next = [...draft.capabilities.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, enabled: event.target.checked }]; const permissions = event.target.checked && !draft.permissions.some(item => item.capabilityId === capability.capabilityId) ? [...draft.permissions, { capabilityId: capability.capabilityId, policy: capability.defaultPolicy }] : draft.permissions; setDraft({ ...draft, capabilities: next, permissions }); void save({ capabilities: next, permissions }) }} />{capability.name}</label><p className="ml-6 text-xs text-[#829b92]">{capability.capabilityId} · {capability.description}</p></div>{enabled.has(capability.capabilityId) && <select value={policy(capability.capabilityId)} onChange={event => { const next = [...draft.permissions.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, policy: event.target.value as 'allow' | 'ask' | 'deny' }]; setDraft({ ...draft, permissions: next }); void save({ permissions: next }) }} className="rounded border border-white/10 bg-[#091d1e] px-2 py-1 text-xs"><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select>}</div>)}</div></div> })}</section>
+            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Skills</h2><textarea value={draft.skillIds.join('\n')} onChange={event => setDraft({ ...draft, skillIds: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} onBlur={() => void save({ skillIds: draft.skillIds })} placeholder="One assigned skill ID per line" className="min-h-20 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3 text-sm" /></section>
+          </div>
+        </div>
+      </main>
+    )
+  }
   return (
     <main className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-8">
       <div className="mx-auto max-w-4xl">
@@ -564,10 +617,10 @@ function Chat({
                 disabled={streaming}
                 className={control}
               >
-                <option value="normal">Normal effort</option>
+                <option value="">Default effort</option>
                 <option value="low">Low effort</option>
+                <option value="medium">Medium effort</option>
                 <option value="high">High effort</option>
-                <option value="max">Max effort</option>
               </select>
               <ChevronDown className="pointer-events-none absolute right-3 top-1" size={12} />
             </div>
@@ -672,17 +725,19 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   const routerNavigate = useNavigate()
   const [projectList, setProjectList] = useState<readonly SubpolarProject[]>([]),
     [agentList, setAgentList] = useState<readonly SubpolarAgent[]>([]),
-    [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([])
+    [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([]),
+    [capabilityInventory, setCapabilityInventory] = useState<readonly SubpolarCapability[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false),
     [mobileOpen, setMobileOpen] = useState(false),
     [messages, setMessages] = useState<readonly ChatMessage[]>([]),
     [draft, setDraft] = useState(''),
     [model, setModel] = useState('default'),
     [modelProviders, setModelProviders] = useState<readonly SubpolarModelProvider[]>([]),
-    [effort, setEffort] = useState('normal'),
+    [effort, setEffort] = useState<'' | 'low' | 'medium' | 'high'>(''),
     [permission, setPermission] = useState('full'),
     [streaming, setStreaming] = useState(false),
     [error, setError] = useState<string | null>(null)
+  const [permissionRequest, setPermissionRequest] = useState<{ requestId: string; callId: string; tool: string; arguments: string } | null>(null)
   const [newName, setNewName] = useState(''),
     [newInstructions, setNewInstructions] = useState(''),
     [newIcon, setNewIcon] = useState<IconName | ''>('')
@@ -752,6 +807,9 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
       .catch(() => setModelProviders([]))
   }, [])
   useEffect(() => {
+    void capabilities().then(result => setCapabilityInventory(result.capabilities)).catch(() => setCapabilityInventory([]))
+  }, [])
+  useEffect(() => {
     void modelDefaults()
       .then(result => setModel(result.conversation))
       .catch(() => undefined)
@@ -780,6 +838,11 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   function handleEvent(requestId: string, event: SubpolarSocketEvent) {
     if (event.requestId !== undefined && event.requestId !== requestId) return
     const type = subpolarEventType(event)
+    const eventPayload = record(event.event)
+    const approvalPayload = record(eventPayload?.payload) ?? eventPayload
+    if (approvalPayload !== undefined && (type === 'approval.request' || type === 'approval.requested') && typeof approvalPayload.call_id === 'string' && typeof approvalPayload.name === 'string') {
+      setPermissionRequest({ requestId, callId: approvalPayload.call_id, tool: approvalPayload.name, arguments: typeof approvalPayload.arguments === 'string' ? approvalPayload.arguments : JSON.stringify(approvalPayload.arguments ?? {}) })
+    }
     const activity = projectSubpolarActivity(event)
     if (activity !== undefined)
       setMessages(current => [
@@ -799,12 +862,14 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
         )
       )
     if (type === 'message.complete') {
+      setPermissionRequest(null)
       setStreaming(false)
       requestRef.current = null
       void refreshSessions()
       clientRef.current?.close()
     }
     if (type === 'error') {
+      setPermissionRequest(null)
       setStreaming(false)
       requestRef.current = null
       setError('Response could not be completed.')
@@ -840,7 +905,9 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
           .filter(isPromptMessage)
           .map(message => ({ role: message.role, content: messageText(message) })),
         ...(selectedProject ? { projectId: selectedProject } : {}),
-        ...(selectedAgent ? { agentId: selectedAgent } : {})
+        ...(selectedAgent ? { agentId: selectedAgent } : {}),
+        permissionMode: permission as 'full' | 'ask' | 'read-only',
+        ...(effort === '' ? {} : { reasoningEffort: effort })
       })
     } catch {
       setStreaming(false)
@@ -955,6 +1022,9 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
             </button>
           </div>
         )}
+        {permissionRequest && clientRef.current && (
+          <div className="mx-5 mt-4 rounded-xl border border-[#70d7cc]/40 bg-[#102627] p-4 shadow-lg"><p className="text-xs uppercase tracking-widest text-[#70d7cc]">Permission request</p><p className="mt-2 text-sm">Allow <span className="font-semibold">{permissionRequest.tool}</span> for this invocation?</p><pre className="mt-2 max-h-24 overflow-auto rounded bg-[#091d1e] p-2 text-xs text-[#b8d2c8]">{permissionRequest.arguments}</pre><div className="mt-3 flex gap-2"><button className="rounded bg-[#70d7cc] px-3 py-1.5 text-sm text-[#092021]" onClick={() => { void clientRef.current?.respondPermission(permissionRequest.requestId, permissionRequest.callId, 'allow'); setPermissionRequest(null) }}>Allow</button><button className="rounded border border-white/15 px-3 py-1.5 text-sm" onClick={() => { void clientRef.current?.respondPermission(permissionRequest.requestId, permissionRequest.callId, 'deny'); setPermissionRequest(null) }}>Deny</button></div></div>
+        )}
         {view === 'chat' ? (
           <Chat
             messages={messages}
@@ -964,7 +1034,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
             setModel={setModel}
             modelProviders={modelProviders}
             effort={effort}
-            setEffort={setEffort}
+            setEffort={value => setEffort(value === '' || value === 'low' || value === 'medium' || value === 'high' ? value : '')}
             permission={permission}
             setPermission={setPermission}
             agents={agentList}
@@ -1001,6 +1071,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
                 : (AUTOMATIONS.find(automation => automation.id === selectedAutomation)?.name ?? 'Automation')
             }
             agent={activeAgent}
+            inventory={capabilityInventory}
           />
         ) : (
           <Gallery

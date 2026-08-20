@@ -19,6 +19,8 @@ export type ToolCapabilityMetadata = readonly string[] | { readonly [key: string
 
 export type ToolDefinition = {
   readonly name: string;
+  /** Stable authorization identity; defaults to the model-facing name. */
+  readonly capabilityId?: string;
   readonly description: string;
   readonly inputSchema: JsonSchema;
   readonly source: string;
@@ -31,6 +33,7 @@ export type ToolDefinition = {
 
 export type ToolDescriptor = {
   readonly name: string;
+  readonly capabilityId: string;
   readonly description: string;
   readonly inputSchema: JsonSchema;
   readonly policy: Exclude<ToolPolicy, "deny">;
@@ -51,6 +54,17 @@ export type SchemaSanitizationOptions = {
 export type ResolvedTool = {
   readonly name: string;
   readonly policy: Exclude<ToolPolicySnapshot["policy"], "deny">;
+};
+
+export type PermissionMode = "full" | "ask" | "read-only";
+export type PermissionResolutionContext = {
+  readonly userId: string;
+  readonly sessionId: string;
+  readonly projectId?: string;
+  readonly agentId?: string;
+  readonly enabledCapabilityIds: readonly string[];
+  readonly agentPolicies: readonly { readonly capabilityId: string; readonly policy: Exclude<ToolPolicy, "auto"> }[];
+  readonly sessionMode?: PermissionMode;
 };
 
 export const TOOL_POLICY_PRECEDENCE: readonly ToolPolicy[] = ["deny", "ask", "allow", "auto"];
@@ -574,6 +588,7 @@ function copyDescriptor(
   }
   return {
     name: definition.name,
+    capabilityId: definition.capabilityId ?? definition.name,
     description: definition.description,
     inputSchema: sanitizeJsonSchema(originalSchema),
     policy,
@@ -604,6 +619,37 @@ export function resolveToolDescriptors(
   }
 
   return resolved.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+export function resolveAgentToolDescriptors(
+  definitions: readonly ToolDefinition[],
+  context: PermissionResolutionContext,
+): readonly ToolDescriptor[] {
+  const enabled = new Set(context.enabledCapabilityIds);
+  const policies = new Map(context.agentPolicies.map(item => [item.capabilityId, item.policy]));
+  const overrides: ToolPolicyInput[] = [];
+  for (const definition of definitions) {
+    const capabilityId = definition.capabilityId ?? definition.name;
+    if (!enabled.has(capabilityId)) {
+      overrides.push({ toolName: definition.name, policy: "deny" });
+      continue;
+    }
+    const configured = policies.get(capabilityId);
+    // A definition-level deny is authoritative (system/admin policy).
+    let policy: ToolPolicy = definition.policy === "deny" ? "deny" : configured ?? definition.policy ?? "deny";
+    const mutating = isMutatingCapability(capabilityId, definition);
+    if (context.sessionMode === "read-only" && mutating) policy = "deny";
+    else if (context.sessionMode === "ask" && policy === "allow" && mutating) policy = "ask";
+    else if (context.sessionMode === "full" && policy === "ask" && configured !== "deny") policy = "allow";
+    overrides.push({ toolName: definition.name, policy });
+  }
+  return resolveToolDescriptors(definitions, overrides);
+}
+
+function isMutatingCapability(capabilityId: string, definition: ToolDefinition): boolean {
+  if (/\.(write|delete|push|execute)$/.test(capabilityId)) return true;
+  const capabilities = definition.capabilities;
+  return !Array.isArray(capabilities) && isRecord(capabilities) && capabilities.mutating === true;
 }
 
 function resolveLegacyTools(snapshot: readonly ToolPolicyInput[]): readonly ResolvedTool[] {

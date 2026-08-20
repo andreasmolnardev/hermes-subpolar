@@ -81,3 +81,65 @@ test("OpenAPI responses are bounded before conversion to text", async () => {
     truncated: true,
   });
 });
+
+test("OpenAPI validates arguments before the injected fetch port", async () => {
+  let requests = 0;
+  const [tool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document,
+    baseUrl: "https://api.example.test/v1",
+    allowedOperationIds: ["getRecord"],
+    fetch: async () => { requests += 1; return new Response("ok"); }
+  });
+  assert.ok(tool && "handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ id: "ok", verbose: "yes" }), /wrong type/);
+  await assert.rejects(tool.executable.handle.execute({ id: "ok", extra: true }), /undocumented/);
+  assert.equal(requests, 0);
+});
+
+test("OpenAPI rejects private resolved origins", async () => {
+  const [tool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document,
+    baseUrl: "https://api.example.test/v1",
+    allowedOperationIds: ["getRecord"],
+    resolveHostname: async () => ["192.168.1.10"],
+    fetch: async () => new Response("not reached")
+  });
+  assert.ok(tool && "handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ id: "ok" }), error => {
+    assert.equal((error as { code: string }).code, "PRIVATE_ADDRESS");
+    return true;
+  });
+});
+
+test("OpenAPI redacts injected fetch failures and cancels on timeout", async () => {
+  const [tool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document,
+    baseUrl: "https://api.example.test/v1",
+    allowedOperationIds: ["getRecord"],
+    timeoutMs: 10,
+    fetch: async () => { throw new Error("secret authorization token"); }
+  });
+  assert.ok(tool && "handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ id: "ok" }), error => {
+    assert.equal((error as { code: string }).code, "REQUEST_FAILED");
+    assert.doesNotMatch((error as Error).message, /secret/);
+    return true;
+  });
+
+  const [timeoutTool] = createOpenApiToolDefinitions({
+    serviceName: "records",
+    document,
+    baseUrl: "https://api.example.test/v1",
+    allowedOperationIds: ["getRecord"],
+    timeoutMs: 5,
+    fetch: async (_input, init) => await new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true }))
+  });
+  assert.ok(timeoutTool && "handle" in timeoutTool.executable);
+  await assert.rejects(timeoutTool.executable.handle.execute({ id: "ok" }), error => {
+    assert.equal((error as { code: string }).code, "TIMEOUT");
+    return true;
+  });
+});

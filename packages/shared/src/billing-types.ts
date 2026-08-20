@@ -1,7 +1,7 @@
 /**
  * Shared Remote Spending wire contracts.
  *
- * These shapes round-trip between the Python tui_gateway and TypeScript clients
+ * These shapes round-trip between the gateway and TypeScript clients
  * such as the TUI and desktop app. Keep rendering state, client logic, and the
  * gateway event union out of this runtime-free module.
  */
@@ -12,10 +12,10 @@
  * Structured billing-wall descriptor emitted by the gateway on the
  * `message.complete` event (`payload.billing`) when an inference call fails
  * because the account is out of credits / payment is required — mirrors the
- * Python `agent/billing_links.py::BillingBlock`.
+ * gateway billing model.
  *
- * Detection is backend-only (`agent/error_classifier.py` →
- * `FailoverReason.billing`), so every surface renders from this one signal and
+ * Detection is backend-only (`FailoverReason.billing`), so every surface
+ * renders from this one signal and
  * never re-classifies free-form error text. `is_nous` routes recovery: Nous is
  * the managed route with in-app billing (desktop Settings → Billing, TUI
  * `/topup`), while third-party providers deep-link to `billing_url`.

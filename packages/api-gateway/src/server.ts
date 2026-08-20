@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -11,10 +11,13 @@ import {
   SQLiteSessionRepository,
   type AuthenticatedPrincipal,
   type AuthSession,
+  type JsonValue,
   type SessionRecord,
 } from "data-layer";
 import { serveStatic } from "./static";
 import { MODEL_PROVIDER_CATALOG, modelProvider } from "@hermes/shared/model-providers";
+import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition } from "tool-resolver";
+import type { HarnessApprovalPolicy } from "harness";
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
@@ -23,10 +26,17 @@ export type ApiGatewayServerOptions = {
   readonly staticRoot?: string;
   readonly maxRequestBytes?: number;
   readonly dataDir?: string;
+  readonly drainTimeoutMs?: number;
+  /** Server-owned runtime tools. Agent records only reference these by ID. */
+  readonly toolDefinitions?: readonly ToolDefinition[];
+};
+
+export type ApiGatewayServer = ReturnType<typeof Bun.serve> & {
+  shutdown(): Promise<void>;
 };
 
 type WebSocketData = { readonly principal: AuthenticatedPrincipal; readonly token: string };
-type TurnInput = { readonly model: string; readonly messages: readonly ProviderMessage[]; readonly sessionId?: string; readonly projectId?: string; readonly agentId?: string; readonly requestId?: string };
+type TurnInput = { readonly model: string; readonly messages: readonly ProviderMessage[]; readonly sessionId?: string; readonly projectId?: string; readonly agentId?: string; readonly requestId?: string; readonly permissionMode?: PermissionMode };
 
 const SESSION_COOKIE = "subpolar_session";
 const CSRF_COOKIE = "subpolar_csrf";
@@ -100,6 +110,8 @@ function turnInput(value: unknown): TurnInput {
   const projectId = stringField("projectId");
   const agentId = stringField("agentId");
   const requestId = stringField("requestId");
+  const permissionMode = body.permissionMode;
+  if (permissionMode !== undefined && permissionMode !== "full" && permissionMode !== "ask" && permissionMode !== "read-only") throw new TypeError("permissionMode is invalid");
   return {
     model: body.model,
     messages: parseMessages(body.messages),
@@ -107,6 +119,7 @@ function turnInput(value: unknown): TurnInput {
     ...(projectId === undefined ? {} : { projectId }),
     ...(agentId === undefined ? {} : { agentId }),
     ...(requestId === undefined ? {} : { requestId }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
   };
 }
 
@@ -154,17 +167,62 @@ function eventJson(requestId: string, sequence: number, event: GatewayProtocolEv
   return JSON.stringify({ protocol: "subpolar.v1", requestId, sequence, event });
 }
 
-export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnType<typeof Bun.serve> {
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new TypeError("value is not JSON serializable");
+    return serialized;
+  }
+  if (Array.isArray(value)) return `[${value.map(item => canonicalJson(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
+
+function requestFingerprint(ownerId: string, input: TurnInput, stream: boolean): string {
+  const normalized = {
+    ownerId,
+    request: {
+      model: input.model.trim(),
+      messages: input.messages,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+      ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
+      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+      stream,
+    },
+  };
+  return createHash("sha256").update(canonicalJson(normalized), "utf8").digest("hex");
+}
+
+function jsonValue(value: unknown): JsonValue {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new TypeError("response is not JSON serializable");
+  return JSON.parse(serialized) as JsonValue;
+}
+
+export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGatewayServer {
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   if (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1) throw new TypeError("maxRequestBytes must be positive");
+  const drainTimeoutMs = options.drainTimeoutMs ?? 10_000;
+  if (!Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 0) throw new TypeError("drainTimeoutMs must be a non-negative integer");
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "api-gateway-"));
   const databasePath = join(dataDir, "state.db");
   const sessions = new SQLiteSessionRepository(databasePath);
   const identity = new SQLiteIdentityRepository(databasePath);
   const gateway = createGateway({ sessionRepository: sessions });
-  const activeTurns = new Map<object, Map<string, AbortController>>();
+  type ActiveTurn = { readonly controller: AbortController; readonly promise: Promise<unknown> };
+  type ActiveSocket = { close(code?: number, reason?: string): void };
+  type ActiveSseStream = { close(): void };
+  const activeTurns = new Set<ActiveTurn>();
+  const activeSseStreams = new Set<ActiveSseStream>();
+  const activeSockets = new Set<ActiveSocket>();
+  const websocketTurns = new Map<object, Map<string, AbortController>>();
+  const websocketApprovals = new Map<object, Map<string, (decision: "allow" | "deny") => void>>();
+  let lifecycleState: "accepting" | "draining" | "stopped" = "accepting";
+  let shutdownPromise: Promise<void> | undefined;
+  let server: ReturnType<typeof Bun.serve>;
 
-  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string }> => {
+  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; agentModel?: string }> => {
     const sessionId = input.sessionId ?? randomUUID();
     const existing = await sessions.getSession(sessionId);
     if (existing !== null) {
@@ -178,10 +236,13 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
       if (agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
       const hasSystem = input.messages.some(message => message.role === "system");
       if (!hasSystem && agent.instructions.trim()) {
-        return { input: { ...input, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId };
+        const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], { userId: principal.id, sessionId, projectId: input.projectId, agentId: agent.id, enabledCapabilityIds: agent.capabilities.filter(item => item.enabled).map(item => item.capabilityId), agentPolicies: agent.permissions, sessionMode: input.permissionMode });
+        return { input: { ...input, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId, tools, ...(agent.model === undefined ? {} : { agentModel: agent.model }) };
       }
+      const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], { userId: principal.id, sessionId, projectId: input.projectId, agentId: agent.id, enabledCapabilityIds: agent.capabilities.filter(item => item.enabled).map(item => item.capabilityId), agentPolicies: agent.permissions, sessionMode: input.permissionMode });
+      return { input, sessionId, tools, ...(agent.model === undefined ? {} : { agentModel: agent.model }) };
     }
-    return { input, sessionId };
+    return { input, sessionId, tools: [] };
   };
 
   const executeTurn = async (
@@ -189,19 +250,20 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
     input: TurnInput,
     signal: AbortSignal,
     emit: (event: GatewayProtocolEvent) => void | Promise<void>,
+    approvalPolicy?: HarnessApprovalPolicy,
   ): Promise<unknown> => {
     const prepared = await prepareTurn(principal, input);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
     return gateway.executeRequest({
-      model: prepared.input.model === "default" && connection !== null ? connection.model : prepared.input.model,
+      model: prepared.input.model === "default" ? prepared.agentModel ?? connection?.model ?? "default" : prepared.input.model,
       messages: prepared.input.messages,
-      toolPolicies: [],
-      runtime: "harness",
+      toolPolicies: prepared.tools,
       sessionId: prepared.sessionId,
       requestId: prepared.input.requestId ?? randomUUID(),
       signal,
       eventSink: emit,
+      ...(approvalPolicy === undefined ? {} : { approvalPolicy }),
     }, options.provider ?? (() => {
       // The connection has been validated above and is never returned to clients.
       const configured = connection as NonNullable<typeof connection>;
@@ -209,13 +271,68 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
     })());
   };
 
-  const server = Bun.serve<WebSocketData>({
+  const runTurn = (
+    principal: AuthenticatedPrincipal,
+    input: TurnInput,
+    controller: AbortController,
+    emit: (event: GatewayProtocolEvent) => void | Promise<void>,
+    approvalPolicy?: HarnessApprovalPolicy,
+  ): Promise<unknown> => {
+    const promise = executeTurn(principal, input, controller.signal, emit, approvalPolicy);
+    const active: ActiveTurn = { controller, promise };
+    activeTurns.add(active);
+    void promise.then(
+      () => activeTurns.delete(active),
+      () => activeTurns.delete(active),
+    );
+    return promise;
+  };
+
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise !== undefined) return shutdownPromise;
+    shutdownPromise = (async () => {
+      lifecycleState = "draining";
+      try {
+        for (const active of activeTurns) active.controller.abort();
+        for (const stream of activeSseStreams) stream.close();
+        for (const socket of activeSockets) {
+          try { socket.close(1001, "server shutting down"); } catch { /* The socket may already be closed. */ }
+        }
+
+        const active = [...activeTurns];
+        if (active.length > 0) {
+          const drained = Promise.all(active.map(turn => turn.promise.then(() => undefined, () => undefined)));
+          await new Promise<void>(resolve => {
+            const timeout = setTimeout(resolve, drainTimeoutMs);
+            void drained.then(() => {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
+        }
+        server.stop(false);
+      } finally {
+        try {
+          sessions.close();
+        } finally {
+          identity.close();
+          lifecycleState = "stopped";
+        }
+      }
+    })();
+    return shutdownPromise;
+  };
+
+  server = Bun.serve<WebSocketData>({
     hostname: options.hostname ?? "127.0.0.1",
     port: options.port ?? 8080,
     async fetch(request, serverInstance) {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/api/health") return json({ status: "ok" });
-      if (request.method === "GET" && url.pathname === "/api/ready") return json({ status: "ready" });
+      if (request.method === "GET" && url.pathname === "/api/ready") {
+        return lifecycleState === "accepting" ? json({ status: "ready" }) : json({ status: "not_ready" }, 503);
+      }
+      if (lifecycleState !== "accepting") return json({ error: "server_draining" }, 503);
 
       if (url.pathname === "/v1/ws") {
         if (request.method !== "GET" || !originAllowed(request)) return json({ error: "origin_rejected" }, 403);
@@ -321,6 +438,54 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
         return json({ error: "method_not_allowed" }, 405);
       }
 
+      if (url.pathname === "/v1/capabilities" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        // Definitions are server-owned; never disclose executable handles.
+        return json({ capabilities: (options.toolDefinitions ?? []).map(tool => ({ id: tool.name, source: tool.source, description: tool.description, capabilities: tool.capabilities ?? {} })) });
+      }
+
+      const effectiveAgentPath = /^\/v1\/agents\/([^/]+)\/effective$/.exec(url.pathname);
+      if (effectiveAgentPath !== null && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        const agent = identity.getAgent(auth.principal.id, decodeURIComponent(effectiveAgentPath[1] as string));
+        if (agent === null) return json({ error: "not_found" }, 404);
+        const mode = url.searchParams.get("permissionMode");
+        if (mode !== null && mode !== "full" && mode !== "ask" && mode !== "read-only") return json({ error: "invalid_permission_mode" }, 400);
+        const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], { userId: auth.principal.id, projectId: agent.projectId, agentId: agent.id, enabledCapabilityIds: agent.capabilities.filter(item => item.enabled).map(item => item.capabilityId), agentPolicies: agent.permissions, ...(mode === null ? {} : { sessionMode: mode }) });
+        return json({ agentId: agent.id, model: agent.model, reasoningEffort: agent.reasoningEffort, skillIds: agent.skillIds, tools: tools.map(tool => ({ id: tool.name, source: tool.source, policy: tool.policy })) });
+      }
+
+      const agentPath = /^\/v1\/agents\/([^/]+)$/.exec(url.pathname);
+      if (agentPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const agentId = decodeURIComponent(agentPath[1] as string);
+        if (request.method === "GET") {
+          const agent = identity.getAgent(auth.principal.id, agentId);
+          return agent === null ? json({ error: "not_found" }, 404) : json({ agent });
+        }
+        if (request.method === "PATCH") {
+          try {
+            const value = await body(request, maxRequestBytes);
+            const string = (key: string): string | undefined => value[key] === undefined ? undefined : typeof value[key] === "string" ? value[key] : (() => { throw new Error("invalid agent"); })();
+            const capabilities = value.capabilities === undefined ? undefined : Array.isArray(value.capabilities) ? value.capabilities.map(item => {
+              if (typeof item !== "object" || item === null || typeof (item as Record<string, unknown>).capabilityId !== "string" || typeof (item as Record<string, unknown>).enabled !== "boolean") throw new Error("invalid agent");
+              return { capabilityId: (item as Record<string, unknown>).capabilityId as string, enabled: (item as Record<string, unknown>).enabled as boolean };
+            }) : (() => { throw new Error("invalid agent"); })();
+            const permissions = value.permissions === undefined ? undefined : Array.isArray(value.permissions) ? value.permissions.map(item => {
+              if (typeof item !== "object" || item === null || typeof (item as Record<string, unknown>).capabilityId !== "string" || !["allow", "ask", "deny"].includes(String((item as Record<string, unknown>).policy))) throw new Error("invalid agent");
+              return { capabilityId: (item as Record<string, unknown>).capabilityId as string, policy: (item as Record<string, unknown>).policy as "allow" | "ask" | "deny" };
+            }) : (() => { throw new Error("invalid agent"); })();
+            const skillIds = value.skillIds === undefined ? undefined : Array.isArray(value.skillIds) && value.skillIds.every(item => typeof item === "string") ? value.skillIds as string[] : (() => { throw new Error("invalid agent"); })();
+            return json({ agent: identity.updateAgent(auth.principal.id, agentId, { name: string("name"), description: string("description"), icon: string("icon"), instructions: string("instructions"), model: string("model"), reasoningEffort: string("reasoningEffort"), capabilities, permissions, skillIds }) });
+          } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400); }
+        }
+        if (request.method === "DELETE") { try { identity.deleteAgent(auth.principal.id, agentId); return json({ deleted: true }); } catch { return json({ error: "not_found" }, 404); } }
+        return json({ error: "method_not_allowed" }, 405);
+      }
+
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
         const auth = authenticated(request, identity);
         return auth instanceof Response ? auth : json({ sessions: identity.listSessions(auth.principal.id) });
@@ -347,30 +512,78 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
         if (auth instanceof Response) return auth;
         try {
           const value = await body(request, maxRequestBytes);
+          if (lifecycleState !== "accepting") return json({ error: "server_draining" }, 503);
           const input = turnInput(value);
-          const controller = new AbortController();
           const requestId = input.requestId ?? randomUUID();
+          const idempotencyKey = request.headers.get("Idempotency-Key");
           if (value.stream === true) {
+            if (idempotencyKey !== null) return json({ error: "idempotency_not_supported_for_streaming" }, 400);
             const encoder = new TextEncoder();
             const turnController = new AbortController();
             let sequence = 0;
             let closed = false;
+            let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+            let activeStream: ActiveSseStream | undefined;
+            const closeStream = () => {
+              if (closed) return;
+              closed = true;
+              turnController.abort();
+              try { streamController?.close(); } catch { /* The client may have cancelled the stream. */ }
+              if (activeStream !== undefined) activeSseStreams.delete(activeStream);
+            };
             const stream = new ReadableStream<Uint8Array>({
               start(controller) {
-                void executeTurn(auth.principal, { ...input, requestId }, turnController.signal, event => {
+                streamController = controller;
+                activeStream = { close: closeStream };
+                activeSseStreams.add(activeStream);
+                void runTurn(auth.principal, { ...input, requestId }, turnController, event => {
                   if (!closed) controller.enqueue(encoder.encode(`data: ${eventJson(requestId, sequence++, event)}\n\n`));
                 }).then(() => {
                   if (!closed) { closed = true; controller.enqueue(encoder.encode("data: [DONE]\n\n")); controller.close(); }
-                }).catch(() => {
+                }, () => {
                   if (!closed) { closed = true; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ protocol: "subpolar.v1", requestId, sequence: sequence++, type: "error", code: "request_failed" })}\n\n`)); controller.close(); }
+                }).then(() => {
+                  if (activeStream !== undefined) activeSseStreams.delete(activeStream);
+                }, () => {
+                  if (activeStream !== undefined) activeSseStreams.delete(activeStream);
                 });
               },
-              cancel() { turnController.abort(); },
+              cancel: closeStream,
             });
             return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" } });
           }
-          const result = await executeTurn(auth.principal, { ...input, requestId }, new AbortController().signal, () => undefined);
-          return json(result);
+          const idempotency = idempotencyKey === null ? undefined : {
+            scope: `${auth.principal.id}:POST:/v1/chat/completions`,
+            key: idempotencyKey,
+            requestHash: requestFingerprint(auth.principal.id, input, false),
+          };
+          let claimedIdempotency: typeof idempotency = undefined;
+          if (idempotency !== undefined) {
+            const claim = await sessions.claimIdempotency({
+              ...idempotency,
+              createdAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            });
+            if (claim.status === "mismatch") return json({ error: "idempotency_conflict" }, 409);
+            if (claim.status === "in_progress") return json({ error: "idempotency_in_progress" }, 409);
+            if (claim.status === "replay") return json(claim.response, claim.record.statusCode);
+            claimedIdempotency = idempotency;
+          }
+          let result: unknown;
+          try {
+            result = await runTurn(auth.principal, { ...input, requestId }, new AbortController(), () => undefined);
+          } catch (error) {
+            const status = error instanceof OwnershipError ? 403 : 400;
+            const response = { error: error instanceof OwnershipError ? "forbidden" : "request_failed" } as const;
+            if (claimedIdempotency !== undefined) {
+              await sessions.completeIdempotency({ ...claimedIdempotency, state: "failed", statusCode: status, response });
+            }
+            return json(response, status);
+          }
+          if (claimedIdempotency === undefined) return json(result);
+          const response = jsonValue(result);
+          await sessions.completeIdempotency({ ...claimedIdempotency, state: "completed", statusCode: 200, response });
+          return json(response);
         } catch (error) {
           return json({ error: error instanceof OwnershipError ? "forbidden" : "request_failed" }, error instanceof OwnershipError ? 403 : 400);
         }
@@ -381,18 +594,24 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
     },
     websocket: {
       open(socket) {
-        activeTurns.set(socket, new Map());
+        activeSockets.add(socket);
+        websocketTurns.set(socket, new Map());
+        websocketApprovals.set(socket, new Map());
         socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "connected" }));
       },
       message(socket, message) {
-        const turns = activeTurns.get(socket) ?? new Map<string, AbortController>();
-        activeTurns.set(socket, turns);
+        if (lifecycleState !== "accepting") return;
+        const turns = websocketTurns.get(socket) ?? new Map<string, AbortController>();
+        websocketTurns.set(socket, turns);
+        const approvals = websocketApprovals.get(socket) ?? new Map<string, (decision: "allow" | "deny") => void>();
+        websocketApprovals.set(socket, approvals);
         void (async () => {
           try {
             const value: unknown = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
             if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("message is invalid");
             const record = value as Record<string, unknown>;
             if (record.type === "chat.cancel" && typeof record.requestId === "string") { turns.get(record.requestId)?.abort(); return; }
+            if (record.type === "approval.respond" && typeof record.callId === "string" && (record.decision === "allow" || record.decision === "deny")) { approvals.get(record.callId)?.(record.decision); return; }
             if (record.type !== "chat.start" || typeof record.requestId !== "string" || typeof record.csrfToken !== "string") throw new TypeError("message type is invalid");
             if (record.csrfToken !== identity.csrfToken(socket.data.token)) throw new AuthenticationError("CSRF validation failed");
             const requestId = record.requestId;
@@ -400,20 +619,32 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ReturnT
             const controller = new AbortController();
             turns.set(requestId, controller);
             let sequence = 0;
-            await executeTurn(socket.data.principal, { ...input, requestId }, controller.signal, event => { socket.send(eventJson(requestId, sequence++, event)); });
-            turns.delete(requestId);
+            try {
+              const approvalPolicy: HarnessApprovalPolicy = request => new Promise(resolveApproval => {
+                approvals.set(request.call.id, decision => { approvals.delete(request.call.id); resolveApproval(decision); });
+                request.signal.addEventListener("abort", () => { approvals.delete(request.call.id); resolveApproval("deny"); }, { once: true });
+              });
+              await runTurn(socket.data.principal, { ...input, requestId }, controller, event => { socket.send(eventJson(requestId, sequence++, event)); }, approvalPolicy);
+            } finally {
+              turns.delete(requestId);
+              for (const resolveApproval of approvals.values()) resolveApproval("deny");
+            }
           } catch (error) {
-            socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "error", code: error instanceof AuthenticationError ? "unauthorized" : "request_failed", message: "Request failed" }));
+            try { socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "error", code: error instanceof AuthenticationError ? "unauthorized" : "request_failed", message: "Request failed" })); } catch { /* The socket may be closing during shutdown. */ }
           }
         })();
       },
       close(socket) {
-        for (const controller of activeTurns.get(socket)?.values() ?? []) controller.abort();
-        activeTurns.delete(socket);
+        for (const controller of websocketTurns.get(socket)?.values() ?? []) controller.abort();
+        websocketTurns.delete(socket);
+        const approvals = websocketApprovals.get(socket);
+        for (const resolveApproval of approvals?.values() ?? []) resolveApproval("deny");
+        websocketApprovals.delete(socket);
+        activeSockets.delete(socket);
       },
     },
   });
-  return server;
+  return Object.assign(server, { shutdown });
 }
 
 if (import.meta.main) {
@@ -421,22 +652,13 @@ if (import.meta.main) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("SUBPOLAR_PORT must be a valid TCP port");
   }
-  startApiGatewayServer({
+  const server = startApiGatewayServer({
     hostname: process.env.SUBPOLAR_HOST ?? "127.0.0.1",
     port,
     staticRoot: process.env.SUBPOLAR_STATIC_ROOT ?? resolve(process.cwd(), "packages/web-ui/dist"),
     ...(process.env.SUBPOLAR_DATA_DIR === undefined ? {} : { dataDir: process.env.SUBPOLAR_DATA_DIR }),
   });
-}
-if (import.meta.main) {
-  const port = Number(process.env.SUBPOLAR_PORT ?? "8080");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error("SUBPOLAR_PORT must be a valid TCP port");
-  }
-  startApiGatewayServer({
-    hostname: process.env.SUBPOLAR_HOST ?? "127.0.0.1",
-    port,
-    staticRoot: process.env.SUBPOLAR_STATIC_ROOT ?? resolve(process.cwd(), "packages/web-ui/dist"),
-    ...(process.env.SUBPOLAR_DATA_DIR === undefined ? {} : { dataDir: process.env.SUBPOLAR_DATA_DIR }),
-  });
+  const shutdown = () => { void server.shutdown().then(() => process.exit(0), () => process.exit(1)); };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }

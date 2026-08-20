@@ -7,7 +7,7 @@
 #
 # Put TLS and public authentication policy in a reverse proxy. Forward
 # Host, X-Forwarded-Host, X-Forwarded-Proto, X-Forwarded-Prefix, and upgrade
-# WebSocket connections for /api/ws, /api/pty, /api/events, and /api/pub.
+# WebSocket connections for /v1/ws.
 services:
   subpolar:
     build: .
@@ -21,7 +21,7 @@ services:
     environment:
       SUBPOLAR_HOST: 0.0.0.0
       SUBPOLAR_DATA_DIR: /opt/data
-    command: ['bun', 'packages/api-gateway/src/server.ts']
+    command: ['bun', 'run', 'serve']
     healthcheck:
       test: ['CMD', 'bun', '-e', "fetch('http://127.0.0.1:8080/api/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s

@@ -1,11 +1,14 @@
 import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
+import type { SubpolarChatRequest } from "./subpolar-client";
 
 export type SubpolarUser = { readonly id: string; readonly username: string };
 export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly createdAt: string };
-export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly instructions: string; readonly createdAt: string };
+export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly description: string; readonly icon?: string; readonly instructions: string; readonly model?: string; readonly reasoningEffort?: string; readonly capabilities: readonly { readonly capabilityId: string; readonly enabled: boolean }[]; readonly permissions: readonly { readonly capabilityId: string; readonly policy: "allow" | "ask" | "deny" }[]; readonly skillIds: readonly string[]; readonly createdAt: string };
+export type SubpolarAgentUpdate = Partial<Pick<SubpolarAgent, "name" | "description" | "icon" | "instructions" | "model" | "reasoningEffort" | "capabilities" | "permissions" | "skillIds">>;
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
+export type SubpolarRequestInit = RequestInit & { readonly requestId?: string };
 
 export class SubpolarApiError extends Error {
   readonly status: number;
@@ -21,20 +24,30 @@ function csrfToken(): string {
   return cookie === undefined ? "" : decodeURIComponent(cookie.slice("subpolar_csrf=".length));
 }
 
-export async function subpolarRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const method = (init.method ?? "GET").toUpperCase();
-  const headers = new Headers(init.headers);
+export async function subpolarRequest<T>(path: string, init: SubpolarRequestInit = {}): Promise<T> {
+  const { requestId, ...requestInit } = init;
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  const headers = new Headers(requestInit.headers);
   if (method !== "GET" && method !== "HEAD") {
     headers.set("x-csrf-token", csrfToken());
-    if (!headers.has("content-type") && init.body !== undefined) headers.set("content-type", "application/json");
+    if (!headers.has("content-type") && requestInit.body !== undefined) headers.set("content-type", "application/json");
   }
-  const response = await fetch(path, { ...init, method, headers, credentials: "include" });
+  if (requestId !== undefined && requestId.length > 0) headers.set("Idempotency-Key", requestId);
+  const response = await fetch(path, { ...requestInit, method, headers, credentials: "include" });
   if (!response.ok) {
     let message = response.statusText || "Request failed";
     try { message = ((await response.json()) as { error?: string }).error ?? message; } catch { /* keep status text */ }
     throw new SubpolarApiError(response.status, message);
   }
   return await response.json() as T;
+}
+
+export function chatCompletion(request: SubpolarChatRequest, stream = false): Promise<unknown> {
+  return subpolarRequest("/v1/chat/completions", {
+    method: "POST",
+    requestId: request.requestId,
+    body: JSON.stringify({ ...request, ...(stream ? { stream: true } : {}) }),
+  });
 }
 
 export function bootstrapStatus(): Promise<{ readonly required: boolean }> {
@@ -88,6 +101,10 @@ export function agents(projectId?: string): Promise<{ readonly agents: readonly 
 export function createAgent(projectId: string, name: string, instructions: string): Promise<{ readonly agent: SubpolarAgent }> {
   return subpolarRequest("/v1/agents", { method: "POST", body: JSON.stringify({ projectId, name, instructions }) });
 }
+
+export function agent(agentId: string): Promise<{ readonly agent: SubpolarAgent }> { return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`); }
+export function updateAgent(agentId: string, update: SubpolarAgentUpdate): Promise<{ readonly agent: SubpolarAgent }> { return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: JSON.stringify(update) }); }
+export function deleteAgent(agentId: string): Promise<{ readonly deleted: true }> { return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" }); }
 
 export function sessions(): Promise<{ readonly sessions: readonly SubpolarSession[] }> {
   return subpolarRequest("/v1/sessions");

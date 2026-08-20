@@ -72,25 +72,14 @@ export type HarnessUnsupportedSourceKind =
   | "discovery"
   | "unknown";
 
-export type HarnessFallbackSignal = {
-  readonly runtime: "python";
-  readonly reason: "unsupported-context-source";
+export class HarnessUnsupportedContextError extends Error {
   readonly sourceKind: string;
-};
-
-export class HarnessUnsupportedContextSourceError extends Error {
-  readonly sourceKind: string;
-  readonly fallback: HarnessFallbackSignal;
+  readonly category = "unsupported" as const;
 
   constructor(sourceKind: string) {
-    super(`Context source is unsupported by the first-cut harness runtime: ${sourceKind}`);
-    this.name = "HarnessUnsupportedContextSourceError";
+    super(`Context source is unsupported: ${sourceKind}`);
+    this.name = "HarnessUnsupportedContextError";
     this.sourceKind = sourceKind;
-    this.fallback = {
-      runtime: "python",
-      reason: "unsupported-context-source",
-      sourceKind
-    };
   }
 }
 
@@ -120,10 +109,10 @@ function sourceKind(value: unknown): string {
 function validateSource(source: HarnessPromptSource, context: HarnessContext): void {
   const kind = sourceKind(source);
   if (sourceRank(kind) === Number.MAX_SAFE_INTEGER) {
-    throw new HarnessUnsupportedContextSourceError(kind);
+    throw new HarnessUnsupportedContextError(kind);
   }
   if (typeof source.content !== "string") {
-    throw new TypeError(`Context source ${kind} content must be a string`);
+    throw new HarnessUnsupportedContextError(kind);
   }
   if (source.sessionId !== undefined && source.sessionId !== context.sessionId) {
     throw new Error(`Context source ${kind} is scoped to another session`);
@@ -270,8 +259,8 @@ export function createHarnessContextAssembler(
   return async (context) => assemble(context, options).messages;
 }
 
-export function isHarnessUnsupportedContextSourceError(
+export function isHarnessUnsupportedContextError(
   value: unknown
-): value is HarnessUnsupportedContextSourceError {
-  return value instanceof HarnessUnsupportedContextSourceError;
+): value is HarnessUnsupportedContextError {
+  return value instanceof HarnessUnsupportedContextError;
 }

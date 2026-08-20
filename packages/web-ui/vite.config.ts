@@ -52,7 +52,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 600,
     // Split heavy vendors so the first dashboard paint does not download
     // xterm/three/plot/etc. until a route actually needs them. Lazy page
-    // imports in App.tsx create the route boundaries; these groups keep
+     // imports in the active shell create the route boundaries; these groups keep
     // shared node_modules out of every page chunk.
     rolldownOptions: {
       output: {

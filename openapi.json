@@ -1,154 +1,1249 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Subpolar API",
+    "title": "Subpolar HTTP API",
     "version": "1.0.0",
-    "description": "Authenticated owner-scoped browser API for self-hosted Subpolar."
+    "description": "Same-origin JSON API for the Subpolar browser service. JSON objects are closed: unknown request keys are rejected. Authenticated responses are not cacheable. State-changing browser requests require an exact Origin, X-CSRF-Token, and Idempotency-Key unless the operation is bootstrap or login. X-Request-Id is an optional UUIDv4 and is returned in errors and the response header when supplied or generated."
   },
   "paths": {
-    "/api/health": { "get": { "summary": "Return liveness status" } },
-    "/api/ready": { "get": { "summary": "Return readiness status" } },
-    "/v1/chat/completions": {
-      "post": {
-        "summary": "Execute one TypeScript-owned chat completion",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" } } } },
-        "responses": { "200": { "description": "Completion result" }, "400": { "$ref": "#/components/responses/InvalidRequest" } }
-      }
-    },
-    "/v1/ws": { "get": { "summary": "Upgrade to the authenticated Subpolar event stream", "x-websocket": true } },
-    "/v1/auth/bootstrap": {
-      "get": { "summary": "Return whether first-user bootstrap is required" },
-      "post": { "summary": "Create the first local administrator and session" }
-    },
-    "/v1/auth/login": { "post": { "summary": "Create an authenticated browser session" } },
-    "/v1/auth/logout": { "post": { "summary": "Revoke the current browser session" } },
-    "/v1/auth/password": { "post": { "summary": "Rotate the authenticated user password and session" } },
-    "/v1/me": { "get": { "summary": "Return the authenticated user" } },
-    "/v1/setup": { "get": { "summary": "Return authenticated first-run setup status" } },
-    "/v1/setup/provider": { "post": { "summary": "Store the authenticated administrator's OpenAI-compatible provider connection" } },
-    "/v1/setup/agents": { "post": { "summary": "Create the mandatory master agent and selected initial templates" } },
-    "/v1/projects": {
-      "get": { "summary": "List projects owned by the authenticated user" },
-      "post": { "summary": "Create a project owned by the authenticated user" }
-    },
-    "/v1/agents": {
-      "get": { "summary": "List agents owned by the authenticated user" },
-      "post": { "summary": "Create an agent owned by the authenticated user" }
-    },
-    "/v1/sessions": { "get": { "summary": "List sessions owned by the authenticated user" } },
-    "/v1/sessions/{sessionId}": { "get": { "summary": "Read an owned session transcript" } },
-    "/api/auth/bootstrap": {
-      "get": { "summary": "Return first-user bootstrap status" }
-    },
-    "/api/auth/providers": {
-      "get": { "summary": "List interactive auth providers and registration policy" }
-    },
-    "/auth/bootstrap": {
-      "post": { "summary": "Create first self-hosted dashboard user and session" }
-    },
-    "/signup": {
-      "get": { "summary": "Render self-hosted signup page" }
-    },
-    "/auth/register": {
-      "post": { "summary": "Register self-hosted dashboard user and session" }
-    },
-    "/auth/password-login": {
-      "post": { "summary": "Create password-authenticated dashboard session" }
-    },
-    "/auth/password-change": {
-      "post": { "summary": "Change authenticated self-hosted user password" }
-    },
-    "/auth/password-reset": {
-      "post": { "summary": "Reset password with operator reset token" }
-    },
-    "/auth/logout": {
-      "post": { "summary": "Revoke current session and clear auth cookies" }
-    },
-    "/api/auth/me": {
-      "get": { "summary": "Return authenticated dashboard identity" }
-    },
-    "/api/auth/sessions": {
-      "get": { "summary": "List active sessions for authenticated user" }
-    },
-    "/api/auth/sessions/{session_id}": {
-      "delete": { "summary": "Revoke one active session" }
-    },
-    "/api/auth/tokens": {
-      "get": { "summary": "List scoped client tokens" },
-      "post": { "summary": "Issue scoped client token" }
-    },
-    "/api/auth/tokens/{token_id}": {
-      "delete": { "summary": "Revoke scoped client token" }
-    },
-    "/api/subpolar/bootstrap": { "get": { "summary": "Load workspace bootstrap metadata" } },
-    "/api/subpolar/workspaces": {
-      "get": { "summary": "List owned workspaces" },
-      "post": { "summary": "Create owned workspace" }
-    },
-    "/api/subpolar/workspaces/{workspace_id}": {
-      "get": { "summary": "Read owned workspace" },
-      "patch": { "summary": "Update owned workspace" },
-      "delete": { "summary": "Delete owned workspace" }
-    },
-    "/api/subpolar/groups": { "post": { "summary": "Create organization-only project group" } },
-    "/api/subpolar/worktrees": {
-      "get": { "summary": "List owned worktrees" },
-      "post": { "summary": "Register owned worktree" }
-    },
-    "/api/subpolar/agents": {
-      "get": { "summary": "List owned Agents" },
-      "post": { "summary": "Create Agent" }
-    },
-    "/api/subpolar/agents/{agent_id}": {
-      "get": { "summary": "Read Agent" },
-      "patch": { "summary": "Update or fork Agent" },
-      "delete": { "summary": "Archive Agent" }
-    },
-    "/api/subpolar/agents/{agent_id}/effective": { "get": { "summary": "Resolve effective Agent" } },
-    "/api/subpolar/tools": { "get": { "summary": "List provider-qualified tools" } },
-    "/api/subpolar/integrations": {
-      "get": { "summary": "List central Integrations" },
-      "post": { "summary": "Create central Integration" }
-    },
-    "/api/subpolar/schedules": {
-      "get": { "summary": "List owned scheduled tasks" },
-      "post": { "summary": "Create scheduled task" }
-    },
-    "/api/subpolar/schedules/{task_id}/run-now": { "post": { "summary": "Run scheduled task" } },
-    "/api/subpolar/activity": {
-      "get": { "summary": "List Activity events" },
-      "post": { "summary": "Append Activity event" }
-    },
-    "/api/subpolar/audit": {
-      "get": { "summary": "List security audit events" },
-      "post": { "summary": "Append security audit event" }
-    },
-    "/api/subpolar/source-control/status": { "get": { "summary": "Read workspace Git status" } },
-    "/api/subpolar/source-control/diff": { "get": { "summary": "Read workspace unified diff" } },
-    "/api/subpolar/source-control/stage": { "post": { "summary": "Stage workspace file" } },
-    "/api/subpolar/source-control/commit": { "post": { "summary": "Commit workspace changes" } },
-    "/api/subpolar/sessions": { "get": { "summary": "List owned conversations" } },
-    "/api/subpolar/sessions/{session_id}/messages": { "get": { "summary": "Read owned transcript" } }
-  },
-  "components": {
-    "schemas": {
-      "ChatCompletionRequest": {
-        "type": "object",
-        "required": ["model", "messages"],
-        "additionalProperties": false,
-        "properties": {
-          "model": { "type": "string", "minLength": 1 },
-          "messages": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["role", "content"], "additionalProperties": false, "properties": { "role": { "enum": ["system", "user", "assistant"] }, "content": { "type": "string" } } } },
-          "stream": { "type": "boolean" },
-          "sessionId": { "type": "string" },
-          "projectId": { "type": "string" },
-          "agentId": { "type": "string" },
-          "requestId": { "type": "string" }
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Return liveness status",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The process is alive.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } }
+            }
+          }
         }
       }
     },
+    "/api/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Return readiness status",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The server accepts work.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ReadyResponse" } }
+            }
+          },
+          "503": {
+            "description": "The server is not ready to accept work.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/NotReadyResponse" } }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/bootstrap": {
+      "get": {
+        "operationId": "getBootstrapStatus",
+        "summary": "Report whether the first administrator is required",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Bootstrap status.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BootstrapStatusResponse" } }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "bootstrap",
+        "summary": "Create the first administrator and browser session",
+        "description": "Only succeeds while no user exists. The exact request Origin is required. Success sets both authentication cookies.",
+        "security": [],
+        "parameters": [ { "$ref": "#/components/parameters/Origin" } ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/BootstrapRequest" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Administrator and session created.",
+            "headers": { "Set-Cookie": { "$ref": "#/components/headers/AuthCookies" } },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AuthResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BootstrapFailed" },
+          "403": { "$ref": "#/components/responses/OriginRejected" }
+        }
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "operationId": "login",
+        "summary": "Create an authenticated browser session",
+        "description": "The exact request Origin is required. Login failures use a generic error and do not identify which credential check failed. Success sets both authentication cookies.",
+        "security": [],
+        "parameters": [ { "$ref": "#/components/parameters/Origin" } ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created.",
+            "headers": { "Set-Cookie": { "$ref": "#/components/headers/AuthCookies" } },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AuthResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/InvalidCredentials" },
+          "403": { "$ref": "#/components/responses/OriginRejected" }
+        }
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "Revoke the current browser session",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session revoked.",
+            "headers": { "Set-Cookie": { "$ref": "#/components/headers/ClearedAuthCookies" } },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" }
+        }
+      }
+    },
+    "/v1/auth/password": {
+      "post": {
+        "operationId": "changePassword",
+        "summary": "Rotate the authenticated password and session",
+        "description": "Password rotation revokes all existing sessions and sets one fresh session. The plaintext password is never returned.",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/PasswordChangeRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed and session rotated.",
+            "headers": { "Set-Cookie": { "$ref": "#/components/headers/AuthCookies" } },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AuthResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidPassword" },
+          "401": { "$ref": "#/components/responses/InvalidCredentials" },
+          "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "getMe",
+        "summary": "Return the authenticated user",
+        "security": [ { "sessionCookie": [] } ],
+        "responses": {
+          "200": {
+            "description": "Authenticated user.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/UserResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/setup": {
+      "get": {
+        "operationId": "getSetupStatus",
+        "summary": "Return first-run setup status without secrets",
+        "security": [ { "sessionCookie": [] } ],
+        "responses": {
+          "200": {
+            "description": "Setup status.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SetupStatusResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/setup/providers": {
+      "get": {
+        "operationId": "listSetupProviders",
+        "summary": "List supported provider metadata",
+        "description": "Provider metadata only. Credentials and configured secrets are never returned.",
+        "security": [ { "sessionCookie": [] } ],
+        "responses": {
+          "200": {
+            "description": "Supported provider metadata.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ProvidersResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/setup/provider": {
+      "post": {
+        "operationId": "configureProvider",
+        "summary": "Store a validated provider connection",
+        "description": "The API key is write-only and is never returned in JSON, events, transcripts, idempotency responses, or logs.",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ProviderConfigurationRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Provider connection stored.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ConfiguredResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidProvider" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" }
+        }
+      }
+    },
+    "/v1/setup/agents": {
+      "post": {
+        "operationId": "createInitialAgents",
+        "summary": "Create the initial agents",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/InitialAgentsRequest" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Initial project and agents created.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/InitialAgentsResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidTemplates" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" }
+        }
+      }
+    },
+    "/v1/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List projects owned by the authenticated user",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned projects.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ProjectsResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create an owned project",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/CreateProjectRequest" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Project created.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ProjectResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidProject" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" }
+        }
+      }
+    },
+    "/v1/agents": {
+      "get": {
+        "operationId": "listAgents",
+        "summary": "List agents owned by the authenticated user",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdFilter" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned agents.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AgentsResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "operationId": "createAgent",
+        "summary": "Create an owned agent",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/CreateAgentRequest" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Agent created.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AgentResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidAgent" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrCsrfRejected" }
+        }
+      }
+    },
+    "/v1/agents/{agentId}": {
+      "get": {
+        "operationId": "getAgent",
+        "summary": "Retrieve an owned agent configuration",
+        "parameters": [{ "$ref": "#/components/parameters/AgentId" }],
+        "responses": { "200": { "description": "Agent configuration.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentResponse" } } } }, "404": { "description": "Agent not found." } }
+      },
+      "patch": {
+        "operationId": "updateAgent",
+        "summary": "Update an owned agent configuration",
+        "parameters": [{ "$ref": "#/components/parameters/AgentId" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateAgentRequest" } } } },
+        "responses": { "200": { "description": "Agent updated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentResponse" } } } }, "400": { "$ref": "#/components/responses/InvalidAgent" } }
+      },
+      "delete": {
+        "operationId": "deleteAgent",
+        "summary": "Delete an owned agent",
+        "parameters": [{ "$ref": "#/components/parameters/AgentId" }],
+        "responses": { "200": { "description": "Agent deleted." }, "404": { "description": "Agent not found." } }
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "summary": "List sessions owned by the authenticated user",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned sessions.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SessionsResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Read an owned session and its typed messages",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+        "responses": {
+          "200": {
+            "description": "Owned session transcript.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SessionDetailResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "createChatCompletion",
+        "summary": "Execute one normalized chat turn",
+        "description": "The request is a closed object. Non-streaming responses are JSON. Streaming responses are Server-Sent Events containing versioned event envelopes in order, followed by exactly one data: [DONE] record after a terminal event. Idempotency-Key is not accepted for streaming requests.",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/OptionalIdempotencyKey" },
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Completion result or event stream.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionResponse" } },
+              "text/event-stream": { "schema": { "$ref": "#/components/schemas/ChatEventStream" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ChatRequestFailed" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrCsrfRejected" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "503": { "$ref": "#/components/responses/ServerDraining" }
+        }
+      }
+    },
+    "/v1/ws": {
+      "get": {
+        "operationId": "openWebSocket",
+        "summary": "Upgrade to the authenticated Subpolar event stream",
+        "description": "The upgrade is a same-origin WebSocket request authenticated by subpolar_session. Frames are UTF-8 JSON text. The first server event is the connected event. Every chat.start command must include the readable subpolar_csrf cookie value in csrfToken; chat.start uses the same idempotency rule as state-changing HTTP requests. Unknown commands, unknown fields, and binary frames are rejected.",
+        "security": [ { "sessionCookie": [] } ],
+        "parameters": [ { "$ref": "#/components/parameters/Origin" } ],
+        "responses": {
+          "101": { "description": "WebSocket protocol upgrade accepted." },
+          "400": { "$ref": "#/components/responses/UpgradeFailed" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/OriginRejected" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "subpolar_session",
+        "description": "Opaque random session credential. HttpOnly, SameSite=Lax, Path=/, and Secure in HTTPS production deployments. Only its hash is persisted."
+      }
+    },
+    "parameters": {
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "description": "Must exactly equal the configured public origin. Missing, opaque, cross-origin, and suffix-matching values are rejected.",
+        "schema": { "type": "string", "format": "uri", "minLength": 1 }
+      },
+      "CsrfToken": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "required": true,
+        "description": "Must equal both the subpolar_csrf cookie and the server-side value for the session.",
+        "schema": { "type": "string", "minLength": 1 }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "ASCII key, at most 255 characters, scoped to the principal, method, path, and operation version. A matching key and request hash replays the original typed response; a different hash conflicts.",
+        "schema": { "type": "string", "pattern": "^[ -~]{1,255}$" }
+      },
+      "OptionalIdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Use for non-streaming chat retries. Streaming requests must omit this header because replay is not supported for an event stream.",
+        "schema": { "type": "string", "pattern": "^[ -~]{1,255}$" }
+      },
+      "RequestId": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "required": false,
+        "description": "Optional client UUIDv4. The server generates one when absent and returns it in the response header and error envelope.",
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "SessionId": {
+        "name": "sessionId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "AgentId": {
+        "name": "agentId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ProjectIdFilter": {
+        "name": "projectId",
+        "in": "query",
+        "required": false,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque cursor returned by the preceding list response.",
+        "schema": { "type": "string", "minLength": 1 }
+      }
+    },
+    "headers": {
+      "AuthCookies": {
+        "description": "Two Set-Cookie fields are emitted: subpolar_session and subpolar_csrf. Both use Path=/, Max-Age=604800, and SameSite=Lax; Secure is added for HTTPS. The session cookie is HttpOnly; the CSRF cookie is readable and is not HttpOnly.",
+        "schema": { "type": "string" }
+      },
+      "RequestId": {
+        "description": "The server-generated or client-supplied UUIDv4 correlation ID.",
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ClearedAuthCookies": {
+        "description": "Both subpolar_session and subpolar_csrf are cleared with Max-Age=0, Path=/, and the same SameSite and Secure policy used when issued.",
+        "schema": { "type": "string" }
+      }
+    },
     "responses": {
-      "InvalidRequest": { "description": "The request was rejected before provider execution" }
+      "Unauthorized": {
+        "description": "No active session cookie authenticated the request.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "Forbidden": {
+        "description": "The resource is not owned by the authenticated user.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "OriginRejected": {
+        "description": "The request Origin is missing or is not the exact configured origin.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "CsrfOrOriginRejected": {
+        "description": "The exact Origin or CSRF checks failed.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "ForbiddenOrCsrfRejected": {
+        "description": "The request failed an ownership, exact Origin, or CSRF check.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "BootstrapFailed": {
+        "description": "Bootstrap validation failed or an administrator already exists.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InvalidCredentials": {
+        "description": "Credentials were not accepted.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InvalidPassword": {
+        "description": "The new password was invalid.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InvalidProvider": {
+        "description": "Provider configuration was invalid.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InvalidTemplates": {
+        "description": "Initial agent templates were invalid.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InvalidProject": {
+        "description": "Project input was invalid.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InvalidAgent": {
+        "description": "Agent input was invalid.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "ChatRequestFailed": {
+        "description": "The chat request was rejected or provider execution failed.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "IdempotencyConflict": {
+        "description": "The idempotency key conflicts with a prior request or is already in progress.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "ServerDraining": {
+        "description": "The server is draining and is not accepting new work.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "UpgradeFailed": {
+        "description": "The WebSocket upgrade could not be completed.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "NotFound": {
+        "description": "The resource does not exist or is not visible to the owner.",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      }
+    },
+    "schemas": {
+      "Uuid": { "type": "string", "format": "uuid" },
+      "Timestamp": { "type": "string", "format": "date-time" },
+      "JsonValue": {
+        "oneOf": [
+          { "type": "null" },
+          { "type": "string" },
+          { "type": "number" },
+          { "type": "boolean" },
+          { "type": "array", "items": { "$ref": "#/components/schemas/JsonValue" } },
+          { "$ref": "#/components/schemas/JsonObject" }
+        ]
+      },
+      "JsonObject": {
+        "type": "object",
+        "additionalProperties": { "$ref": "#/components/schemas/JsonValue" }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [ "status" ],
+        "additionalProperties": false,
+        "properties": { "status": { "const": "ok" } }
+      },
+      "ReadyResponse": {
+        "type": "object",
+        "required": [ "status" ],
+        "additionalProperties": false,
+        "properties": { "status": { "const": "ready" } }
+      },
+      "NotReadyResponse": {
+        "type": "object",
+        "required": [ "status" ],
+        "additionalProperties": false,
+        "properties": { "status": { "const": "not_ready" } }
+      },
+      "BootstrapStatusResponse": {
+        "type": "object",
+        "required": [ "required" ],
+        "additionalProperties": false,
+        "properties": { "required": { "type": "boolean" } }
+      },
+      "User": {
+        "type": "object",
+        "required": [ "id", "username" ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "username": { "type": "string", "minLength": 3 }
+        }
+      },
+      "AuthResponse": {
+        "type": "object",
+        "required": [ "user", "expiresAt" ],
+        "additionalProperties": false,
+        "properties": {
+          "user": { "$ref": "#/components/schemas/User" },
+          "expiresAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "UserResponse": {
+        "type": "object",
+        "required": [ "user" ],
+        "additionalProperties": false,
+        "properties": { "user": { "$ref": "#/components/schemas/User" } }
+      },
+      "BootstrapRequest": {
+        "type": "object",
+        "required": [ "username", "password" ],
+        "additionalProperties": false,
+        "properties": {
+          "username": { "type": "string", "minLength": 3 },
+          "password": { "type": "string", "minLength": 8, "writeOnly": true }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [ "username", "password" ],
+        "additionalProperties": false,
+        "properties": {
+          "username": { "type": "string", "minLength": 1 },
+          "password": { "type": "string", "minLength": 1, "writeOnly": true }
+        }
+      },
+      "PasswordChangeRequest": {
+        "type": "object",
+        "required": [ "currentPassword", "newPassword" ],
+        "additionalProperties": false,
+        "properties": {
+          "currentPassword": { "type": "string", "minLength": 1, "writeOnly": true },
+          "newPassword": { "type": "string", "minLength": 8, "writeOnly": true }
+        }
+      },
+      "OkResponse": {
+        "type": "object",
+        "required": [ "ok" ],
+        "additionalProperties": false,
+        "properties": { "ok": { "const": true } }
+      },
+      "SetupStatusResponse": {
+        "type": "object",
+        "required": [ "complete", "providerConfigured" ],
+        "additionalProperties": false,
+        "properties": {
+          "complete": { "type": "boolean" },
+          "providerConfigured": { "type": "boolean" }
+        }
+      },
+      "ProviderDefinition": {
+        "type": "object",
+        "required": [ "slug", "label", "description", "authType" ],
+        "additionalProperties": false,
+        "properties": {
+          "slug": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "authType": { "const": "api_key" },
+          "baseUrl": { "type": "string", "format": "uri" }
+        }
+      },
+      "ProvidersResponse": {
+        "type": "object",
+        "required": [ "providers" ],
+        "additionalProperties": false,
+        "properties": {
+          "providers": { "type": "array", "items": { "$ref": "#/components/schemas/ProviderDefinition" } }
+        }
+      },
+      "ProviderConfigurationRequest": {
+        "type": "object",
+        "required": [ "provider", "baseUrl", "apiKey", "model" ],
+        "additionalProperties": false,
+        "properties": {
+          "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "baseUrl": { "type": "string", "format": "uri" },
+          "apiKey": { "type": "string", "minLength": 1, "writeOnly": true },
+          "model": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      },
+      "ConfiguredResponse": {
+        "type": "object",
+        "required": [ "configured" ],
+        "additionalProperties": false,
+        "properties": { "configured": { "const": true } }
+      },
+      "InitialAgentsRequest": {
+        "type": "object",
+        "required": [ "templates" ],
+        "additionalProperties": false,
+        "properties": {
+          "templates": { "type": "array", "items": { "enum": [ "research" ] } }
+        }
+      },
+      "InitialAgentsResponse": {
+        "type": "object",
+        "required": [ "project", "agents" ],
+        "additionalProperties": false,
+        "properties": {
+          "project": { "$ref": "#/components/schemas/Project" },
+          "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [ "id", "name", "createdAt" ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "createdAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "Agent": {
+        "type": "object",
+        "required": [ "id", "projectId", "name", "description", "instructions", "capabilities", "permissions", "skillIds", "createdAt" ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "description": { "type": "string" },
+          "icon": { "type": "string" },
+          "instructions": { "type": "string" },
+          "model": { "type": "string" },
+          "reasoningEffort": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/AgentCapability" } },
+          "permissions": { "type": "array", "items": { "$ref": "#/components/schemas/AgentPermission" } },
+          "skillIds": { "type": "array", "items": { "type": "string" } },
+          "createdAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "required": [ "name" ],
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "CreateAgentRequest": {
+        "type": "object",
+        "required": [ "projectId", "name", "instructions" ],
+        "additionalProperties": false,
+        "properties": {
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "instructions": { "type": "string", "maxLength": 100000 }
+        }
+      },
+      "UpdateAgentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 }, "description": { "type": "string" }, "icon": { "type": "string" }, "instructions": { "type": "string", "maxLength": 100000 }, "model": { "type": "string" }, "reasoningEffort": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/AgentCapability" } }, "permissions": { "type": "array", "items": { "$ref": "#/components/schemas/AgentPermission" } }, "skillIds": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "AgentCapability": { "type": "object", "required": ["capabilityId", "enabled"], "additionalProperties": false, "properties": { "capabilityId": { "type": "string" }, "enabled": { "type": "boolean" } } },
+      "AgentPermission": { "type": "object", "required": ["capabilityId", "policy"], "additionalProperties": false, "properties": { "capabilityId": { "type": "string" }, "policy": { "enum": ["allow", "ask", "deny"] } } },
+      "ProjectResponse": {
+        "type": "object",
+        "required": [ "project" ],
+        "additionalProperties": false,
+        "properties": { "project": { "$ref": "#/components/schemas/Project" } }
+      },
+      "AgentResponse": {
+        "type": "object",
+        "required": [ "agent" ],
+        "additionalProperties": false,
+        "properties": { "agent": { "$ref": "#/components/schemas/Agent" } }
+      },
+      "ProjectsResponse": {
+        "type": "object",
+        "required": [ "projects" ],
+        "additionalProperties": false,
+        "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }
+      },
+      "AgentsResponse": {
+        "type": "object",
+        "required": [ "agents" ],
+        "additionalProperties": false,
+        "properties": { "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } } }
+      },
+      "SessionStatus": { "enum": [ "active", "completed", "failed", "cancelled" ] },
+      "Session": {
+        "type": "object",
+        "required": [ "id", "status", "createdAt", "updatedAt" ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "status": { "$ref": "#/components/schemas/SessionStatus" },
+          "createdAt": { "$ref": "#/components/schemas/Timestamp" },
+          "updatedAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "SessionSummary": {
+        "type": "object",
+        "required": [ "sessionId", "createdAt" ],
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "agentId": { "$ref": "#/components/schemas/Uuid" },
+          "createdAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "SessionsResponse": {
+        "type": "object",
+        "required": [ "sessions" ],
+        "additionalProperties": false,
+        "properties": { "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/SessionSummary" } } }
+      },
+      "MessageRole": { "enum": [ "system", "user", "assistant", "tool" ] },
+      "Message": {
+        "type": "object",
+        "required": [ "id", "sessionId", "sequence", "role", "content", "createdAt" ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "sessionId": { "$ref": "#/components/schemas/Uuid" },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "role": { "$ref": "#/components/schemas/MessageRole" },
+          "content": { "$ref": "#/components/schemas/JsonValue" },
+          "createdAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "SessionDetailResponse": {
+        "type": "object",
+        "required": [ "session", "messages" ],
+        "additionalProperties": false,
+        "properties": {
+          "session": { "$ref": "#/components/schemas/Session" },
+          "messages": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } }
+        }
+      },
+      "RequestMessage": {
+        "type": "object",
+        "required": [ "role", "content" ],
+        "additionalProperties": false,
+        "properties": {
+          "role": { "enum": [ "system", "user", "assistant" ] },
+          "content": { "type": "string" }
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": [ "model", "messages" ],
+        "additionalProperties": false,
+        "properties": {
+          "model": { "type": "string", "minLength": 1 },
+          "messages": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/RequestMessage" } },
+          "sessionId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "agentId": { "$ref": "#/components/schemas/Uuid" },
+          "requestId": { "$ref": "#/components/schemas/Uuid" },
+          "stream": { "type": "boolean", "default": false }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "required": [ "inputTokens", "outputTokens" ],
+        "additionalProperties": false,
+        "properties": {
+          "inputTokens": { "type": "integer", "minimum": 0 },
+          "outputTokens": { "type": "integer", "minimum": 0 },
+          "totalTokens": { "type": "integer", "minimum": 0 },
+          "cachedInputTokens": { "type": "integer", "minimum": 0 },
+          "reasoningTokens": { "type": "integer", "minimum": 0 },
+          "cacheCreationInputTokens": { "type": "integer", "minimum": 0 },
+          "cacheReadInputTokens": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "FinishReason": { "enum": [ "stop", "length", "tool_calls", "content_filter", "error" ] },
+      "CompletionMessage": {
+        "type": "object",
+        "required": [ "role", "content" ],
+        "additionalProperties": false,
+        "properties": {
+          "role": { "const": "assistant" },
+          "content": { "type": "string" }
+        }
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "required": [ "requestId", "sessionId", "message", "finishReason" ],
+        "additionalProperties": false,
+        "properties": {
+          "requestId": { "$ref": "#/components/schemas/Uuid" },
+          "sessionId": { "$ref": "#/components/schemas/Uuid" },
+          "message": { "$ref": "#/components/schemas/CompletionMessage" },
+          "finishReason": { "$ref": "#/components/schemas/FinishReason" },
+          "usage": { "$ref": "#/components/schemas/Usage" }
+        }
+      },
+      "ErrorCode": {
+        "enum": [
+          "unauthorized",
+          "origin_rejected",
+          "csrf_rejected",
+          "server_draining",
+          "upgrade_failed",
+          "bootstrap_failed",
+          "invalid_credentials",
+          "invalid_password",
+          "invalid_provider",
+          "invalid_templates",
+          "invalid_project",
+          "invalid_agent",
+          "forbidden",
+          "not_found",
+          "method_not_allowed",
+          "request_failed",
+          "idempotency_not_supported_for_streaming",
+          "idempotency_conflict",
+          "idempotency_in_progress",
+          "request_in_progress",
+          "provider_not_configured"
+        ]
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [ "error" ],
+        "additionalProperties": false,
+        "properties": {
+          "error": { "$ref": "#/components/schemas/ErrorCode" },
+          "requestId": { "$ref": "#/components/schemas/Uuid" }
+        }
+      },
+      "ConnectedPayload": {
+        "type": "object",
+        "required": [ "version" ],
+        "additionalProperties": false,
+        "properties": { "version": { "const": "subpolar.v1" } }
+      },
+      "MessageStartPayload": {
+        "type": "object",
+        "required": [ "requestId" ],
+        "additionalProperties": false,
+        "properties": { "requestId": { "$ref": "#/components/schemas/Uuid" } }
+      },
+      "StatusPhase": {
+        "enum": [ "provider.requested", "provider.started", "provider.completed", "provider.failed", "provider.usage", "provider.finished", "approval.approved", "approval.denied", "retry.scheduled", "fallback.disabled" ]
+      },
+      "StatusUpdatePayload": {
+        "type": "object",
+        "required": [ "phase" ],
+        "additionalProperties": false,
+        "properties": {
+          "phase": { "$ref": "#/components/schemas/StatusPhase" },
+          "usage": { "$ref": "#/components/schemas/Usage" },
+          "finishReason": { "$ref": "#/components/schemas/FinishReason" },
+          "providerRequestId": { "type": "string", "minLength": 1 }
+        }
+      },
+      "TextDeltaPayload": {
+        "type": "object",
+        "required": [ "text" ],
+        "additionalProperties": false,
+        "properties": { "text": { "type": "string" } }
+      },
+      "ApprovalRequestPayload": {
+        "type": "object",
+        "required": [ "callId", "name" ],
+        "additionalProperties": false,
+        "properties": { "callId": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 } }
+      },
+      "ToolGeneratingPayload": {
+        "type": "object",
+        "required": [ "callId", "name" ],
+        "additionalProperties": false,
+        "properties": {
+          "callId": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "arguments": { "type": "string" }
+        }
+      },
+      "ToolCompletePayload": {
+        "type": "object",
+        "required": [ "callId", "isError" ],
+        "additionalProperties": false,
+        "properties": { "callId": { "type": "string", "minLength": 1 }, "isError": { "type": "boolean" } }
+      },
+      "MessageCompletePayload": {
+        "type": "object",
+        "required": [ "outcome" ],
+        "additionalProperties": false,
+        "properties": { "outcome": { "const": "completed" } }
+      },
+      "EventErrorPayload": {
+        "type": "object",
+        "required": [ "code", "message" ],
+        "additionalProperties": false,
+        "properties": {
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "message": { "const": "Request failed" }
+        }
+      },
+      "VersionedEventEnvelope": {
+        "type": "object",
+        "required": [ "protocol", "sequence", "requestId", "sessionId", "type", "payload" ],
+        "additionalProperties": false,
+        "properties": {
+          "protocol": { "const": "subpolar.v1" },
+          "sequence": { "type": "integer", "minimum": 0 },
+          "requestId": { "oneOf": [ { "$ref": "#/components/schemas/Uuid" }, { "type": "null" } ] },
+          "sessionId": { "oneOf": [ { "$ref": "#/components/schemas/Uuid" }, { "type": "null" } ] },
+          "type": { "type": "string", "enum": [ "connected", "message.start", "status.update", "message.delta", "reasoning.delta", "approval.request", "tool.start", "tool.generating", "tool.complete", "message.complete", "error" ] },
+          "payload": { "$ref": "#/components/schemas/JsonObject" }
+        }
+      },
+      "ConnectedEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "requestId": { "type": "null" }, "sessionId": { "type": "null" }, "type": { "const": "connected" }, "payload": { "$ref": "#/components/schemas/ConnectedPayload" } } }
+        ]
+      },
+      "MessageStartEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "message.start" }, "payload": { "$ref": "#/components/schemas/MessageStartPayload" } } }
+        ]
+      },
+      "StatusUpdateEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "status.update" }, "payload": { "$ref": "#/components/schemas/StatusUpdatePayload" } } }
+        ]
+      },
+      "MessageDeltaEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "message.delta" }, "payload": { "$ref": "#/components/schemas/TextDeltaPayload" } } }
+        ]
+      },
+      "ReasoningDeltaEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "reasoning.delta" }, "payload": { "$ref": "#/components/schemas/TextDeltaPayload" } } }
+        ]
+      },
+      "ApprovalRequestEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "approval.request" }, "payload": { "$ref": "#/components/schemas/ApprovalRequestPayload" } } }
+        ]
+      },
+      "ToolStartEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "tool.start" }, "payload": { "$ref": "#/components/schemas/ApprovalRequestPayload" } } }
+        ]
+      },
+      "ToolGeneratingEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "tool.generating" }, "payload": { "$ref": "#/components/schemas/ToolGeneratingPayload" } } }
+        ]
+      },
+      "ToolCompleteEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "tool.complete" }, "payload": { "$ref": "#/components/schemas/ToolCompletePayload" } } }
+        ]
+      },
+      "MessageCompleteEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "message.complete" }, "payload": { "$ref": "#/components/schemas/MessageCompletePayload" } } }
+        ]
+      },
+      "EventErrorEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/VersionedEventEnvelope" },
+          { "type": "object", "properties": { "type": { "const": "error" }, "payload": { "$ref": "#/components/schemas/EventErrorPayload" } } }
+        ]
+      },
+      "EventEnvelope": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/ConnectedEvent" },
+          { "$ref": "#/components/schemas/MessageStartEvent" },
+          { "$ref": "#/components/schemas/StatusUpdateEvent" },
+          { "$ref": "#/components/schemas/MessageDeltaEvent" },
+          { "$ref": "#/components/schemas/ReasoningDeltaEvent" },
+          { "$ref": "#/components/schemas/ApprovalRequestEvent" },
+          { "$ref": "#/components/schemas/ToolStartEvent" },
+          { "$ref": "#/components/schemas/ToolGeneratingEvent" },
+          { "$ref": "#/components/schemas/ToolCompleteEvent" },
+          { "$ref": "#/components/schemas/MessageCompleteEvent" },
+          { "$ref": "#/components/schemas/EventErrorEvent" }
+        ]
+      },
+      "ChatStartCommand": {
+        "type": "object",
+        "required": [ "protocol", "type", "requestId", "csrfToken", "model", "messages" ],
+        "additionalProperties": false,
+        "properties": {
+          "protocol": { "const": "subpolar.v1" },
+          "type": { "const": "chat.start" },
+          "requestId": { "$ref": "#/components/schemas/Uuid" },
+          "csrfToken": { "type": "string", "minLength": 1, "writeOnly": true },
+          "model": { "type": "string", "minLength": 1 },
+          "messages": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/RequestMessage" } },
+          "sessionId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "agentId": { "$ref": "#/components/schemas/Uuid" }
+        }
+      },
+      "ChatCancelCommand": {
+        "type": "object",
+        "required": [ "protocol", "type", "requestId" ],
+        "additionalProperties": false,
+        "properties": {
+          "protocol": { "const": "subpolar.v1" },
+          "type": { "const": "chat.cancel" },
+          "requestId": { "$ref": "#/components/schemas/Uuid" }
+        }
+      },
+      "WebSocketCommand": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/ChatStartCommand" },
+          { "$ref": "#/components/schemas/ChatCancelCommand" }
+        ]
+      },
+      "ChatEventStream": {
+        "type": "string",
+        "description": "UTF-8 text/event-stream. Each event record is data: followed by an EventEnvelope JSON object and a blank line. The stream ends with exactly one data: [DONE] record after a terminal EventEnvelope.",
+        "contentMediaType": "text/event-stream"
+      }
     }
   }
 }

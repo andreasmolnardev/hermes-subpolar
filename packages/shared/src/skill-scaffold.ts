@@ -3,14 +3,14 @@
  * whole skill body. That payload is for the agent — the UI shows the
  * invocation the user typed (`/work fix the leak`) and nothing else.
  *
- * The gateway already projects this (see `_skill_scaffold_projection` in
- * tui_gateway/server.py) and ships the result as `display` on a dispatch and
+ * The gateway already projects this (see its skill-scaffold projection) and
+ * ships the result as `display` on a dispatch and
  * as the `text` of a `skill_invocation` history row. This module is the
  * client-side twin so a desktop/TUI talking to an older gateway — or any
  * future path that hands raw scaffolding to a bubble — still renders the
  * invocation instead of the body.
  *
- * The markers below mirror `agent/skill_commands.py` byte for byte.
+ * The markers below mirror the canonical skill-command formatter byte for byte.
  */
 
 const INVOCATION_PREFIX = '[IMPORTANT: The user has invoked the '

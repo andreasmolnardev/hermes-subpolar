@@ -19,18 +19,7 @@
     "build:web": "bun run --filter web-ui build",
     "serve": "bun run build:web && bun run --filter api-gateway serve",
     "dev": "bun run --parallel --no-orphans --workspaces --if-present dev",
-    "install:root": "npm install --workspaces=false",
-    "install:web": "npm install --workspace packages/web-ui",
-    "install:shared": "npm install --workspace packages/shared",
-    "audit:root": "npm audit --workspaces=false",
-    "audit:web": "npm audit --workspace packages/web-ui",
-    "audit:shared": "npm audit --workspace packages/shared",
-    "audit:fix:root": "npm audit fix --workspaces=false",
-    "audit:fix:web": "npm audit fix --workspace packages/web-ui",
-    "audit:fix:shared": "npm audit fix --workspace packages/shared",
-    "test:e2e:browser": "playwright test --config=tests/browser/playwright.config.ts",
-    "check": "npm run --ws check",
-    "fix": "npm run --ws fix"
+    "test:e2e:browser": "playwright test --config=tests/browser/playwright.config.ts"
   },
   "repository": {
     "type": "git",
@@ -60,10 +49,6 @@
     "yauzl": "^3.3.1",
     "protobufjs": "^8.7.1",
     "brace-expansion": "5.0.8"
-  },
-  "engines": {
-    "node": ">=22.22.0",
-    "npm": "<11.10.0 || >=11.17.0"
   },
   "allowScripts": {
     "unicode-animations": false,

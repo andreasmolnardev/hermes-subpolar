@@ -53,14 +53,13 @@ type FailureFixture = {
   model: string
   messages: HarnessMessage[]
   tools: []
-  retryFallback: {
+  retry: {
     retryPolicy: { maxAttempts: number; backoffMs: number }
     expectedSleepMs: number[]
     expectedEvents: string[]
     expectedRetry: { providerIndex: number; attempt: number; delayMs: number }
-    expectedFallback: { providerIndex: number }
     expectedTerminal: string
-    expectedProviderCalls: { primary: number; fallback: number }
+    expectedProviderCalls: number
   }
   cancellation: {
     expectedEvents: string[]
@@ -184,12 +183,11 @@ test('round-trip accounts for usage from every provider response', async () => {
   assert.deepEqual(usages.reduce((sum, usage) => sum + usage.totalTokens, 0), data.expectedUsage.totalTokens)
 })
 
-test('retryable failure retries before eligible fallback, while classification stays explicit', async () => {
+test('retryable failure retries before terminal failure, while classification stays explicit', async () => {
   const data = fixture<FailureFixture>('failure-lifecycle.json')
   const events: HarnessEvent[] = []
   const sleeps: number[] = []
   let primaryCalls = 0
-  let fallbackCalls = 0
 
   const result = await executeHarness(requestBase(data, {
     async complete() {
@@ -197,36 +195,22 @@ test('retryable failure retries before eligible fallback, while classification s
       throw new HarnessProviderError('Synthetic overload', { category: 'overloaded' })
     },
   }, {
-    retryPolicy: data.retryFallback.retryPolicy,
+    retryPolicy: data.retry.retryPolicy,
     sleeper: { sleep: async milliseconds => { sleeps.push(milliseconds) } },
-    fallbackProviders: [{
-      async complete() {
-        fallbackCalls += 1
-
-        return {
-          message: { role: 'assistant', content: 'Synthetic fallback result' },
-          usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
-        }
-      },
-    }],
     eventSink: event => { events.push(event) },
   }))
 
-  assert.equal(result.outcome, data.retryFallback.expectedTerminal)
-  assert.deepEqual(events.map(event => event.type), data.retryFallback.expectedEvents)
-  assert.deepEqual(sleeps, data.retryFallback.expectedSleepMs)
-  assert.deepEqual({ primary: primaryCalls, fallback: fallbackCalls }, data.retryFallback.expectedProviderCalls)
+  assert.equal(result.outcome, data.retry.expectedTerminal)
+  assert.deepEqual(events.map(event => event.type), data.retry.expectedEvents)
+  assert.deepEqual(sleeps, data.retry.expectedSleepMs)
+  assert.equal(primaryCalls, data.retry.expectedProviderCalls)
 
   const retry = events.find(event => event.type === 'retry.scheduled')
   assert.ok(retry?.type === 'retry.scheduled')
   assert.deepEqual(
     { providerIndex: retry.providerIndex, attempt: retry.attempt, delayMs: retry.delayMs },
-    data.retryFallback.expectedRetry,
+    data.retry.expectedRetry,
   )
-
-  const fallback = events.find(event => event.type === 'fallback.selected')
-  assert.ok(fallback?.type === 'fallback.selected')
-  assert.deepEqual({ providerIndex: fallback.providerIndex }, data.retryFallback.expectedFallback)
 
   for (const expected of data.classification) {
     const error = new ProviderError(expected.message, {

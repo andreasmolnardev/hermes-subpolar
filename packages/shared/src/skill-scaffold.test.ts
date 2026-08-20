@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { skillInvocationText } from './skill-scaffold'
 
-// Byte-identical to what agent/skill_commands.py emits — a desktop/TUI talking
+// Byte-identical to what the canonical skill-command formatter emits — a desktop/TUI talking
 // to an older gateway sees exactly these strings.
 const BODY = 'SPIN UP A WORKTREE. Never edit the primary checkout.\n'.repeat(20)
 

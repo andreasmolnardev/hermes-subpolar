@@ -3,7 +3,7 @@ import { test } from "bun:test";
 
 import {
   HARNESS_PROMPT_SECTION_ORDER,
-  HarnessUnsupportedContextSourceError,
+  HarnessUnsupportedContextError,
   assembleHarnessContext,
   createHarnessContextAssembler,
   type HarnessContext,
@@ -31,7 +31,7 @@ const sources = [
   { kind: "identity" as const, content: "identity" }
 ];
 
-test("prompt sections are emitted in the fixed Python-compatible order", () => {
+test("prompt sections are emitted in the canonical order", () => {
   const result = assembleHarnessContext(context({ workspaceId: "workspace-1" }), { sources });
 
   assert.deepEqual(result.sections.map(section => section.name), [...HARNESS_PROMPT_SECTION_ORDER]);
@@ -99,18 +99,15 @@ test("session and workspace sources cannot leak across scopes", () => {
   );
 });
 
-test("unsupported sources expose an explicit Python fallback signal", () => {
+test("unsupported sources fail closed with a typed error", () => {
   assert.throws(
     () => assembleHarnessContext(context(), {
       sources: [{ kind: "memory", content: "not supported" }]
     }),
     (error: unknown) => {
-      assert.ok(error instanceof HarnessUnsupportedContextSourceError);
-      assert.deepEqual(error.fallback, {
-        runtime: "python",
-        reason: "unsupported-context-source",
-        sourceKind: "memory"
-      });
+      assert.ok(error instanceof HarnessUnsupportedContextError);
+      assert.equal(error.category, "unsupported");
+      assert.equal(error.sourceKind, "memory");
       return true;
     }
   );

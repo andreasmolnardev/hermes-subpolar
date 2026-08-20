@@ -378,15 +378,6 @@ export interface PersistenceRepository extends SessionRepository, PersistenceRep
   ): Promise<T>;
 }
 
-/** Durable per-session runtime pin used by gateway adapters. */
-export type RuntimeSelection = "harness" | "python";
-
-export interface RuntimeSelectionStore {
-  load(sessionId: string): Promise<RuntimeSelection | undefined>;
-  save(sessionId: string, runtime: RuntimeSelection): Promise<void>;
-  clear?(sessionId?: string): Promise<void>;
-}
-
 export type TransportEvent =
   | { type: "session.started"; sessionId: string }
   | { type: "message.started"; sessionId: string; messageId: string; role: ChatRole }

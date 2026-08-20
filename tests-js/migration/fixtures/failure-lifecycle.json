@@ -9,7 +9,7 @@
     }
   ],
   "tools": [],
-  "retryFallback": {
+  "retry": {
     "retryPolicy": {
       "maxAttempts": 2,
       "backoffMs": 17
@@ -22,9 +22,6 @@
       "provider.requested",
       "retry.scheduled",
       "provider.requested",
-      "fallback.selected",
-      "provider.requested",
-      "provider.completed",
       "terminal"
     ],
     "expectedRetry": {
@@ -32,14 +29,8 @@
       "attempt": 1,
       "delayMs": 17
     },
-    "expectedFallback": {
-      "providerIndex": 1
-    },
-    "expectedTerminal": "completed",
-    "expectedProviderCalls": {
-      "primary": 2,
-      "fallback": 1
-    }
+    "expectedTerminal": "provider_failure",
+    "expectedProviderCalls": 2
   },
   "cancellation": {
     "expectedEvents": [

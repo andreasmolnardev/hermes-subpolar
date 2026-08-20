@@ -4,8 +4,6 @@ export type IterationBudgetResource =
   | "toolCalls"
   | "tokens";
 
-export type IterationBudgetResourceAlias = IterationBudgetResource | "turn" | "provider" | "tool" | "token";
-
 export type IterationBudgetLimits = {
   readonly maxTurns?: number;
   readonly maxProviderCalls?: number;
@@ -42,17 +40,6 @@ export type IterationBudgetSnapshot = {
   };
 };
 
-const RESOURCE_ALIASES: Record<IterationBudgetResourceAlias, IterationBudgetResource> = {
-  turns: "turns",
-  turn: "turns",
-  providerCalls: "providerCalls",
-  provider: "providerCalls",
-  toolCalls: "toolCalls",
-  tool: "toolCalls",
-  tokens: "tokens",
-  token: "tokens"
-};
-
 const LIMIT_KEYS: Record<IterationBudgetResource, keyof IterationBudgetLimits> = {
   turns: "maxTurns",
   providerCalls: "maxProviderCalls",
@@ -83,7 +70,7 @@ function amount(value: number): number {
 }
 
 /**
- * Synchronous counters for the budgets represented by HarnessBudgets.
+ * Synchronous counters for the harness budgets.
  *
  * Each operation completes without an await, so concurrent promise callbacks
  * cannot observe or create a partially-applied update. `check` is useful for
@@ -103,35 +90,33 @@ export class IterationBudget {
     tokens: 0
   };
 
-  constructor(limits: IterationBudgetLimits | number = {}) {
-    const values = typeof limits === "number" ? { maxTurns: limits } : limits;
-    this.maxTurns = boundedLimit(values.maxTurns, "maxTurns");
-    this.maxProviderCalls = boundedLimit(values.maxProviderCalls, "maxProviderCalls");
-    this.maxToolCalls = boundedLimit(values.maxToolCalls, "maxToolCalls");
-    this.maxTokens = boundedLimit(values.maxTokens, "maxTokens");
+  constructor(limits: IterationBudgetLimits = {}) {
+    this.maxTurns = boundedLimit(limits.maxTurns, "maxTurns");
+    this.maxProviderCalls = boundedLimit(limits.maxProviderCalls, "maxProviderCalls");
+    this.maxToolCalls = boundedLimit(limits.maxToolCalls, "maxToolCalls");
+    this.maxTokens = boundedLimit(limits.maxTokens, "maxTokens");
   }
 
   /** Return whether an amount can be consumed without changing the counter. */
-  check(resource: IterationBudgetResourceAlias = "turns", requested = 1): IterationBudgetDecision {
-    const canonical = RESOURCE_ALIASES[resource];
+  check(resource: IterationBudgetResource = "turns", requested = 1): IterationBudgetDecision {
     const quantity = amount(requested);
-    const used = this.counts[canonical];
-    const limit = this[LIMIT_KEYS[canonical]];
+    const used = this.counts[resource];
+    const limit = this[LIMIT_KEYS[resource]];
     const remaining = limit === undefined ? undefined : Math.max(0, limit - used);
     const allowed = limit === undefined || used + quantity <= limit;
     return {
       allowed,
-      resource: canonical,
+      resource,
       requested: quantity,
       used,
       remaining,
       limit,
-      ...(allowed ? {} : { reason: REASONS[canonical] })
+      ...(allowed ? {} : { reason: REASONS[resource] })
     };
   }
 
   /** Try to consume an amount and return an explicit exhaustion reason. */
-  tryConsume(resource: IterationBudgetResourceAlias = "turns", requested = 1): IterationBudgetDecision {
+  tryConsume(resource: IterationBudgetResource = "turns", requested = 1): IterationBudgetDecision {
     const decision = this.check(resource, requested);
     if (decision.allowed) this.counts[decision.resource] += decision.requested;
     return decision.allowed
@@ -145,28 +130,21 @@ export class IterationBudget {
       : decision;
   }
 
-  /** Python IterationBudget-compatible boolean consume operation. */
-  consume(resource: IterationBudgetResourceAlias = "turns", requested = 1): boolean {
-    return this.tryConsume(resource, requested).allowed;
-  }
-
   /** Return consumed capacity to a counter, never below zero. */
-  refund(resource: IterationBudgetResourceAlias = "turns", requested = 1): void {
-    const canonical = RESOURCE_ALIASES[resource];
-    this.counts[canonical] = Math.max(0, this.counts[canonical] - amount(requested));
+  refund(resource: IterationBudgetResource = "turns", requested = 1): void {
+    this.counts[resource] = Math.max(0, this.counts[resource] - amount(requested));
   }
 
-  used(resource: IterationBudgetResourceAlias = "turns"): number {
-    return this.counts[RESOURCE_ALIASES[resource]];
+  used(resource: IterationBudgetResource = "turns"): number {
+    return this.counts[resource];
   }
 
-  remaining(resource: IterationBudgetResourceAlias = "turns"): number | undefined {
-    const canonical = RESOURCE_ALIASES[resource];
-    const limit = this[LIMIT_KEYS[canonical]];
-    return limit === undefined ? undefined : Math.max(0, limit - this.counts[canonical]);
+  remaining(resource: IterationBudgetResource = "turns"): number | undefined {
+    const limit = this[LIMIT_KEYS[resource]];
+    return limit === undefined ? undefined : Math.max(0, limit - this.counts[resource]);
   }
 
-  exhaustionReason(resource: IterationBudgetResourceAlias = "turns"): IterationBudgetExhaustionReason | undefined {
+  exhaustionReason(resource: IterationBudgetResource = "turns"): IterationBudgetExhaustionReason | undefined {
     const decision = this.check(resource, 1);
     return decision.reason;
   }

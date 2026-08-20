@@ -3,30 +3,9 @@
 .gitignore
 .gitmodules
 
-# Python
-__pycache__
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-dist/
-build/
-
-# Virtual environments
-venv/
-env/
-ENV/
-
 # Dependencies
 node_modules
 **/node_modules
-.venv
-**/.venv
-.notebooklm-cli-venv/
-.notebooklm-playwright/
-.pip-cache/
-.uv-cache/
 
 # Built browser artifacts are regenerated inside the image.
 packages/web-ui/dist/
@@ -44,18 +23,12 @@ packages/web-ui/dist/
 *.swp
 *.swo
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
 # Documentation
 *.md
 
 # Runtime data (bind-mounted at /opt/data; must not leak into build context)
 data/
 .hermes-docker/
-.notebooklm-home/
 
 # Compose/profile runtime state (bind-mounted; avoid ownership/secret issues)
 hermes-config/

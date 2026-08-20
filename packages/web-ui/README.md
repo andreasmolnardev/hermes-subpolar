@@ -17,8 +17,8 @@ bun run serve
 
 # In another terminal, start the Vite dev server (with HMR + API proxy)
 cd packages/web-ui/
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 Open the **Vite URL** printed in the terminal (usually `http://localhost:5173`). That is the live-reload UI.
@@ -26,12 +26,12 @@ Open the **Vite URL** printed in the terminal (usually `http://localhost:5173`).
 `bun run serve` serves the built bundle from `packages/web-ui/dist/` on port
 8080. It rebuilds the browser before starting the Bun server.
 
-The Vite dev server proxies `/api` requests to `http://127.0.0.1:9119` (the FastAPI backend).
+The Vite dev server proxies `/api` and `/v1` requests to the Bun API server at `http://127.0.0.1:8080`.
 
 ## Build
 
 ```bash
-npm run build
+bun run build
 ```
 
 This outputs to `dist/`, which the Bun server serves as a static SPA.

@@ -97,6 +97,15 @@ type NormalizedMessage = {
   readonly calls: readonly NormalizedCall[];
 };
 
+export class HarnessUnsupportedMessageError extends TypeError {
+  readonly category = "unsupported" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "HarnessUnsupportedMessageError";
+  }
+}
+
 function sanitizeString(value: string): string {
   let result = "";
   let changed = false;
@@ -151,7 +160,7 @@ function effectiveCallId(value: Record<string, unknown>): string {
 
 function repairArgumentSubset(raw: string): string {
   const stripped = raw.trim();
-  if (stripped.length === 0 || stripped === "None") return "{}";
+  if (stripped.length === 0) return "{}";
 
   // Preserve valid arguments exactly. Besides avoiding needless cache churn,
   // this keeps normalization a no-op for healthy histories.
@@ -209,15 +218,14 @@ function repairArgumentSubset(raw: string): string {
     JSON.parse(fixed);
     return fixed;
   } catch {
-    // Truncation, Python literals other than None, and other syntax are not
-    // safe to infer. Leave them invalid so execution fails closed.
+    // Truncated and otherwise invalid arguments remain invalid.
     return raw;
   }
 }
 
 function normalizedCall(value: unknown, path: string, index: number): NormalizedCall {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError(`${path} must be a tool call`);
+    throw new HarnessUnsupportedMessageError(`${path} must be a tool call`);
   }
   const candidate = value as Record<string, unknown>;
   const name = typeof candidate.name === "string"
@@ -237,7 +245,7 @@ function normalizedCall(value: unknown, path: string, index: number): Normalized
     argumentsValue = JSON.stringify(sanitizeJson(rawArguments as ProviderJsonValue));
   }
   if (typeof name !== "string" || name.length === 0 || argumentsValue === undefined) {
-    throw new TypeError(`${path} is malformed`);
+    throw new HarnessUnsupportedMessageError(`${path} is malformed`);
   }
 
   const explicitIds = [candidate.call_id, candidate.id]
@@ -263,31 +271,31 @@ function normalizedContent(
   callIndex: { value: number }
 ): { readonly content: ProviderContent; readonly calls: readonly NormalizedCall[] } {
   if (typeof value === "string") return { content: sanitizeString(value), calls: [] };
-  if (!Array.isArray(value)) throw new TypeError(`${path} must be a string or content parts`);
+  if (!Array.isArray(value)) throw new HarnessUnsupportedMessageError(`${path} must be a string or content parts`);
 
   const calls: NormalizedCall[] = [];
   const content = value.map((part: unknown, index): ProviderContentPart => {
     const partPath = `${path}[${index}]`;
     if (typeof part !== "object" || part === null || Array.isArray(part)) {
-      throw new TypeError(`${partPath} is malformed`);
+      throw new HarnessUnsupportedMessageError(`${partPath} is malformed`);
     }
     const candidate = part as Record<string, unknown>;
     if (candidate.type === "text" || candidate.type === "reasoning") {
-      if (typeof candidate.text !== "string") throw new TypeError(`${partPath}.text must be a string`);
+      if (typeof candidate.text !== "string") throw new HarnessUnsupportedMessageError(`${partPath}.text must be a string`);
       return { type: candidate.type, text: sanitizeString(candidate.text) };
     }
     if (candidate.type === "image" || candidate.type === "audio" || candidate.type === "file") {
       if (typeof candidate.url !== "string" || candidate.url.trim().length === 0) {
-        throw new TypeError(`${partPath}.url must be a non-empty string`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.url must be a non-empty string`);
       }
       if (candidate.mimeType !== undefined && typeof candidate.mimeType !== "string") {
-        throw new TypeError(`${partPath}.mimeType must be a string`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.mimeType must be a string`);
       }
       if (candidate.type === "image" && candidate.alt !== undefined && typeof candidate.alt !== "string") {
-        throw new TypeError(`${partPath}.alt must be a string`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.alt must be a string`);
       }
       if (candidate.type === "file" && candidate.name !== undefined && typeof candidate.name !== "string") {
-        throw new TypeError(`${partPath}.name must be a string`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.name must be a string`);
       }
       return {
         type: candidate.type,
@@ -300,14 +308,14 @@ function normalizedContent(
     if (candidate.type === "image_url") {
       const imageUrl = candidate.imageUrl;
       if (typeof imageUrl === "string") {
-        if (imageUrl.trim().length === 0) throw new TypeError(`${partPath}.imageUrl must be non-empty`);
+        if (imageUrl.trim().length === 0) throw new HarnessUnsupportedMessageError(`${partPath}.imageUrl must be non-empty`);
         return { type: "image_url", imageUrl: sanitizeString(imageUrl) };
       }
       if (typeof imageUrl !== "object" || imageUrl === null || Array.isArray(imageUrl) ||
           typeof (imageUrl as Record<string, unknown>).url !== "string" ||
           ((imageUrl as Record<string, unknown>).detail !== undefined &&
             !["auto", "low", "high"].includes(String((imageUrl as Record<string, unknown>).detail)))) {
-        throw new TypeError(`${partPath}.imageUrl is malformed`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.imageUrl is malformed`);
       }
       const imageRecord = imageUrl as Record<string, unknown>;
       return {
@@ -325,10 +333,10 @@ function normalizedContent(
     }
     if (candidate.type === "tool-result") {
       if (typeof candidate.toolCallId !== "string" || candidate.toolCallId.length === 0) {
-        throw new TypeError(`${partPath}.toolCallId must be non-empty`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.toolCallId must be non-empty`);
       }
       if (candidate.isError !== undefined && typeof candidate.isError !== "boolean") {
-        throw new TypeError(`${partPath}.isError must be a boolean`);
+        throw new HarnessUnsupportedMessageError(`${partPath}.isError must be a boolean`);
       }
       const nested = normalizedContent(candidate.content, `${partPath}.content`, callIndex);
       return {
@@ -338,7 +346,7 @@ function normalizedContent(
         ...(candidate.isError === undefined ? {} : { isError: candidate.isError })
       };
     }
-    throw new TypeError(`${partPath}.type is unsupported`);
+    throw new HarnessUnsupportedMessageError(`${partPath}.type is unsupported`);
   });
   return { content, calls };
 }
@@ -358,18 +366,18 @@ function normalizedSidecars(
     apiContent = normalizedContent(candidate.apiContent, `${path}.apiContent`, { value: 0 }).content;
   }
   if (candidate.displayKind !== undefined && typeof candidate.displayKind !== "string") {
-    throw new TypeError(`${path}.displayKind must be a string`);
+    throw new HarnessUnsupportedMessageError(`${path}.displayKind must be a string`);
   }
   if (candidate.displayMetadata !== undefined &&
       (!isProviderJsonValue(candidate.displayMetadata as ProviderJsonValue) ||
        Array.isArray(candidate.displayMetadata))) {
-    throw new TypeError(`${path}.displayMetadata must be a JSON object`);
+     throw new HarnessUnsupportedMessageError(`${path}.displayMetadata must be a JSON object`);
   }
   if (candidate.synthetic !== undefined && typeof candidate.synthetic !== "boolean") {
-    throw new TypeError(`${path}.synthetic must be a boolean`);
+    throw new HarnessUnsupportedMessageError(`${path}.synthetic must be a boolean`);
   }
   if (candidate.context !== undefined && !isProviderJsonValue(candidate.context as ProviderJsonValue)) {
-    throw new TypeError(`${path}.context must be a JSON value`);
+    throw new HarnessUnsupportedMessageError(`${path}.context must be a JSON value`);
   }
   return {
     ...(apiContent === undefined ? {} : { apiContent }),
@@ -421,12 +429,12 @@ function uniqueId(sourceId: string, used: Set<string>): string {
 
 function normalizedMessage(value: unknown, index: number): NormalizedMessage {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError(`History message[${index}] is malformed`);
+    throw new HarnessUnsupportedMessageError(`History message[${index}] is malformed`);
   }
   const candidate = value as Record<string, unknown>;
   if (candidate.role !== "system" && candidate.role !== "user" &&
       candidate.role !== "assistant" && candidate.role !== "tool") {
-    throw new TypeError(`History message[${index}] has an invalid role`);
+    throw new HarnessUnsupportedMessageError(`History message[${index}] has an invalid role`);
   }
 
   const callIndex = { value: 0 };
@@ -440,20 +448,20 @@ function normalizedMessage(value: unknown, index: number): NormalizedMessage {
         `History message[${index}].toolCalls[${callIndexValue}]`,
         callIndexValue
       ))
-      : (() => { throw new TypeError(`History message[${index}].toolCalls must be an array`); })();
+      : (() => { throw new HarnessUnsupportedMessageError(`History message[${index}].toolCalls must be an array`); })();
 
   if ((candidate.role !== "assistant" && declaredCalls !== undefined) ||
       (candidate.role !== "tool" && candidate.toolCallId !== undefined)) {
-    throw new TypeError(`History message[${index}] has tool fields on a non-assistant/non-tool message`);
+    throw new HarnessUnsupportedMessageError(`History message[${index}] has tool fields on a non-assistant/non-tool message`);
   }
   if (candidate.role === "tool" &&
       (typeof candidate.toolCallId !== "string" || candidate.toolCallId.length === 0)) {
-    throw new TypeError(`History message[${index}] toolCallId must be non-empty`);
+    throw new HarnessUnsupportedMessageError(`History message[${index}] toolCallId must be non-empty`);
   }
   if (candidate.role === "tool" && Array.isArray(normalized.content)) {
     for (const part of normalized.content) {
       if (part.type === "tool-result" && part.toolCallId !== sanitizeString(candidate.toolCallId as string)) {
-        throw new TypeError(`History message[${index}] tool-result does not match toolCallId`);
+        throw new HarnessUnsupportedMessageError(`History message[${index}] tool-result does not match toolCallId`);
       }
     }
   }
@@ -467,17 +475,17 @@ function normalizedMessage(value: unknown, index: number): NormalizedMessage {
         return contentCall !== undefined && sameCall(call.call, contentCall.call);
       })
         ? declaredCalls
-        : (() => { throw new TypeError(`History message[${index}] tool-call parts do not match toolCalls`); })();
+        : (() => { throw new HarnessUnsupportedMessageError(`History message[${index}] tool-call parts do not match toolCalls`); })();
 
   const persistedResult = candidate.toolResult;
   if (persistedResult !== undefined) {
     if (typeof persistedResult !== "object" || persistedResult === null || Array.isArray(persistedResult)) {
-      throw new TypeError(`History message[${index}].toolResult is malformed`);
+      throw new HarnessUnsupportedMessageError(`History message[${index}].toolResult is malformed`);
     }
     const result = persistedResult as Record<string, unknown>;
     if (typeof result.toolCallId !== "string" || result.toolCallId.length === 0 ||
         result.toolCallId !== candidate.toolCallId || typeof result.isError !== "boolean") {
-      throw new TypeError(`History message[${index}].toolResult is inconsistent`);
+      throw new HarnessUnsupportedMessageError(`History message[${index}].toolResult is inconsistent`);
     }
     normalizedContent(result.content, `History message[${index}].toolResult.content`, callIndex);
   }
@@ -486,18 +494,18 @@ function normalizedMessage(value: unknown, index: number): NormalizedMessage {
     ? undefined
     : isProviderJsonValue(candidate.metadata)
       ? sanitizeJson(candidate.metadata) as ProviderMetadata
-      : (() => { throw new TypeError(`History message[${index}].metadata is malformed`); })();
+       : (() => { throw new HarnessUnsupportedMessageError(`History message[${index}].metadata is malformed`); })();
   const sidecars = normalizedSidecars(candidate, `History message[${index}]`);
   const message: ProviderMessage = {
     role: candidate.role,
     content: normalized.content,
     ...(typeof candidate.reasoning === "string" ? { reasoning: sanitizeString(candidate.reasoning) } :
-      candidate.reasoning === undefined ? {} : (() => { throw new TypeError(`History message[${index}].reasoning must be a string`); })()),
+       candidate.reasoning === undefined ? {} : (() => { throw new HarnessUnsupportedMessageError(`History message[${index}].reasoning must be a string`); })()),
     ...(calls.length === 0 ? {} : { toolCalls: calls.map(call => call.call) }),
     ...(candidate.toolCallId === undefined ? {} : { toolCallId: sanitizeString(candidate.toolCallId as string) }),
     ...(candidate.name === undefined ? {} : typeof candidate.name === "string"
       ? { name: sanitizeString(candidate.name) }
-      : (() => { throw new TypeError(`History message[${index}].name must be a string`); })()),
+       : (() => { throw new HarnessUnsupportedMessageError(`History message[${index}].name must be a string`); })()),
     ...(metadata === undefined ? {} : { metadata }),
     ...sidecars
   };

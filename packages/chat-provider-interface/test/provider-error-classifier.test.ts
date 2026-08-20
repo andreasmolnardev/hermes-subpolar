@@ -10,7 +10,7 @@ function category(error: unknown, options?: Parameters<typeof classifyProviderEr
   return classifyProviderError(error, options);
 }
 
-test("provider error classifier follows the neutral Python precedence matrix", () => {
+test("provider error classifier follows the neutral precedence matrix", () => {
   const cases: readonly [string, unknown, Parameters<typeof classifyProviderError>[1] | undefined, string][] = [
     ["cancellation beats status", Object.assign(new Error("cancelled"), { name: "AbortError", statusCode: 500 }), undefined, "cancelled"],
     ["timeout beats status", Object.assign(new Error("timed out"), { name: "TimeoutError", statusCode: 400 }), undefined, "timeout"],

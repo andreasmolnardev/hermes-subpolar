@@ -4,6 +4,7 @@ import { test } from "bun:test";
 import {
   createToolHandle,
   resolveToolDescriptors,
+  resolveAgentToolDescriptors,
   resolveTools,
   sanitizeJsonSchema,
   sanitizeToolSchemas,
@@ -81,6 +82,25 @@ test("filters denied and disabled tools fail-closed", () => {
     tool("disabled"),
     tool("unknown-policy", { policy: undefined })
   ], policies), []);
+});
+
+test("resolves agent permissions centrally and session modes only tighten explicit denials", () => {
+  const definitions = [
+    tool("filesystem.read"),
+    tool("filesystem.write", { capabilities: { mutating: true } }),
+    tool("shell.execute", { capabilities: { mutating: true } })
+  ];
+  const context = {
+    enabledCapabilityIds: ["filesystem.read", "filesystem.write", "shell.execute"],
+    agentPolicies: [
+      { capabilityId: "filesystem.read", policy: "allow" as const },
+      { capabilityId: "filesystem.write", policy: "ask" as const },
+      { capabilityId: "shell.execute", policy: "deny" as const }
+    ]
+  };
+  assert.deepEqual(resolveAgentToolDescriptors(definitions, context).map(item => [item.name, item.policy]), [["filesystem.read", "allow"], ["filesystem.write", "ask"]]);
+  assert.deepEqual(resolveAgentToolDescriptors(definitions, { ...context, sessionMode: "full" }).map(item => [item.name, item.policy]), [["filesystem.read", "allow"], ["filesystem.write", "allow"]]);
+  assert.deepEqual(resolveAgentToolDescriptors(definitions, { ...context, sessionMode: "read-only" }).map(item => [item.name, item.policy]), [["filesystem.read", "allow"]]);
 });
 
 test("uses restrictive policy precedence independent of input order", () => {

@@ -21,6 +21,7 @@ import type {
 import { normalizeProviderUsage } from "chat-provider-interface";
 import {
   closeInterruptedToolSequence,
+  HarnessUnsupportedMessageError,
   normalizeHarnessMessages,
   normalizeProviderResult
 } from "./message-normalization";
@@ -28,12 +29,12 @@ import {
   attemptIdentity,
   boundedBackoff,
   boundedMaxAttempts,
-  classifyHarnessProviderError,
+  classifyHarnessProviderError as classifyProviderError,
   remainingMilliseconds,
-  type HarnessProviderFailure,
   type HarnessProviderFailureCategory,
   type HarnessRetryPolicy
 } from "./retry-policy";
+import type { RetryClassificationOptions } from "./retry-policy";
 import {
   boundToolResult,
   enforceToolTurnBudget,
@@ -47,24 +48,43 @@ import {
 } from "./iteration-budget";
 import {
   estimateRequestTokensRough,
+  estimateToolsTokensRough,
   type HarnessTokenEstimate
 } from "./model-metadata";
 import {
-  isHarnessUnsupportedContextSourceError,
-  type HarnessFallbackSignal
+  isHarnessUnsupportedContextError
 } from "./prompt-assembler";
 
 export {
   MAX_RETRY_ATTEMPTS,
   MAX_RETRY_BACKOFF_MS,
-  classifyHarnessProviderError,
   boundedBackoff,
   boundedMaxAttempts,
   remainingMilliseconds,
   attemptIdentity
 } from "./retry-policy";
+export type HarnessProviderFailure = {
+  readonly category: HarnessProviderFailureCategory;
+  readonly retryable: boolean;
+  readonly message: string;
+  readonly statusCode?: number;
+  readonly requestId?: string;
+};
+
+export function classifyHarnessProviderError(
+  error: unknown,
+  options: RetryClassificationOptions = {}
+): HarnessProviderFailure {
+  const classified = classifyProviderError(error, options);
+  return {
+    category: classified.category,
+    retryable: classified.retryable,
+    message: classified.message,
+    ...(classified.statusCode === undefined ? {} : { statusCode: classified.statusCode }),
+    ...(classified.requestId === undefined ? {} : { requestId: classified.requestId })
+  };
+}
 export type {
-  HarnessProviderFailure,
   HarnessProviderFailureCategory,
   HarnessRetryPolicy,
   ProviderAttemptIdentity,
@@ -88,25 +108,22 @@ export type {
   IterationBudgetExhaustionReason,
   IterationBudgetLimits,
   IterationBudgetResource,
-  IterationBudgetResourceAlias,
   IterationBudgetSnapshot
 } from "./iteration-budget";
 export {
   assembleHarnessContext,
   createHarnessContextAssembler,
-  isHarnessUnsupportedContextSourceError,
-  HarnessUnsupportedContextSourceError,
+  isHarnessUnsupportedContextError,
+  HarnessUnsupportedContextError,
   HARNESS_PROMPT_SECTION_ORDER
 } from "./prompt-assembler";
 export type {
-  HarnessFallbackSignal,
   HarnessPromptAssemblerOptions,
   HarnessPromptBudget,
   HarnessPromptCacheMarker,
   HarnessPromptSection,
   HarnessPromptSectionName,
   HarnessPromptSource,
-  HarnessUnsupportedSourceKind,
   HarnessPromptAssembly
 } from "./prompt-assembler";
 export {
@@ -132,6 +149,7 @@ export type {
   HarnessRequestTokenEstimateOptions,
   HarnessTokenEstimate
 } from "./model-metadata";
+export { HarnessUnsupportedMessageError } from "./message-normalization";
 
 export type HarnessJsonPrimitive = ProviderJsonPrimitive;
 export type HarnessJsonValue = ProviderJsonValue;
@@ -221,18 +239,9 @@ export type HarnessContextAssembler = (
   context: HarnessContext
 ) => Promise<readonly HarnessMessage[]>;
 
-/**
- * Preflights externally supplied context before the harness can invoke a
- * provider or tool. Unsupported context is handed back to the caller so it
- * can route the whole turn to the Python runtime.
- */
-export type HarnessContextRouting =
-  | { readonly outcome: "continue" }
-  | { readonly outcome: "fallback"; readonly fallback: HarnessFallbackSignal };
-
 export type HarnessContextSource = (
   context: HarnessContext
-) => Promise<HarnessContextRouting>;
+) => Promise<void>;
 
 export type HarnessIdKind = "event" | "tool" | "message";
 export type HarnessIdGenerator = (kind: HarnessIdKind) => string;
@@ -269,7 +278,6 @@ export type HarnessEvent =
   | (HarnessEventBase & { readonly type: "tool.called"; readonly call: HarnessToolCall })
   | (HarnessEventBase & { readonly type: "tool.completed"; readonly callId: string; readonly result: HarnessToolResult })
   | (HarnessEventBase & { readonly type: "retry.scheduled"; readonly providerIndex: number; readonly providerId: string; readonly attempt: number; readonly delayMs: number })
-  | (HarnessEventBase & { readonly type: "fallback.selected"; readonly providerIndex: number; readonly providerId: string })
   | (HarnessEventBase & { readonly type: "terminal"; readonly outcome: HarnessTerminalOutcomeType; readonly message?: string });
 
 type HarnessEventInput =
@@ -293,7 +301,6 @@ type HarnessEventInput =
   | { readonly type: "tool.called"; readonly requestId: string; readonly sessionId: string; readonly call: HarnessToolCall }
   | { readonly type: "tool.completed"; readonly requestId: string; readonly sessionId: string; readonly callId: string; readonly result: HarnessToolResult }
   | { readonly type: "retry.scheduled"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly providerId: string; readonly attempt: number; readonly delayMs: number }
-  | { readonly type: "fallback.selected"; readonly requestId: string; readonly sessionId: string; readonly providerIndex: number; readonly providerId: string }
   | { readonly type: "terminal"; readonly requestId: string; readonly sessionId: string; readonly outcome: HarnessTerminalOutcomeType; readonly message?: string };
 
 export type HarnessEventSink = (event: HarnessEvent) => void | Promise<void>;
@@ -440,7 +447,7 @@ export type HarnessToolOutputLimits = {
   readonly maxBytes?: number;
   /** Optional maximum UTF-8 bytes retained across one assistant tool turn. */
   readonly maxTurnBytes?: number;
-  /** Maximum UTF-8 bytes used for structured-result fallback previews. */
+  /** Maximum UTF-8 bytes used for structured-result previews. */
   readonly previewBytes?: number;
 };
 
@@ -463,7 +470,6 @@ export type HarnessRequest = {
   readonly messages: readonly HarnessMessage[];
   readonly tools: readonly HarnessTool[];
   readonly provider: HarnessProvider;
-  readonly fallbackProviders?: readonly HarnessProvider[];
   readonly identity?: ProviderRequestIdentity;
   readonly budgets?: HarnessBudgets;
   readonly retryPolicy?: HarnessRetryPolicy;
@@ -495,7 +501,6 @@ export type HarnessTerminalOutcomeType =
   | "completed"
   | "cancelled"
   | "budget_exhausted"
-  | "fallback"
   | "provider_failure"
   | "tool_failure"
   | "approval_rejected";
@@ -510,17 +515,11 @@ export type HarnessError = {
 
 export type HarnessOutcome =
   | { readonly outcome: "completed"; readonly result: HarnessProviderResult }
-  | { readonly outcome: "fallback"; readonly fallback: HarnessFallbackSignal }
-  | { readonly outcome: Exclude<HarnessTerminalOutcomeType, "completed" | "fallback">; readonly error: HarnessError };
-
-export type HarnessRunResult = HarnessOutcome;
-
-export type HarnessResult = HarnessProviderResult;
+  | { readonly outcome: Exclude<HarnessTerminalOutcomeType, "completed">; readonly error: HarnessError };
 
 export class HarnessProviderError extends Error {
   readonly category: HarnessProviderFailureCategory;
   readonly retryable: boolean;
-  readonly fallbackEligible: boolean;
   readonly statusCode: number | undefined;
   readonly requestId: string | undefined;
 
@@ -529,7 +528,6 @@ export class HarnessProviderError extends Error {
     options: {
       readonly category: HarnessProviderFailureCategory;
       readonly retryable?: boolean;
-      readonly fallbackEligible?: boolean;
       readonly statusCode?: number;
       readonly requestId?: string;
     }
@@ -541,7 +539,6 @@ export class HarnessProviderError extends Error {
       options.category === "rate_limit" || options.category === "overloaded" || options.category === "timeout" ||
       options.category === "network" || options.category === "server"
     );
-    this.fallbackEligible = options.fallbackEligible ?? this.retryable;
     this.statusCode = options.statusCode;
     this.requestId = options.requestId;
   }
@@ -1059,9 +1056,7 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     if (finalOutcome.outcome === "cancelled") {
       messages = closeInterruptedToolSequence(messages);
     }
-    if (finalOutcome.outcome === "fallback") {
-      // Context routing happens before this turn has durable or executable work.
-    } else if (persistenceFailure !== undefined) {
+    if (persistenceFailure !== undefined) {
       finalOutcome = persistenceFailureOutcome(persistenceFailure);
     } else if (!(await commitPending(
       true,
@@ -1076,14 +1071,6 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         requestId: request.requestId,
         sessionId: request.sessionId,
         outcome: "completed"
-      });
-    } else if (finalOutcome.outcome === "fallback") {
-      await emit({
-        type: "terminal",
-        requestId: request.requestId,
-        sessionId: request.sessionId,
-        outcome: "fallback",
-        message: finalOutcome.fallback.reason
       });
     } else {
       await emit({
@@ -1110,9 +1097,34 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     return terminal(stop ?? cancellationError());
   }
 
+  if (typeof request.model !== "string" || request.model.trim().length === 0) {
+    return terminal(failureOutcome("provider_failure", new Error("Unsupported model shape"), "unsupported"));
+  }
+  if (!Array.isArray(request.messages)) {
+    return terminal(failureOutcome("provider_failure", new Error("Unsupported message shape"), "unsupported"));
+  }
+  try {
+    normalizeHarnessMessages(request.messages);
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    return terminal(failureOutcome(
+      "provider_failure",
+      failure,
+      error instanceof HarnessUnsupportedMessageError ? error.category : "history"
+    ));
+  }
+  const toolEstimate = estimateToolsTokensRough(request.tools);
+  if (!toolEstimate.supported) {
+    return terminal(failureOutcome("provider_failure", new Error(`Unsupported tool shape: ${toolEstimate.reason}`), "unsupported"));
+  }
+  const initialEstimate = estimateRequestTokensRough(request.messages, { tools: request.tools });
+  if (!initialEstimate.supported) {
+    return terminal(failureOutcome("provider_failure", new Error(`Unsupported request shape: ${initialEstimate.reason}`), "unsupported"));
+  }
+
   if (request.contextSource !== undefined) {
     try {
-      const routing = await abortable(request.contextSource({
+      await abortable(request.contextSource({
         requestId: request.requestId,
         sessionId: request.sessionId,
         model: request.model,
@@ -1121,13 +1133,12 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         tools: request.tools,
         signal: controller.signal
       }), controller.signal);
-      if (routing.outcome === "fallback") return terminal(routing);
     } catch (error) {
-      if (isHarnessUnsupportedContextSourceError(error)) {
-        return terminal({ outcome: "fallback", fallback: error.fallback });
-      }
       const stop = stopped();
       if (stop !== undefined) return terminal(stop);
+      if (isHarnessUnsupportedContextError(error)) {
+        return terminal(failureOutcome("provider_failure", error, error.category));
+      }
       const failure = error instanceof Error ? error : new Error(String(error));
       return terminal(failureOutcome("provider_failure", failure, "context"));
     }
@@ -1263,9 +1274,8 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     completedTurnTools.push(completed);
   }
   const budget = new IterationBudget(request.budgets);
-  let providerIndex = 0;
+  const providerIndex = 0;
   let finalResult: HarnessProviderResult | undefined;
-  const providers = [request.provider, ...(request.fallbackProviders ?? [])];
   const retryPolicy = request.retryPolicy ?? {};
   const maxAttempts = boundedMaxAttempts(retryPolicy);
 
@@ -1287,31 +1297,20 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
         }), controller.signal)
         : messages;
       const providerMessagesForTurn = providerMessages(normalizeHarnessMessages(assembled));
+      const requestEstimate: HarnessTokenEstimate = estimateRequestTokensRough(providerMessagesForTurn, {
+        tools: providerTools(request.tools)
+      });
+      if (!requestEstimate.supported) {
+        return terminal(failureOutcome("provider_failure", new Error(`Unsupported request shape: ${requestEstimate.reason}`), "unsupported"));
+      }
       if (request.budgets?.maxTokens !== undefined) {
-        const requestEstimate: HarnessTokenEstimate = estimateRequestTokensRough(providerMessagesForTurn, {
-          tools: providerTools(request.tools)
-        });
-        // An unsupported shape must not become a guessed budget amount. The
-        // Python runtime remains the fallback for that context.
-        if (requestEstimate.supported) {
-          const estimateDecision = budget.check("tokens", requestEstimate.tokens);
-          if (!estimateDecision.allowed) return terminal(iterationBudgetError(estimateDecision));
-        }
+        const estimateDecision = budget.check("tokens", requestEstimate.tokens);
+        if (!estimateDecision.allowed) return terminal(iterationBudgetError(estimateDecision));
       }
       let providerResult: HarnessProviderResult | undefined;
-      let lastFailure: HarnessProviderFailure | undefined;
       let attempt = 0;
       while (providerResult === undefined) {
-        const currentProvider = providers[providerIndex];
-        if (currentProvider === undefined) {
-          const failure = lastFailure ?? {
-            category: "unknown" as const,
-            retryable: false,
-            fallbackEligible: false,
-            message: "No provider available"
-          };
-          return terminal(failureOutcome("provider_failure", new Error(failure.message), failure.category));
-        }
+        const currentProvider = request.provider;
         const providerCheck = budget.check("providerCalls");
         if (!providerCheck.allowed) return terminal(iterationBudgetError(providerCheck));
         attempt += 1;
@@ -1389,7 +1388,6 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
           if (!tokenDecision.allowed) return terminal(iterationBudgetError(tokenDecision));
         } catch (error) {
           const failure = thrownAsFailure(typeof error === "object" && error !== null ? error : new Error(String(error)));
-          lastFailure = failure;
           const stopAfterFailure = stopped();
           if (stopAfterFailure !== undefined) return terminal(stopAfterFailure);
           if (failure.retryable && attempt < maxAttempts) {
@@ -1408,18 +1406,6 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
               delayMs
             });
             await abortable(request.sleeper.sleep(delayMs, controller.signal), controller.signal);
-            continue;
-          }
-          if (failure.fallbackEligible && providerIndex + 1 < providers.length) {
-            providerIndex += 1;
-            attempt = 0;
-            await emit({
-              type: "fallback.selected",
-              requestId: request.requestId,
-              sessionId: request.sessionId,
-              providerIndex,
-              providerId: providerIndex === 0 ? "primary" : `fallback-${providerIndex}`
-            });
             continue;
           }
           return terminal(failureOutcome("provider_failure", new Error(failure.message), failure.category));
@@ -1635,8 +1621,11 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
     const thrown = typeof error === "object" && error !== null ? error : new Error(String(error));
     const stop = stopped();
     if (stop !== undefined) return terminal(stop);
-    if (isHarnessUnsupportedContextSourceError(thrown)) {
-      return terminal({ outcome: "fallback", fallback: thrown.fallback });
+    if (isHarnessUnsupportedContextError(thrown)) {
+      return terminal(failureOutcome("provider_failure", thrown, thrown.category));
+    }
+    if (thrown instanceof HarnessUnsupportedMessageError) {
+      return terminal(failureOutcome("provider_failure", thrown, thrown.category));
     }
     return terminal(failureOutcome("provider_failure", new Error(errorMessage(thrown)), "harness"));
   } finally {
@@ -1646,45 +1635,5 @@ async function runHarness(request: HarnessRequest): Promise<HarnessOutcome> {
 }
 
 export function executeHarness(request: HarnessRequest): Promise<HarnessOutcome> {
-  return runHarness(request);
-}
-
-export function run(request: HarnessRequest): Promise<HarnessOutcome> {
-  return runHarness(request);
-}
-
-type LegacyTool = HarnessTool;
-
-type LegacyRequest = {
-  readonly model: string;
-  readonly messages: readonly HarnessMessage[];
-  readonly tools: readonly LegacyTool[];
-};
-
-type LegacyProvider = {
-  complete(request: {
-    readonly model: string;
-    readonly messages: readonly HarnessMessage[];
-    readonly tools: readonly LegacyTool[];
-  }): Promise<ProviderResult>;
-};
-
-function isHarnessRequest(request: LegacyRequest | HarnessRequest): request is HarnessRequest {
-  return "provider" in request;
-}
-
-export function execute(request: LegacyRequest, provider: LegacyProvider): Promise<HarnessResult>;
-export function execute(request: HarnessRequest): Promise<HarnessOutcome>;
-export function execute(request: LegacyRequest | HarnessRequest, provider?: LegacyProvider): Promise<HarnessResult | HarnessOutcome> {
-  if (provider !== undefined) {
-    return provider.complete({
-      model: request.model,
-      messages: request.messages,
-      tools: request.tools
-    });
-  }
-  if (!isHarnessRequest(request)) {
-    throw new TypeError("Harness provider is required");
-  }
   return runHarness(request);
 }

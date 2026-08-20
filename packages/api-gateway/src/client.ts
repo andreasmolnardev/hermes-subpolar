@@ -219,12 +219,6 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
         session_id: event.sessionId,
         payload: { phase: "retry.scheduled" }
       };
-    case "fallback.selected":
-      return {
-        type: "status.update",
-        session_id: event.sessionId,
-        payload: { phase: "fallback.selected" }
-      };
     case "terminal":
       return event.outcome === "completed"
         ? { type: "message.complete", session_id: event.sessionId, payload: { outcome: "completed" } }

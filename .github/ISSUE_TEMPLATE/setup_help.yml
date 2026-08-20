@@ -9,9 +9,8 @@ body:
         Sorry you're having trouble! Please fill out the details below so we can help.
 
         **Quick checks first:**
-        - Run `hermes debug share` and paste the links in the Debug Report section below
-        - If you're in a chat session, you can use `/debug` instead — it does the same thing
-        - Try `hermes update` to get the latest version
+         - Run `bun install --frozen-lockfile` from the repository root
+         - Include server output and browser console errors below
         - Check the [README troubleshooting section](https://github.com/NousResearch/hermes-agent#troubleshooting)
         - For general questions, consider the [Nous Research Discord](https://discord.gg/NousResearch) for faster help
 
@@ -21,8 +20,7 @@ body:
       label: What's Going Wrong?
       description: Describe what you're trying to do and where it fails.
       placeholder: |
-        I ran `hermes setup` and selected Nous Portal, but when I try to
-        start the gateway I get...
+         I ran `bun run serve`, but when I open the web UI I get...
     validations:
       required: true
 
@@ -32,10 +30,10 @@ body:
       label: Steps Taken
       description: What did you do? Include the exact commands you ran.
       placeholder: |
-        1. Ran the install script: `curl -fsSL ... | bash`
-        2. Ran `hermes setup` and chose "Quick setup"
-        3. Selected OpenRouter, entered API key
-        4. Ran `hermes chat` and got error...
+        1. Ran `bun install --frozen-lockfile` from the repository root
+        2. Ran `bun run serve`
+        3. Opened the web UI and configured the required environment
+        4. Received this error...
     validations:
       required: true
 
@@ -44,9 +42,7 @@ body:
     attributes:
       label: Installation Method
       options:
-        - Install script (curl | bash)
-        - Manual clone + pip/uv install
-        - PowerShell installer (Windows)
+        - Manual clone + `bun install --frozen-lockfile`
         - Docker
         - Other
     validations:
@@ -61,42 +57,32 @@ body:
       required: true
 
   - type: input
-    id: python-version
-    attributes:
-      label: Python Version
-      description: Output of `python --version` (or `python3 --version`)
-      placeholder: "3.11.9"
-
-  - type: input
     id: hermes-version
     attributes:
-      label: Hermes Version
-      description: Output of `hermes version` (if install got that far)
+      label: Product Version
+      description: Package version or commit being tested
       placeholder: "2.1.0"
 
   - type: textarea
     id: debug-report
     attributes:
-      label: Debug Report
+      label: Runtime Logs
       description: |
-        Run `hermes debug share` from your terminal and paste the links it prints here.
-        This uploads your system info, config, and recent logs to a paste service automatically.
-
-        If you're in an interactive chat session, you can also use the `/debug` slash command — it does the same thing.
-
-        If the upload fails or install didn't get that far, run `hermes debug share --local` and paste the output directly.
-        If even that doesn't work, run `hermes doctor` and paste that output instead.
+        Paste the server output from `bun run serve` and any browser console or
+        network errors that help identify the failure.
       placeholder: |
-        Report   https://paste.rs/abc123
-        agent.log   https://paste.rs/def456
-        gateway.log   https://paste.rs/ghi789
+        Server:
+        ...
+
+        Browser console:
+        ...
       render: shell
 
   - type: textarea
     id: error-output
     attributes:
       label: Full Error Output
-      description: Paste the complete error message or traceback. This will be auto-formatted.
+      description: Paste the complete error message or stack trace. This will be auto-formatted.
       render: shell
     validations:
       required: true
@@ -107,6 +93,5 @@ body:
       label: What I've Already Tried
       description: List any fixes or workarounds you've already attempted.
       placeholder: |
-        - Ran `hermes update`
-        - Tried reinstalling with `pip install -e ".[all]"`
-        - Checked that OPENROUTER_API_KEY is set in ~/.hermes/.env
+        - Ran `bun install --frozen-lockfile`
+        - Checked that the required environment variables are set

@@ -73,10 +73,10 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "fix": "npm run lint:fix",
+    "fix": "bun run lint:fix",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run && bun test test/web-ui.test.ts",
-    "check": "npm run typecheck && npm run test && npm run lint"
+    "check": "bun run typecheck && bun run test && bun run lint"
   }
 }

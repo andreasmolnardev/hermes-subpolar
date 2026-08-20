@@ -1,31 +1,59 @@
-# Subpolar Docker Deployment
+# Deploying Subpolar
 
-Docker Compose is Subpolar's only supported production deployment.
+Subpolar production is one Bun server. Docker Compose is the supported
+self-hosted deployment; a reverse proxy is responsible for TLS and public
+network policy.
 
-## First Start
-
-Generate a password hash and stable session-signing secret:
+## Compose
 
 ```sh
-docker run --rm hermes-subpolar:local \
-  python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('change-me'))"
-export HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
-export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH='scrypt$...'
-export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)"
 docker compose up -d --build
+docker compose ps
+curl -fsS http://127.0.0.1:8080/api/health
 ```
 
-Open `http://127.0.0.1:9119`. The named `subpolar_data` volume stores config,
-credentials, workspaces, conversations, scheduled metadata, terminals, and
-audit history. Back it up before upgrades.
+The service binds to `127.0.0.1:8080` by default. Override the host binding
+with `SUBPOLAR_BIND` when the reverse proxy is on another interface. The
+container uses `SUBPOLAR_HOST=0.0.0.0` internally and stores SQLite state in
+`/opt/data`.
+
+The named `subpolar_data` volume contains identity, provider configuration,
+projects, agents, sessions, and messages. Back it up before upgrades. Never run
+two Subpolar containers against the same volume.
+
+## First Run
+
+Open `http://127.0.0.1:8080` and complete the browser setup:
+
+1. Create the first administrator at `GET/POST /v1/auth/bootstrap`.
+2. Configure the OpenAI-compatible provider at `/v1/setup/provider`.
+3. Choose the initial agent templates at `/v1/setup/agents`.
+
+The server sets an HttpOnly `subpolar_session` cookie and a readable
+`subpolar_csrf` cookie. Browser state-changing requests must send the CSRF value
+as `X-CSRF-Token` and use the server origin.
 
 ## Reverse Proxy
 
-Terminate TLS at a reverse proxy and forward `Host`, `X-Forwarded-Host`,
-`X-Forwarded-Proto`, and `X-Forwarded-Prefix`. Forward WebSocket upgrades for
-`/api/ws`, `/api/pty`, `/api/events`, `/api/pub`, and
-`/api/subpolar/terminals/ws`. Set `HERMES_DASHBOARD_PUBLIC_URL` when forwarded
-headers cannot be trusted. Keep the container port private to the proxy.
+Proxy the single HTTP origin and preserve the `Host`, `X-Forwarded-Host`, and
+`X-Forwarded-Proto` headers used by your TLS termination. Forward WebSocket
+upgrades for `/v1/ws`. Keep the container port private to the proxy and enforce
+authentication, rate limits, and an allowlist at the proxy when the service is
+reachable by more than its local operator.
+
+## Configuration
+
+Supported process settings are:
+
+- `SUBPOLAR_HOST`, default `127.0.0.1`.
+- `SUBPOLAR_PORT`, default `8080`.
+- `SUBPOLAR_DATA_DIR`, the persistent data directory.
+- `SUBPOLAR_STATIC_ROOT`, the built web directory; it defaults to
+  `packages/web-ui/dist` in a source checkout.
+
+Provider API keys are application secrets. Inject them through the setup flow
+or a deployment secret mechanism; do not commit them or place them in browser
+storage.
 
 ## Upgrade and Rollback
 
@@ -33,15 +61,16 @@ headers cannot be trusted. Keep the container port private to the proxy.
 docker compose pull
 docker compose up -d
 docker compose ps
-curl -fsS http://127.0.0.1:9119/api/health
 ```
 
-Pin image tags or digests in an environment-specific Compose override. To
-rollback, restore the previous image tag and run `docker compose up -d`; do not
-run two Subpolar containers against one data volume.
+Pin image tags or digests in an environment-specific Compose override. To roll
+back, restore the previous image and run `docker compose up -d` after verifying
+that the application data backup is available.
 
-## Security
+## Hardening
 
-Non-loopback binding requires password or OAuth authentication. Do not use
-`--insecure`. Behavioral settings belong in `config.yaml`; secrets belong in
-Docker secrets or environment injection, not browser storage or project data.
+- Run the container as a non-root process and grant it only its data volume.
+- Expose the service through TLS and a trusted reverse proxy.
+- Treat shell, MCP, and OpenAPI tool boundaries as explicit capabilities.
+- Restrict outbound network access when OpenAPI or MCP tools are enabled.
+- Review provider, agent, and tool configuration as application input.

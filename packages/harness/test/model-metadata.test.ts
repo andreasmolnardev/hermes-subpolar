@@ -75,8 +75,7 @@ test("message estimates follow wire content and do not double-count sidecars", (
   assert.deepEqual(estimateMessageTokensRough({ role: "user", content: [{ type: "unknown" }] }), {
     supported: false,
     approximationVersion: HARNESS_TOKEN_APPROXIMATION_VERSION,
-    reason: "unsupported-content",
-    fallback: "python"
+    reason: "unsupported-content"
   });
 });
 
@@ -100,13 +99,12 @@ test("request totals include system text, messages, and tool schemas", () => {
   assert.equal(estimateMessagesTokensRough(messages).supported, true);
 });
 
-test("unknown request content returns an explicit Python fallback", () => {
+test("unknown request content is explicitly unsupported", () => {
   const result = estimateRequestTokensRough([{ role: "user", content: [{ type: "file", url: "x" }] }]);
   assert.deepEqual(result, {
     supported: false,
     approximationVersion: HARNESS_TOKEN_APPROXIMATION_VERSION,
-    reason: "unsupported-media",
-    fallback: "python"
+    reason: "unsupported-media"
   });
 });
 
@@ -120,8 +118,7 @@ test("context-limit parser accepts explicit boundaries but not guessed limits", 
   assert.deepEqual(parseContextLimitFromErrorResult("input exceeds the context window"), {
     supported: false,
     parserVersion: "provider-error-v1",
-    reason: "unreported-limit",
-    fallback: "python"
+    reason: "unreported-limit"
   });
 });
 
@@ -140,7 +137,6 @@ test("available-output parser handles provider formats and conservative boundari
   assert.deepEqual(parseAvailableOutputTokensFromErrorResult("unrelated provider error"), {
     supported: false,
     parserVersion: "provider-error-v1",
-    reason: "unreported-output-cap",
-    fallback: "python"
+    reason: "unreported-output-cap"
   });
 });

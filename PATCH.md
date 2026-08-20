@@ -1,5 +1,16 @@
 # Subpolar Patch Notes
 
+- Expanded persisted Subpolar Agents into reusable configurations with identity
+  metadata, optional model/reasoning defaults, capability assignments, skill
+  IDs, and explicit allow/ask/deny policies. The gateway now resolves only
+  server-owned tool definitions through the central Tool Resolver using this
+  configuration and temporary Full/Ask/Read-only session overrides.
+- Added agent retrieval, update, and deletion APIs and documented the normalized
+  configuration contract in OpenAPI. Existing agents retain compatible empty
+  assignments and their original instructions.
+- Added a WebSocket approval response path; the browser now receives `ask`
+  requests from the harness and can approve or reject the individual tool call.
+
 - Added shared Hermes model-provider catalog and authenticated setup catalog
   endpoint. First-run setup now lists same provider universe as provider
   settings and persists selected provider alongside connection credentials.

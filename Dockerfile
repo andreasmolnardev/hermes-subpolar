@@ -8,7 +8,6 @@ COPY packages/chat-provider-interface/package.json packages/chat-provider-interf
 COPY packages/data-layer/package.json packages/data-layer/package.json
 COPY packages/harness/package.json packages/harness/package.json
 COPY packages/shared/package.json packages/shared/package.json
-COPY packages/subpolar-server/package.json packages/subpolar-server/package.json
 COPY packages/tool-resolver/package.json packages/tool-resolver/package.json
 COPY packages/tool-runtime/package.json packages/tool-runtime/package.json
 COPY packages/web-ui/package.json packages/web-ui/package.json
@@ -19,4 +18,4 @@ COPY . .
 RUN bun run build:web
 
 EXPOSE 8080
-CMD ["bun", "packages/subpolar-server/src/cli.ts", "--host", "0.0.0.0", "--data-dir", "/opt/data"]
+CMD ["bun", "run", "serve"]

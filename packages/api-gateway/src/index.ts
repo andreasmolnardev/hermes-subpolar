@@ -29,8 +29,6 @@ import {
   type HarnessMessage,
   type HarnessProvider,
   type HarnessProviderRequest,
-  type HarnessProviderResult,
-  type HarnessResult,
   type HarnessSleeper,
   type HarnessTool,
   type HarnessToolExecutor,
@@ -53,9 +51,6 @@ import {
   validateJsonSchema
 } from "tool-resolver";
 import {
-  createDefaultRuntimeSelectionStore
-} from "data-layer";
-import {
   createGatewayEventMapper,
   createTransportEventMapper,
   type GatewayEventProjectionInput,
@@ -67,19 +62,6 @@ import {
   type GatewayClientEventSink,
   type GatewayClientEvent
 } from "./client";
-import {
-  createPythonToolBridgeExecutor,
-  PythonToolBridge,
-  type PythonToolBridgeExecutorOptions,
-  type PythonToolBridgeTool
-} from "./python-bridge";
-import {
-  createPythonRuntimeAllowlistedEnvironment,
-  PythonRuntimeBridge,
-  type PythonRuntimeBridgeEvent,
-  type PythonRuntimeBridgeTool,
-  type PythonRuntimeBridgePolicy
-} from "./python-runtime-bridge";
 import {
   GatewayTurnLeaseManager,
   type GatewayTurnLeaseManagerOptions
@@ -95,22 +77,6 @@ export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
 /** Structural subset implemented by the durable data-layer session repository. */
 export type GatewaySessionRepository = HarnessSessionRepository;
 
-export type GatewayRuntimeName = "harness" | "python";
-
-export type GatewayRuntimeConfig = {
-  /** The migration flag is intentionally opt-in. */
-  readonly typescriptEnabled?: boolean;
-  readonly defaultRuntime?: GatewayRuntimeName;
-  /** Shadow mode never invokes a second provider; it keeps Python authoritative. */
-  readonly shadowMode?: boolean;
-};
-
-export type GatewayRuntimeSelection = GatewayRuntimeName | {
-  readonly runtime: GatewayRuntimeName;
-  readonly adapter?: GatewayRuntimeAdapter;
-  readonly fallback?: GatewayRuntimeAdapter;
-};
-
 export type GatewayExecutionRequest = {
   model: string;
   messages: readonly ProviderMessage[];
@@ -123,8 +89,6 @@ export type GatewayExecutionRequest = {
   identity?: ProviderRequestIdentity;
   sessionId?: string;
   cwd?: string;
-  runtime?: GatewayRuntimeSelection;
-  runtimeFallback?: GatewayRuntimeAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Maximum time spent waiting for another turn in this session. */
@@ -141,10 +105,6 @@ export type GatewayExecutionRequest = {
   budgets?: HarnessBudgets;
   retryPolicy?: HarnessRetryPolicy;
   toolExecutor?: HarnessToolExecutor;
-  pythonToolBridge?: PythonToolBridge;
-  pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
-  pythonRuntimeBridge?: PythonRuntimeBridge;
-  pythonRuntimeBridgeOptions?: Omit<PythonRuntimeBridgeAdapterOptions, "bridge">;
   toolTimeoutMs?: number;
   toolConcurrency?: number;
   toolOutputLimits?: HarnessToolOutputLimits;
@@ -179,10 +139,6 @@ export type GatewayNormalizedRequest = {
   readonly budgets?: HarnessBudgets;
   readonly retryPolicy?: HarnessRetryPolicy;
   readonly toolExecutor?: HarnessToolExecutor;
-  readonly pythonToolBridge?: PythonToolBridge;
-  readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
-  readonly pythonRuntimeBridge?: PythonRuntimeBridge;
-  readonly pythonRuntimeBridgeOptions?: Omit<PythonRuntimeBridgeAdapterOptions, "bridge">;
   readonly toolTimeoutMs?: number;
   readonly toolConcurrency?: number;
   readonly toolOutputLimits?: HarnessToolOutputLimits;
@@ -193,113 +149,37 @@ export type GatewayNormalizedRequest = {
   readonly sessionRepository?: GatewaySessionRepository;
 };
 
-export interface GatewayRuntimeAdapter {
-  readonly runtime: GatewayRuntimeName;
-  supports(request: GatewayNormalizedRequest): boolean;
-  execute(
-    request: GatewayNormalizedRequest,
-    provider: ChatProvider,
-    eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
-  ): Promise<HarnessResult>;
-}
+export class GatewayUnsupportedToolError extends Error {
+  readonly toolName: string;
+  readonly reference: string;
 
-export type PythonRuntimeBridgeAdapterOptions = {
-  readonly bridge: PythonRuntimeBridge;
-  readonly cwd?: string | ((request: GatewayNormalizedRequest) => string);
-  readonly environment?: Readonly<Record<string, string>>;
-  readonly environmentAllowlist?: readonly string[];
-  readonly credentialHandles?: readonly string[] | ((request: GatewayNormalizedRequest) => readonly string[]);
-  readonly deadline?: number | ((request: GatewayNormalizedRequest) => number);
-  readonly defaultDeadlineMs?: number;
-  readonly now?: () => number;
-};
-
-export class GatewayPythonRuntimeBridgeNotConfiguredError extends Error {
-  constructor() {
-    super("Python runtime bridge is not configured");
-    this.name = "GatewayPythonRuntimeBridgeNotConfiguredError";
+  constructor(toolName: string, reference: string) {
+    super(`Gateway cannot execute unresolved tool reference: ${toolName} (${reference})`);
+    this.name = "GatewayUnsupportedToolError";
+    this.toolName = toolName;
+    this.reference = reference;
   }
 }
-
-export class GatewayRuntimeUnsupportedError extends Error {
-  readonly runtime: GatewayRuntimeName;
-
-  constructor(runtime: GatewayRuntimeName) {
-    super(`Gateway runtime does not support request: ${runtime}`);
-    this.name = "GatewayRuntimeUnsupportedError";
-    this.runtime = runtime;
-  }
-}
-
-export type GatewayRuntimeSelectionStore = {
-  load(sessionId: string): GatewayRuntimeName | undefined | Promise<GatewayRuntimeName | undefined>;
-  save(sessionId: string, runtime: GatewayRuntimeName): void | Promise<void>;
-  clear?(sessionId?: string): void | Promise<void>;
-};
 
 export type GatewayOptions = {
-  readonly runtimeSelectionStore?: GatewayRuntimeSelectionStore;
-  readonly runtimeConfig?: GatewayRuntimeConfig;
   readonly sessionRepository?: GatewaySessionRepository;
   readonly sessionCwdStore?: GatewaySessionCwdStore;
-  readonly runtimeAdapters?: Partial<Record<GatewayRuntimeName, GatewayRuntimeAdapter>>;
   readonly toolExecutor?: HarnessToolExecutor;
-  readonly pythonToolBridge?: PythonToolBridge;
-  readonly pythonToolBridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">;
-  readonly pythonRuntimeBridge?: PythonRuntimeBridge;
-  readonly pythonRuntimeBridgeOptions?: Omit<PythonRuntimeBridgeAdapterOptions, "bridge">;
   readonly turnLeaseManager?: GatewayTurnLeaseManager;
   readonly turnLease?: GatewayTurnLeaseManagerOptions;
 };
 
 export type Gateway = {
-  executeRequest(request: GatewayExecutionRequest, provider: ChatProvider): Promise<HarnessResult>;
+  executeRequest(request: GatewayExecutionRequest, provider: ChatProvider): Promise<ProviderResult>;
   setSessionCwd(sessionId: string, cwd: string): Promise<void>;
   clearSessionCwd(sessionId?: string): Promise<void>;
-  clearPinnedRuntime(sessionId?: string): Promise<void>;
 };
-
-class MemoryRuntimeSelectionStore implements GatewayRuntimeSelectionStore {
-  private readonly selections = new Map<string, GatewayRuntimeName>();
-
-  load(sessionId: string): GatewayRuntimeName | undefined {
-    return this.selections.get(sessionId);
-  }
-
-  save(sessionId: string, runtime: GatewayRuntimeName): void {
-    this.selections.set(sessionId, runtime);
-  }
-
-  clear(sessionId?: string): void {
-    if (sessionId === undefined) this.selections.clear();
-    else this.selections.delete(sessionId);
-  }
-}
 
 const legacySessionCwdStore = new MemoryGatewaySessionCwdStore();
 let nextRequestId = 0;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function validateRuntimeName(value: unknown): GatewayRuntimeName {
-  if (value !== "harness" && value !== "python") {
-    throw new TypeError("Gateway runtime selection is invalid");
-  }
-  return value;
-}
-
-function validateRuntimeConfig(config: GatewayRuntimeConfig | undefined): GatewayRuntimeConfig | undefined {
-  if (config === undefined) return undefined;
-  if (config.typescriptEnabled !== undefined && typeof config.typescriptEnabled !== "boolean") {
-    throw new TypeError("Gateway runtime config typescriptEnabled must be boolean");
-  }
-  if (config.defaultRuntime !== undefined) validateRuntimeName(config.defaultRuntime);
-  if (config.shadowMode !== undefined && typeof config.shadowMode !== "boolean") {
-    throw new TypeError("Gateway runtime config shadowMode must be boolean");
-  }
-  return config;
 }
 
 function isPolicy(value: unknown): value is ToolPolicy {
@@ -497,7 +377,7 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
   const sessionId = request.sessionId ?? requestId;
   const tools = resolveRequestTools(request);
   validateDescriptorSchemas(tools);
-  validateReferencedTools(tools);
+  rejectReferencedTools(tools);
   const messages = request.messages.map(message => ({ ...message }));
   validateProviderRequest({
     model: request.model.trim(),
@@ -527,10 +407,6 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.budgets === undefined ? {} : { budgets: request.budgets }),
     ...(request.retryPolicy === undefined ? {} : { retryPolicy: request.retryPolicy }),
     ...(request.toolExecutor === undefined ? {} : { toolExecutor: request.toolExecutor }),
-    ...(request.pythonToolBridge === undefined ? {} : { pythonToolBridge: request.pythonToolBridge }),
-    ...(request.pythonToolBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: request.pythonToolBridgeOptions }),
-    ...(request.pythonRuntimeBridge === undefined ? {} : { pythonRuntimeBridge: request.pythonRuntimeBridge }),
-    ...(request.pythonRuntimeBridgeOptions === undefined ? {} : { pythonRuntimeBridgeOptions: request.pythonRuntimeBridgeOptions }),
     ...(request.toolTimeoutMs === undefined ? {} : { toolTimeoutMs: request.toolTimeoutMs }),
     ...(request.toolConcurrency === undefined ? {} : { toolConcurrency: request.toolConcurrency }),
     ...(request.toolOutputLimits === undefined ? {} : { toolOutputLimits: request.toolOutputLimits }),
@@ -703,20 +579,11 @@ function validateDescriptorSchemas(tools: readonly GatewayResolvedTool[]): void 
   }
 }
 
-function isSafeBridgeIdentifier(value: string): boolean {
-  return value.length > 0 && value.length <= 256 && !/[\r\n\u0000]/.test(value);
-}
-
-function validateReferencedTools(tools: readonly GatewayResolvedTool[]): readonly PythonToolBridgeTool[] {
-  const references: PythonToolBridgeTool[] = [];
+function rejectReferencedTools(tools: readonly GatewayResolvedTool[]): void {
   for (const tool of tools) {
     if (!isDescriptor(tool) || !("reference" in tool.executable)) continue;
-    if (!isSafeBridgeIdentifier(tool.name) || !isSafeBridgeIdentifier(tool.executable.reference)) {
-      throw new TypeError(`Unsafe Python tool bridge reference for tool: ${tool.name}`);
-    }
-    references.push({ name: tool.name, reference: tool.executable.reference });
+    throw new GatewayUnsupportedToolError(tool.name, tool.executable.reference);
   }
-  return references;
 }
 
 function asProviderMessage(message: HarnessMessage | ChatMessage): ProviderMessage {
@@ -761,7 +628,7 @@ function asHarnessMessage(message: ProviderMessage): HarnessMessage {
   };
 }
 
-function asHarnessResult(result: ProviderResult): HarnessProviderResult {
+function asProviderResult(result: ProviderResult): ProviderResult {
   return {
     ...result,
     message: asHarnessMessage(result.message),
@@ -799,41 +666,21 @@ function asProviderRequest(
   return providerRequest;
 }
 
-function descriptorExecutor(
-  request: GatewayNormalizedRequest,
-  bridge?: PythonToolBridge,
-  bridgeOptions?: Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">
-): HarnessToolExecutor | undefined {
+function descriptorExecutor(request: GatewayNormalizedRequest): HarnessToolExecutor | undefined {
   if (request.toolExecutor !== undefined) return request.toolExecutor;
   const handles = new Map<string, (...args: readonly unknown[]) => unknown>();
-  const references = validateReferencedTools(request.tools);
-  if (references.length > 0 && (bridge === undefined || bridgeOptions === undefined)) {
-    throw new TypeError(bridge === undefined
-      ? "No Python tool bridge or tool executor configured for referenced tools"
-      : "Python tool bridge cwd is not configured");
-  }
   for (const tool of request.tools) {
     if (isDescriptor(tool) && "handle" in tool.executable) {
       handles.set(tool.name, tool.executable.handle.execute);
     }
   }
-  const referenceExecutor = references.length === 0
-    ? undefined
-      : createPythonToolBridgeExecutor({
-        ...(bridgeOptions as Omit<PythonToolBridgeExecutorOptions, "bridge" | "tools">),
-        bridge: bridge as PythonToolBridge,
-        tools: references
-      });
-  if (handles.size === 0 && referenceExecutor === undefined) {
-    return undefined;
-  }
+  if (handles.size === 0) return undefined;
   return async execution => {
     const handle = handles.get(execution.call.name);
     if (handle !== undefined) {
       const value = await handle(execution.arguments);
       return { content: typeof value === "string" ? value : JSON.stringify(value) ?? "" };
     }
-    if (referenceExecutor !== undefined) return referenceExecutor(execution);
     throw new Error(`No executor for tool: ${execution.call.name}`);
   };
 }
@@ -917,10 +764,10 @@ class ProviderHarnessAdapter {
     } as GatewayProviderProjectionEvent);
   }
 
-  async complete(request: HarnessProviderRequest): Promise<HarnessProviderResult> {
+  async complete(request: HarnessProviderRequest): Promise<ProviderResult> {
     const result = await this.provider.complete(this.providerRequest(request));
     validateDescriptorToolCalls(result.message.toolCalls ?? [], this.gatewayRequest.tools);
-    return asHarnessResult(result);
+    return asProviderResult(result);
   }
 
   private async forwardStream(request: HarnessProviderRequest): Promise<AsyncIterable<ProviderStreamEvent>> {
@@ -1035,7 +882,7 @@ class ProviderHarnessAdapter {
     })(this);
   }
 
-  result(result: HarnessProviderResult): HarnessProviderResult {
+  result(result: ProviderResult): ProviderResult {
     const extras = this.lastStreamExtras;
     if (extras === undefined) return result;
     return {
@@ -1049,11 +896,12 @@ class ProviderHarnessAdapter {
   }
 }
 
-export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
-  runtime: "harness",
-  supports: request => request.tools.every(tool => !isDescriptor(tool) || typeof tool.inputSchema !== "boolean"),
-  async execute(request, provider, eventSink) {
-    const toolExecutor = descriptorExecutor(request, request.pythonToolBridge, request.pythonToolBridgeOptions);
+async function executeHarnessRequest(
+  request: GatewayNormalizedRequest,
+  provider: ChatProvider,
+  eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
+): Promise<ProviderResult> {
+    const toolExecutor = descriptorExecutor(request);
     const providerAdapter = new ProviderHarnessAdapter(provider, request, eventSink);
     const harnessRequest = {
       requestId: request.requestId,
@@ -1085,205 +933,6 @@ export const harnessRuntimeAdapter: GatewayRuntimeAdapter = {
     const outcome: HarnessOutcome = await executeHarness(harnessRequest);
     if (outcome.outcome === "completed") return providerAdapter.result(outcome.result);
     throw new Error("Harness execution failed");
-  }
-};
-
-function pythonRuntimeTool(tool: GatewayResolvedTool): PythonRuntimeBridgeTool {
-  if (!isDescriptor(tool)) return { name: tool.name };
-  if (!("reference" in tool.executable)) {
-    throw new TypeError(`Python runtime cannot execute TypeScript tool handle: ${tool.name}`);
-  }
-  return {
-    name: tool.name,
-    ...(tool.description === undefined ? {} : { description: tool.description }),
-    ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema as Exclude<PythonRuntimeBridgeTool["inputSchema"], undefined> }),
-    ...(tool.source === undefined ? {} : { source: tool.source }),
-    ...(tool.capabilities === undefined ? {} : { capabilities: tool.capabilities as Exclude<PythonRuntimeBridgeTool["capabilities"], undefined> }),
-    executable: { reference: tool.executable.reference }
-  };
-}
-
-function projectPythonRuntimeEvent(
-  event: PythonRuntimeBridgeEvent,
-  request: GatewayNormalizedRequest,
-  eventSink: ((event: GatewayEventProjectionInput) => void | Promise<void>) | undefined,
-  nextEventId: () => string
-): Promise<void> {
-  if (eventSink === undefined) return Promise.resolve();
-  const base = {
-    id: nextEventId(),
-    requestId: request.requestId,
-    sessionId: request.sessionId,
-    at: Date.now()
-  } as const;
-  const payload = event.event;
-  switch (payload.type) {
-    case "started":
-      return Promise.resolve(eventSink({ ...base, type: "provider.started", providerIndex: 0 }));
-    case "text.delta":
-      return Promise.resolve(eventSink({ ...base, type: "provider.text.delta", text: payload.text }));
-    case "reasoning.delta":
-      return Promise.resolve(eventSink({ ...base, type: "provider.reasoning.delta", text: payload.text }));
-    case "tool-call.delta":
-      return Promise.resolve(eventSink({
-        ...base,
-        type: "provider.tool-call.delta",
-        ...(payload.id === undefined ? {} : { callId: payload.id }),
-        ...(payload.name === undefined ? {} : { name: payload.name }),
-        ...(payload.arguments === undefined ? {} : { arguments: payload.arguments })
-      }));
-    case "tool-call":
-      return Promise.resolve(eventSink({
-        ...base,
-        type: "provider.tool-call",
-        call: { id: payload.id, name: payload.name, arguments: payload.arguments }
-      }));
-    case "tool-result":
-      return Promise.resolve(eventSink({
-        ...base,
-        type: "provider.tool-result",
-        callId: payload.toolCallId,
-        result: { content: payload.content, ...(payload.isError === undefined ? {} : { isError: payload.isError }) }
-      }));
-    case "usage":
-      return Promise.resolve(eventSink({
-        ...base,
-        type: "provider.usage",
-        usage: payload.usage,
-        ...(payload.metadata === undefined ? {} : { metadata: payload.metadata })
-      }));
-    case "finished":
-      return Promise.resolve(eventSink({
-        ...base,
-        type: "provider.finished",
-        ...(payload.usage === undefined ? {} : { usage: payload.usage }),
-        ...(payload.finishReason === undefined ? {} : { finishReason: payload.finishReason }),
-        ...(payload.metadata === undefined ? {} : { metadata: payload.metadata }),
-        ...(payload.requestId === undefined ? {} : { providerRequestId: payload.requestId })
-      }));
-    case "failed":
-      return Promise.resolve(eventSink({ ...base, type: "provider.failed", providerIndex: 0, ...(payload.category === undefined ? {} : { category: payload.category }) }));
-  }
-}
-
-export function createGatewayRuntimeAdapter(options: PythonRuntimeBridgeAdapterOptions): GatewayRuntimeAdapter {
-  if (options.defaultDeadlineMs !== undefined && (!Number.isFinite(options.defaultDeadlineMs) || options.defaultDeadlineMs <= 0)) {
-    throw new TypeError("Python runtime bridge default deadline must be positive");
-  }
-  const now = options.now ?? (() => Date.now());
-  return {
-    runtime: "python",
-    supports: () => true,
-    async execute(request, provider, eventSink) {
-      // The provider argument is intentionally unused: whole-turn Python fallback owns the turn.
-      void provider;
-      const cwd = request.cwd ?? (typeof options.cwd === "function" ? options.cwd(request) : options.cwd);
-      if (cwd === undefined) throw new TypeError("Python runtime bridge cwd is not configured");
-      let validatedCwd: string;
-      try {
-        validatedCwd = validateSessionCwd(cwd);
-      } catch {
-        throw new TypeError("Python runtime bridge cwd is invalid");
-      }
-      const deadline = request.deadline ?? (typeof options.deadline === "function"
-        ? options.deadline(request)
-        : options.deadline ?? (request.timeoutMs === undefined
-          ? now() + (options.defaultDeadlineMs ?? 30_000)
-          : now() + request.timeoutMs));
-      if (!Number.isFinite(deadline)) throw new TypeError("Python runtime bridge deadline must be finite");
-      const credentialHandles = typeof options.credentialHandles === "function"
-        ? options.credentialHandles(request)
-        : options.credentialHandles ?? [];
-      if (!Array.isArray(credentialHandles) || credentialHandles.some(handle => typeof handle !== "string")) {
-        throw new TypeError("Python runtime bridge credential handles are invalid");
-      }
-      const tools = request.tools.map(pythonRuntimeTool);
-      const policies: readonly PythonRuntimeBridgePolicy[] = tools.map(tool => ({
-        toolName: tool.name,
-        policy: request.tools.find(candidate => candidate.name === tool.name)?.policy ?? "allow"
-      }));
-      let eventId = 0;
-      const result = await options.bridge.execute({
-        requestId: request.requestId,
-        sessionId: request.sessionId,
-        model: request.model,
-        messages: request.messages,
-        tools,
-        policies,
-        cwd: validatedCwd,
-        environment: createPythonRuntimeAllowlistedEnvironment(
-          options.environment ?? {},
-          options.environmentAllowlist ?? []
-        ),
-        credentialHandles,
-        deadline,
-        cancellation: { requested: false },
-        ...(request.identity === undefined ? {} : { identity: request.identity }),
-        ...(request.options === undefined ? {} : { options: request.options }),
-        ...(request.cacheHints === undefined ? {} : { cacheHints: request.cacheHints }),
-        ...(request.metadata === undefined ? {} : { metadata: request.metadata })
-      }, request.signal, event => projectPythonRuntimeEvent(event, request, eventSink, () => `python-${++eventId}`));
-      return result;
-    }
-  };
-}
-
-export const legacyPythonRuntimeAdapter: GatewayRuntimeAdapter = {
-  runtime: "python",
-  supports: () => true,
-  async execute() {
-    throw new GatewayPythonRuntimeBridgeNotConfiguredError();
-  }
-};
-
-async function selectRuntime(
-  request: GatewayNormalizedRequest,
-  selection: GatewayRuntimeSelection | undefined,
-  fallback: GatewayRuntimeAdapter | undefined,
-  config: GatewayRuntimeConfig | undefined,
-  store: GatewayRuntimeSelectionStore,
-  adapters: Map<GatewayRuntimeName, GatewayRuntimeAdapter>
-): Promise<{
-  adapter: GatewayRuntimeAdapter;
-  fallback: GatewayRuntimeAdapter;
-  persistedRuntime: GatewayRuntimeName | undefined;
-}> {
-  const selected = selection === undefined
-    ? { runtime: config?.defaultRuntime ?? "python" as const }
-    : typeof selection === "string" ? { runtime: selection } : selection;
-  let selectedRuntime = validateRuntimeName(selected.runtime);
-  const policyForcesPython = config?.shadowMode === true || config?.typescriptEnabled === false;
-  if (policyForcesPython) {
-    selectedRuntime = "python";
-  }
-  const defaultPythonAdapter = adapters.get("python") ?? legacyPythonRuntimeAdapter;
-  const persistedRuntime = await store.load(request.sessionId);
-  if (persistedRuntime !== undefined) validateRuntimeName(persistedRuntime);
-  if (!policyForcesPython && persistedRuntime === undefined && selected.adapter !== undefined) {
-    adapters.set(selectedRuntime, selected.adapter);
-  }
-  if (persistedRuntime === undefined && selected.fallback !== undefined) {
-    validateRuntimeName(selected.fallback.runtime);
-    adapters.set(selected.fallback.runtime, selected.fallback);
-  }
-  if (persistedRuntime === undefined && fallback !== undefined) {
-    validateRuntimeName(fallback.runtime);
-    adapters.set(fallback.runtime, fallback);
-  }
-  const runtimeToUse = policyForcesPython ? "python" : persistedRuntime ?? selectedRuntime;
-  const adapter = runtimeToUse === "python"
-    ? selectedRuntime === "python" && selected.adapter !== undefined
-      ? selected.adapter
-      : adapters.get("python")!
-    : selected.adapter ?? adapters.get(runtimeToUse)!;
-  const selectedFallback = policyForcesPython
-    ? selected.fallback?.runtime === "python" && selected.fallback.supports(request)
-      ? selected.fallback
-      : defaultPythonAdapter
-    : persistedRuntime === undefined
-      ? selected.fallback ?? fallback ?? defaultPythonAdapter
-      : fallback ?? defaultPythonAdapter;
-  return { adapter, fallback: selectedFallback, persistedRuntime };
 }
 
 function safeHarnessEventSink(
@@ -1304,77 +953,21 @@ function configureHarnessRequest(
   request: GatewayNormalizedRequest,
   options: GatewayOptions
 ): GatewayNormalizedRequest {
-  const references = validateReferencedTools(request.tools);
   const toolExecutor = request.toolExecutor ?? options.toolExecutor;
-  const bridge = request.pythonToolBridge ?? options.pythonToolBridge;
-  const configuredBridgeOptions = request.pythonToolBridgeOptions ?? options.pythonToolBridgeOptions;
   const sessionRepository = request.sessionRepository ?? options.sessionRepository;
-  const bridgeOptions = request.cwd === undefined
-    ? configuredBridgeOptions
-    : { ...(configuredBridgeOptions ?? {}), cwd: request.cwd };
-  if (references.length > 0 && toolExecutor === undefined && bridge === undefined) {
-    throw new TypeError("No Python tool bridge or tool executor configured for referenced tools");
-  }
-  if (references.length > 0 && toolExecutor === undefined && bridge !== undefined) {
-    if (bridgeOptions === undefined || bridgeOptions.cwd === undefined) {
-      throw new TypeError("Python tool bridge cwd is not configured");
-    }
-    if (typeof bridgeOptions.cwd === "string") {
-      try {
-        validateSessionCwd(bridgeOptions.cwd);
-      } catch (error) {
-        if (error instanceof TypeError && error.message === "Gateway cwd must be absolute") {
-          throw new TypeError("Python tool bridge cwd must be absolute");
-        }
-        throw error;
-      }
-    }
-    if (bridgeOptions.environmentAllowlist?.some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
-      throw new TypeError("Python tool bridge environment allowlist is invalid");
-    }
-    for (const value of Object.values(bridgeOptions.environment ?? {})) {
-      if (value.includes("\u0000")) throw new TypeError("Python tool bridge environment is invalid");
-    }
-  }
-  const bridgeDeadline = request.deadline ?? (request.timeoutMs === undefined
-    ? undefined
-    : (request.clock ?? defaultClock()).now() + request.timeoutMs);
-  const effectiveBridgeOptions = bridgeOptions === undefined || bridgeDeadline === undefined
-    ? bridgeOptions
-    : { ...bridgeOptions, deadline: bridgeDeadline };
   return {
     ...request,
     ...(toolExecutor === undefined ? {} : { toolExecutor }),
-    ...(bridge === undefined ? {} : { pythonToolBridge: bridge }),
-    ...(effectiveBridgeOptions === undefined ? {} : { pythonToolBridgeOptions: effectiveBridgeOptions }),
     ...(sessionRepository === undefined ? {} : { sessionRepository })
   };
 }
 
 export function createGateway(options: GatewayOptions = {}): Gateway {
-  const runtimeConfig = validateRuntimeConfig(options.runtimeConfig);
-  const store = options.runtimeSelectionStore ?? new MemoryRuntimeSelectionStore();
   const sessionCwdStore = options.sessionCwdStore ?? new MemoryGatewaySessionCwdStore();
   const turnLeases = options.turnLeaseManager ?? new GatewayTurnLeaseManager(options.turnLease);
-  const configuredPythonAdapter = options.pythonRuntimeBridge === undefined
-    ? legacyPythonRuntimeAdapter
-    : createGatewayRuntimeAdapter({
-      bridge: options.pythonRuntimeBridge,
-      ...(options.pythonRuntimeBridgeOptions ?? {})
-    });
-  const adapters = new Map<GatewayRuntimeName, GatewayRuntimeAdapter>([
-    ["harness", harnessRuntimeAdapter],
-    ["python", configuredPythonAdapter]
-  ]);
-  for (const adapter of Object.values(options.runtimeAdapters ?? {})) {
-    if (adapter !== undefined) {
-      validateRuntimeName(adapter.runtime);
-      adapters.set(adapter.runtime, adapter);
-    }
-  }
 
   return {
-    async executeRequest(request, provider): Promise<HarnessResult> {
+    async executeRequest(request, provider): Promise<ProviderResult> {
       const normalizedRequest = normalizeGatewayRequest(request);
       const storedCwd = normalizedRequest.cwd === undefined
         ? await sessionCwdStore.load(normalizedRequest.sessionId)
@@ -1389,37 +982,11 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
           : { waitTimeoutMs: normalized.turnLeaseTimeoutMs })
       });
       try {
-        const selection = await selectRuntime(
-          normalized,
-          request.runtime,
-          request.runtimeFallback,
-          runtimeConfig,
-          store,
-          adapters
+        return await executeHarnessRequest(
+          configureHarnessRequest(normalized, options),
+          provider,
+          safeHarnessEventSink(request)
         );
-        let adapter = selection.adapter;
-        const validateAdapter = (candidate: GatewayRuntimeAdapter): void => {
-          validateRuntimeName(candidate.runtime);
-        };
-        validateAdapter(adapter);
-        if (!adapter.supports(normalized)) {
-          adapter = selection.fallback;
-          validateAdapter(adapter);
-          if (!adapter.supports(normalized)) throw new GatewayRuntimeUnsupportedError(adapter.runtime);
-        }
-        if (selection.persistedRuntime === undefined && request.runtime !== undefined) {
-          await store.save(normalized.sessionId, adapter.runtime);
-        }
-        const executionRequest = adapter.runtime === "harness"
-          ? configureHarnessRequest(normalized, options)
-          : normalized;
-        if (executionRequest.pythonRuntimeBridge !== undefined && adapter.runtime === "python") {
-          adapter = createGatewayRuntimeAdapter({
-            bridge: executionRequest.pythonRuntimeBridge,
-            ...(executionRequest.pythonRuntimeBridgeOptions ?? {})
-          });
-        }
-        return await adapter.execute(executionRequest, provider, safeHarnessEventSink(request));
       } finally {
         lease.release();
       }
@@ -1433,13 +1000,10 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
     async clearSessionCwd(sessionId): Promise<void> {
       await sessionCwdStore.clear?.(sessionId);
     },
-    async clearPinnedRuntime(sessionId): Promise<void> {
-      await store.clear?.(sessionId);
-    }
   };
 }
 
-const legacyGateway = createGateway({ runtimeSelectionStore: createDefaultRuntimeSelectionStore() });
+const legacyGateway = createGateway();
 
 export async function setSessionCwd(sessionId: string, cwd: string): Promise<void> {
   await legacyGateway.setSessionCwd(sessionId, cwd);
@@ -1449,14 +1013,10 @@ export async function clearSessionCwd(sessionId?: string): Promise<void> {
   await legacyGateway.clearSessionCwd(sessionId);
 }
 
-export function clearPinnedRuntime(sessionId?: string): void {
-  void legacyGateway.clearPinnedRuntime(sessionId);
-}
-
 export async function executeRequest(
   request: GatewayExecutionRequest,
   provider: ChatProvider
-): Promise<HarnessResult> {
+): Promise<ProviderResult> {
   return legacyGateway.executeRequest(request, provider);
 }
 
@@ -1481,53 +1041,5 @@ export type {
   GatewayTurnLeaseManagerOptions,
   GatewayTurnLeaseState
 } from "./turn-lease";
-export {
-  PYTHON_TOOL_BRIDGE_PROTOCOL_VERSION,
-  PythonToolBridge,
-  PythonToolBridgeError,
-  createAllowlistedEnvironment,
-  createPythonToolBridgeExecutor,
-  createPythonToolBridgeSubprocessTransport
-} from "./python-bridge";
-export {
-  PYTHON_RUNTIME_BRIDGE_PROTOCOL_VERSION,
-  PythonRuntimeBridge,
-  PythonRuntimeBridgeError,
-  createPythonRuntimeAllowlistedEnvironment,
-  createPythonRuntimeBridgeSubprocessTransport
-} from "./python-runtime-bridge";
-export type {
-  PythonRuntimeBridgeCall,
-  PythonRuntimeBridgeCancellation,
-  PythonRuntimeBridgeErrorCode,
-  PythonRuntimeBridgeEvent,
-  PythonRuntimeBridgeFailure,
-  PythonRuntimeJsonValue,
-  PythonRuntimeJsonValue as PythonRuntimeBridgeJsonValue,
-  PythonRuntimeBridgeMessage,
-  PythonRuntimeBridgePolicy,
-  PythonRuntimeBridgeProcess,
-  PythonRuntimeBridgeRequest,
-  PythonRuntimeBridgeResponse,
-  PythonRuntimeBridgeSpawner,
-  PythonRuntimeBridgeSpawnOptions,
-  PythonRuntimeBridgeSuccess,
-  PythonRuntimeBridgeTool,
-  PythonRuntimeBridgeTransport
-} from "./python-runtime-bridge";
 export { MemoryGatewaySessionCwdStore, validateSessionCwd } from "./session-cwd";
-export type {
-  PythonToolBridgeCall,
-  PythonToolBridgeErrorCode,
-  PythonToolBridgeExecutorOptions,
-  PythonToolBridgeFailure,
-  PythonToolBridgeProcess,
-  PythonToolBridgeRequest,
-  PythonToolBridgeResponse,
-  PythonToolBridgeSpawner,
-  PythonToolBridgeSpawnOptions,
-  PythonToolBridgeSuccess,
-  PythonToolBridgeTool,
-  PythonToolBridgeTransport
-} from "./python-bridge";
 export type { GatewaySessionCwdStore } from "./session-cwd";

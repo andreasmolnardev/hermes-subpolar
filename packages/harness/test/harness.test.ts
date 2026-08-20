@@ -3,15 +3,14 @@ import { test } from "bun:test";
 
 import {
   HarnessProviderError,
+  HarnessUnsupportedContextError,
   classifyHarnessProviderError,
   boundedBackoff,
   boundedMaxAttempts,
-  execute,
   executeHarness,
   type HarnessAtomicTurnWrite,
   type HarnessEvent,
   type HarnessMessage,
-  type HarnessContextRouting,
   type HarnessProvider,
   type HarnessProviderRequest,
   type HarnessProviderResult,
@@ -47,23 +46,6 @@ function request(provider: HarnessProvider, overrides: Partial<HarnessRequest> =
   };
 }
 
-test("legacy execute remains a direct provider adapter", async () => {
-  const result = await execute({
-    model: "fake",
-    messages: [{ role: "user", content: "hello" }],
-    tools: []
-  }, {
-    async complete(providerRequest) {
-      assert.equal(providerRequest.model, "fake");
-      assert.deepEqual(providerRequest.messages, [{ role: "user", content: "hello" }]);
-      assert.deepEqual(providerRequest.tools, []);
-      return response({ role: "assistant", content: "world" });
-    }
-  });
-
-  assert.equal(result.message.content, "world");
-});
-
 test("text-only loop emits one terminal event in order", async () => {
   const events: HarnessEvent[] = [];
   const result = await executeHarness(request({
@@ -78,17 +60,9 @@ test("text-only loop emits one terminal event in order", async () => {
   assert.equal(events.filter(event => event.type === "terminal").length, 1);
 });
 
-test("context source routes unsupported context before persistence, provider, or tool effects", async () => {
+test("unsupported context fails closed before persistence, provider, or tool effects", async () => {
   const events: HarnessEvent[] = [];
   const effects: string[] = [];
-  const routing: HarnessContextRouting = {
-    outcome: "fallback",
-    fallback: {
-      runtime: "python",
-      reason: "unsupported-context-source",
-      sourceKind: "memory"
-    }
-  };
   const result = await executeHarness(request({
     async complete() {
       effects.push("provider");
@@ -99,7 +73,7 @@ test("context source routes unsupported context before persistence, provider, or
     contextSource: async context => {
       effects.push("context");
       assert.equal(context.messages[0]?.content, "hello");
-      return routing;
+      throw new HarnessUnsupportedContextError("memory");
     },
     persistence: {
       async ensureSession() {
@@ -113,11 +87,34 @@ test("context source routes unsupported context before persistence, provider, or
     }
   }));
 
-  assert.equal(result.outcome, "fallback");
-  if (result.outcome === "fallback") assert.deepEqual(result.fallback, routing.fallback);
+  assert.equal(result.outcome, "provider_failure");
+  assert.equal(result.error.category, "unsupported");
   assert.deepEqual(effects, ["context"]);
   assert.deepEqual(events.map(event => event.type), ["request.started", "terminal"]);
-  assert.equal(events[1]?.outcome, "fallback");
+  assert.equal(events[1]?.outcome, "provider_failure");
+});
+
+test("unsupported content and model shapes fail closed before provider effects", async () => {
+  let providerCalls = 0;
+  const provider: HarnessProvider = {
+    async complete() {
+      providerCalls += 1;
+      return response({ role: "assistant", content: "must not run" });
+    }
+  };
+  const contentResult = await executeHarness(request(provider, {
+    messages: [{
+      role: "user",
+      content: [{ type: "unknown" }]
+    } as unknown as HarnessMessage]
+  }));
+  const modelResult = await executeHarness(request(provider, { model: "" }));
+
+  assert.equal(contentResult.outcome, "provider_failure");
+  assert.equal(contentResult.error.category, "unsupported");
+  assert.equal(modelResult.outcome, "provider_failure");
+  assert.equal(modelResult.error.category, "unsupported");
+  assert.equal(providerCalls, 0);
 });
 
 test("one tool call executes with parsed arguments, then completes", async () => {
@@ -494,7 +491,7 @@ test("recovery metadata supplies completed tool results without replaying the ca
   assert.equal(executed, false);
 });
 
-test("provider fields and detailed result survive retries and fallback", async () => {
+test("provider fields and detailed result survive retries", async () => {
   const options = { temperature: 0.2, reasoningEffort: "high" as const, responseFormat: "text" as const };
   const cacheHints = { key: "stable-prompt", read: true, write: true, ttlMs: 60_000 };
   const metadata = { traceId: "trace-1", labels: ["harness"] };
@@ -527,13 +524,14 @@ test("provider fields and detailed result survive retries and fallback", async (
     reasoning: "because",
     metadata: { provider: "fake", traceId: "trace-2" }
   };
-  let primaryCalls = 0;
+  let providerCalls = 0;
 
   const result = await executeHarness(request({
     async complete(providerRequest) {
       seen.push(providerRequest);
-      primaryCalls += 1;
-      throw new HarnessProviderError("busy", { category: "overloaded" });
+      providerCalls += 1;
+      if (providerCalls < 3) throw new HarnessProviderError("busy", { category: "overloaded" });
+      return detailedResult;
     }
   }, {
     options,
@@ -543,17 +541,11 @@ test("provider fields and detailed result survive retries and fallback", async (
       assert.equal(sessionId, "session-1");
       return [loadedMessage];
     },
-    retryPolicy: { maxAttempts: 2 },
-    fallbackProviders: [{
-      async complete(providerRequest) {
-        seen.push(providerRequest);
-        return detailedResult;
-      }
-    }]
+    retryPolicy: { maxAttempts: 3 }
   }));
 
   assert.equal(result.outcome, "completed");
-  assert.equal(primaryCalls, 2);
+  assert.equal(providerCalls, 3);
   assert.deepEqual(seen.map(providerRequest => ({
     model: providerRequest.model,
     messages: providerRequest.messages,
@@ -952,9 +944,8 @@ test("approval denial has no tool effect and one approval terminal", async () =>
   ]);
 });
 
-test("only classified retryable failures retry, then eligible fallback is selected", async () => {
+test("only classified retryable failures retry before terminal failure", async () => {
   let primaryCalls = 0;
-  let fallbackCalls = 0;
   const sleeps: number[] = [];
   const result = await executeHarness(request({
     async complete() {
@@ -964,23 +955,15 @@ test("only classified retryable failures retry, then eligible fallback is select
   }, {
     retryPolicy: { maxAttempts: 2, backoffMs: 25 },
     sleeper: { sleep: async milliseconds => sleeps.push(milliseconds) },
-    fallbackProviders: [{
-      async complete() {
-        fallbackCalls += 1;
-        return response({ role: "assistant", content: "fallback" });
-      }
-    }]
   }));
 
-  assert.equal(result.outcome, "completed");
+  assert.equal(result.outcome, "provider_failure");
   assert.equal(primaryCalls, 2);
-  assert.equal(fallbackCalls, 1);
   assert.deepEqual(sleeps, [25]);
 });
 
-test("unknown provider failures do not retry or use fallback", async () => {
+test("unknown provider failures do not retry", async () => {
   let primaryCalls = 0;
-  let fallbackCalls = 0;
   const result = await executeHarness(request({
     async complete() {
       primaryCalls += 1;
@@ -988,17 +971,10 @@ test("unknown provider failures do not retry or use fallback", async () => {
     }
   }, {
     retryPolicy: { maxAttempts: 3, backoffMs: 1 },
-    fallbackProviders: [{
-      async complete() {
-        fallbackCalls += 1;
-        return response({ role: "assistant", content: "must not run" });
-      }
-    }]
   }));
 
   assert.equal(result.outcome, "provider_failure");
   assert.equal(primaryCalls, 1);
-  assert.equal(fallbackCalls, 0);
 });
 
 test("abort signal propagates and produces cancelled terminal", async () => {
@@ -1205,9 +1181,8 @@ test("persistence failure is isolated and later events recover", async () => {
   assert.equal(warnings.length, 1);
 });
 
-test("fallback recovery does not duplicate completed tool effect", async () => {
+test("retry exhaustion does not duplicate completed tool effect", async () => {
   let primaryCalls = 0;
-  let fallbackCalls = 0;
   let effects = 0;
   const primary: HarnessProvider = {
     async complete() {
@@ -1218,16 +1193,7 @@ test("fallback recovery does not duplicate completed tool effect", async () => {
       throw new HarnessProviderError("down", { category: "server" });
     }
   };
-  const fallback: HarnessProvider = {
-    async complete() {
-      fallbackCalls += 1;
-      return fallbackCalls === 1
-        ? response({ role: "assistant", content: "", toolCalls: [{ id: "recovered", name: "once", arguments: "{}" }] })
-        : response({ role: "assistant", content: "recovered" });
-    }
-  };
   const result = await executeHarness(request(primary, {
-    fallbackProviders: [fallback],
     tools: [{ name: "once", policy: "allow" }],
     toolExecutor: async () => {
       effects += 1;
@@ -1235,10 +1201,9 @@ test("fallback recovery does not duplicate completed tool effect", async () => {
     }
   }));
 
-  assert.equal(result.outcome, "completed");
+  assert.equal(result.outcome, "provider_failure");
   assert.equal(effects, 1);
   assert.equal(primaryCalls, 2);
-  assert.equal(fallbackCalls, 2);
 });
 
 test("atomic repository write records a completed tool round before interruption", async () => {
@@ -1398,7 +1363,7 @@ test("executeHarness applies the aggregate tool budget before continuation", asy
   assert.deepEqual(observed, ["aaaaa", "bbbbb"]);
 });
 
-test("structured fallback and terminal truncation are deterministic and preserve errors", () => {
+test("structured truncation is deterministic and preserves errors", () => {
   const structured = boundToolResult({
     content: [{ type: "text", text: "alpha" }, { type: "reasoning", text: "beta" }],
     isError: true,
@@ -1562,23 +1527,22 @@ test("partial stream usage is normalized without requiring finish usage", async 
 
 test("retry classification preserves precedence and never returns provider payloads", () => {
   const secret = "sensitive-provider-payload";
-  const cases: readonly [string, unknown, Parameters<typeof classifyHarnessProviderError>[1] | undefined, string, boolean, boolean][] = [
-    ["cancellation", Object.assign(new Error("cancelled"), { name: "AbortError", statusCode: 500 }), undefined, "cancelled", false, false],
-    ["invalid request", new Error("unsupported parameter: max_tokens"), { statusCode: 400 }, "invalid_request", false, true],
-    ["content policy", new Error("violates our usage policies"), { statusCode: 400 }, "content_filter", false, true],
-    ["tool side effect", { category: "tool_side_effect", message: "write already committed" }, undefined, "tool_side_effect", false, false],
-    ["timeout", new Error("gateway timeout"), { statusCode: 504 }, "timeout", true, true],
-    ["overload", new Error("service is overloaded"), { statusCode: 429 }, "overloaded", true, true],
-    ["rate limit", new Error("too many requests"), { statusCode: 429 }, "rate_limit", true, true],
-    ["network", new Error("opaque transport detail"), { network: true }, "network", true, true],
-    ["server", new Error("internal server error"), { statusCode: 500 }, "server", true, true]
+  const cases: readonly [string, unknown, Parameters<typeof classifyHarnessProviderError>[1] | undefined, string, boolean][] = [
+    ["cancellation", Object.assign(new Error("cancelled"), { name: "AbortError", statusCode: 500 }), undefined, "cancelled", false],
+    ["invalid request", new Error("unsupported parameter: max_tokens"), { statusCode: 400 }, "invalid_request", false],
+    ["content policy", new Error("violates our usage policies"), { statusCode: 400 }, "content_filter", false],
+    ["tool side effect", { category: "tool_side_effect", message: "write already committed" }, undefined, "tool_side_effect", false],
+    ["timeout", new Error("gateway timeout"), { statusCode: 504 }, "timeout", true],
+    ["overload", new Error("service is overloaded"), { statusCode: 429 }, "overloaded", true],
+    ["rate limit", new Error("too many requests"), { statusCode: 429 }, "rate_limit", true],
+    ["network", new Error("opaque transport detail"), { network: true }, "network", true],
+    ["server", new Error("internal server error"), { statusCode: 500 }, "server", true]
   ];
 
-  for (const [label, error, options, category, retryable, fallbackEligible] of cases) {
+  for (const [label, error, options, category, retryable] of cases) {
     const classified = classifyHarnessProviderError(error, options);
     assert.equal(classified.category, category, label);
     assert.equal(classified.retryable, retryable, label);
-    assert.equal(classified.fallbackEligible, fallbackEligible, label);
   }
 
   const safe = classifyHarnessProviderError(new Error("request failed"), {
@@ -1591,7 +1555,7 @@ test("retry classification preserves precedence and never returns provider paylo
   assert.equal(boundedBackoff({ backoffMs: 10_000_000 }, 1), 60_000);
 });
 
-test("attempt identity is global across fallback providers while request ID stays stable", async () => {
+test("attempt identity stays stable across retries", async () => {
   const seen: HarnessProviderRequest[] = [];
   let primaryCalls = 0;
   const result = await executeHarness(request({
@@ -1603,15 +1567,9 @@ test("attempt identity is global across fallback providers while request ID stay
   }, {
     identity: { requestId: "ignored-public-id", attempt: 4, parentRequestId: "parent-1" },
     retryPolicy: { maxAttempts: 2 },
-    fallbackProviders: [{
-      async complete(providerRequest) {
-        seen.push(providerRequest);
-        return response({ role: "assistant", content: "fallback" });
-      }
-    }]
   }));
 
-  assert.equal(result.outcome, "completed");
+  assert.equal(result.outcome, "provider_failure");
   assert.equal(primaryCalls, 2);
   assert.deepEqual(seen.map(providerRequest => ({
     requestId: providerRequest.requestId,
@@ -1631,11 +1589,5 @@ test("attempt identity is global across fallback providers while request ID stay
       providerId: "primary",
       providerIndex: 0
     },
-    {
-      requestId: "request-1",
-      identity: { requestId: "request-1", attempt: 6, parentRequestId: "parent-1" },
-      providerId: "fallback-1",
-      providerIndex: 1
-    }
   ]);
 });

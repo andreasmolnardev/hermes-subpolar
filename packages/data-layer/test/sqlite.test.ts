@@ -402,7 +402,7 @@ test("SQLite claims, replays, and rejects mismatched idempotency keys durably", 
     const requestHash = "a".repeat(64);
     expect((await repo.claimIdempotency({
       scope: "user-1:POST:/turns", key: "request-1", requestHash,
-      createdAt: "2026-08-05T00:00:00.000Z", expiresAt: "2026-08-06T00:00:00.000Z",
+      createdAt: "2099-08-05T00:00:00.000Z", expiresAt: "2099-08-06T00:00:00.000Z",
     })).status).toBe("claimed");
     expect((await repo.replayIdempotency("user-1:POST:/turns", "request-1", requestHash)).status)
       .toBe("in_progress");

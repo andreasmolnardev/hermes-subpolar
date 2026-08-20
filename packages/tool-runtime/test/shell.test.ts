@@ -73,3 +73,26 @@ test("shell tool bounds output by bytes and responds to cancellation", async () 
   controller.abort();
   await assert.rejects(pending, { name: "AbortError" });
 });
+
+test("shell validates authorization before invoking the injected process port", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "tool-runtime-"));
+  const executable = await realpath("/usr/bin/printf");
+  let spawns = 0;
+  const tool = createShellTool({
+    policy: { allowedCommands: [{ executable, argumentPrefix: ["safe"] }], executableRoots: ["/usr/bin"], cwdRoots: [cwd], maxTimeoutMs: 100, maxOutputBytes: 32 },
+    process: { spawn() { spawns += 1; throw new Error("must not spawn"); } }
+  });
+  assert.ok("handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ argv: [executable, "secret"], cwd }), /allowlisted/);
+  assert.equal(spawns, 0);
+});
+
+test("shell stops a verified process on timeout", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "tool-runtime-"));
+  const sleep = await realpath("/usr/bin/sleep");
+  const tool = createShellTool({
+    policy: { allowedCommands: [{ executable: sleep }], executableRoots: ["/usr/bin"], cwdRoots: [cwd], maxTimeoutMs: 25, maxOutputBytes: 32 }
+  });
+  assert.ok("handle" in tool.executable);
+  await assert.rejects(tool.executable.handle.execute({ argv: [sleep, "10"], cwd, timeoutMs: 5 }), /timed out/);
+});

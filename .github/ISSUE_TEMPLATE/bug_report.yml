@@ -10,14 +10,14 @@ body:
 
         **Before submitting**, please:
         - [ ] Search [existing issues](https://github.com/NousResearch/hermes-agent/issues) to avoid duplicates
-        - [ ] Update to the latest version (`hermes update`) and confirm the bug still exists
-        - [ ] Run `hermes debug share` and paste the links below (see Debug Report section)
+        - [ ] Install the current dependencies (`bun install --frozen-lockfile`) and confirm the bug still exists
+        - [ ] Include browser console output and server logs below when relevant
 
   - type: textarea
     id: description
     attributes:
       label: Bug Description
-      description: A clear description of what's broken. Include error messages, tracebacks, or screenshots if relevant.
+      description: A clear description of what's broken. Include error messages, stack traces, or screenshots if relevant.
       placeholder: |
         What happened? What did you expect to happen instead?
     validations:
@@ -29,9 +29,9 @@ body:
       label: Steps to Reproduce
       description: Minimal steps to trigger the bug. The more specific, the faster we can fix it.
       placeholder: |
-        1. Run `hermes chat`
-        2. Send the message "..."
-        3. Agent calls tool X
+        1. Run `bun run serve`
+        2. Open the affected page or endpoint
+        3. Perform the action that triggers the problem
         4. Error appears: ...
     validations:
       required: true
@@ -112,26 +112,18 @@ body:
       required: true
 
   - type: input
-    id: python-version
-    attributes:
-      label: Python Version
-      description: Output of `python --version`
-      placeholder: "3.11.9"
-
-  - type: input
     id: hermes-version
     attributes:
-      label: Hermes Version
-      description: Output of `hermes version`
+      label: Product Version
+      description: Package version or commit being tested
       placeholder: "2.1.0"
 
   - type: textarea
     id: logs
     attributes:
-      label: Additional Logs / Traceback (optional)
+      label: Additional Logs / Stack Trace (optional)
       description: |
-        The debug report above covers most logs. Use this field for any extra error output, 
-        tracebacks, or screenshots not captured by `hermes debug share`.
+        Include server output, browser console output, stack traces, or screenshots here.
       render: shell
 
   - type: textarea
@@ -142,8 +134,8 @@ body:
         If you've dug into the code and identified the root cause, share it here.
         Include file paths, line numbers, and code snippets if possible. This massively speeds up fixes.
       placeholder: |
-        The bug is in `gateway/run.py` line 949. `len(history)` counts session_meta entries
-        but `agent_messages` was built from filtered history...
+        The bug is in `packages/api-gateway/src/server.ts`. The request path
+        accepts a valid payload but returns an unexpected response...
 
   - type: textarea
     id: proposed-fix
@@ -151,8 +143,8 @@ body:
       label: Proposed Fix (optional)
       description: If you have a fix in mind (or a PR ready), describe it here.
       placeholder: |
-        Replace `.get()` with `.pop()` on line 289 of `gateway/platforms/base.py`
-        to actually clear the pending message after retrieval.
+        Replace the response handling in `packages/api-gateway/src/server.ts`
+        to clear the pending request after retrieval.
 
   - type: checkboxes
     id: pr-ready

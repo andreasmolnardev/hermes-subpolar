@@ -64,7 +64,7 @@ describe("browser-safe transport contracts", () => {
     });
   });
 
-  test("keeps legacy string completed messages valid", () => {
+  test("keeps string completed messages valid", () => {
     assert.deepEqual(parseTransportEvent({
       type: "message.completed",
       sessionId: "session-1",

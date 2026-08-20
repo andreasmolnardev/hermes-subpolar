@@ -261,7 +261,7 @@ describe("InMemorySessionRepository", () => {
     assert.equal(await repository.getMigrationState("session-1"), null);
   });
 
-  test("round-trips Python-compatible structured content", async () => {
+  test("round-trips structured content", async () => {
     const repository = new InMemorySessionRepository();
     await repository.createSession(session());
     const content = [

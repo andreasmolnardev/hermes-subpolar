@@ -183,6 +183,80 @@ export type MigrationStateRecord = {
   recovery?: TurnRecoveryState;
 };
 
+export type IdempotencyState = "pending" | "completed" | "failed";
+
+export type IdempotencyRecord = {
+  schemaVersion: PersistenceSchemaVersion;
+  scope: string;
+  key: string;
+  requestHash: string;
+  state: IdempotencyState;
+  statusCode: number;
+  response?: JsonValue;
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type IdempotencyClaim = {
+  scope: string;
+  key: string;
+  requestHash: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type IdempotencyCompletion = {
+  scope: string;
+  key: string;
+  requestHash: string;
+  state: Exclude<IdempotencyState, "pending">;
+  statusCode: number;
+  response: JsonValue;
+};
+
+export type IdempotencyLookup =
+  | { status: "missing" }
+  | { status: "in_progress"; record: IdempotencyRecord }
+  | { status: "replay"; record: IdempotencyRecord; response: JsonValue }
+  | { status: "mismatch"; record: IdempotencyRecord };
+
+export type IdempotencyClaimResult =
+  | { status: "claimed"; record: IdempotencyRecord }
+  | Exclude<IdempotencyLookup, { status: "missing" }>;
+
+export type TurnRecord = {
+  schemaVersion: PersistenceSchemaVersion;
+  id: string;
+  sessionId: string;
+  status: TurnRecoveryStatus;
+  startedAt: string;
+  updatedAt: string;
+  recovery?: TurnRecoveryState;
+};
+
+export type TurnTerminalStatus =
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "budget_exhausted"
+  | "provider_failed"
+  | "tool_failed"
+  | "approval_rejected";
+
+export type TurnTerminalRecord = {
+  schemaVersion: PersistenceSchemaVersion;
+  turnId: string;
+  sessionId: string;
+  status: TurnTerminalStatus;
+  completedAt: string;
+  result?: JsonObject;
+};
+
+export type TerminalWriteResult =
+  | { status: "recorded"; terminal: TurnTerminalRecord }
+  | { status: "already_recorded"; terminal: TurnTerminalRecord }
+  | { status: "mismatch"; terminal: TurnTerminalRecord };
+
 export type TurnRecoveryStatus = "running" | "interrupted" | "recoverable";
 
 /** Durable evidence used to avoid replaying an interrupted tool blindly. */
@@ -289,6 +363,21 @@ export interface SessionRepository extends SessionRepositoryTransaction {
   ): Promise<T>;
 }
 
+export interface PersistenceRepositoryTransaction extends SessionRepositoryTransaction {
+  claimIdempotency(claim: IdempotencyClaim): Promise<IdempotencyClaimResult>;
+  replayIdempotency(scope: string, key: string, requestHash: string): Promise<IdempotencyLookup>;
+  completeIdempotency(completion: IdempotencyCompletion): Promise<void>;
+  upsertTurn(turn: TurnRecord): Promise<void>;
+  recordTerminal(terminal: TurnTerminalRecord): Promise<TerminalWriteResult>;
+  listIncompleteTurns(sessionId?: string): Promise<readonly TurnRecord[]>;
+}
+
+export interface PersistenceRepository extends SessionRepository, PersistenceRepositoryTransaction {
+  transaction<T>(
+    operation: (transaction: PersistenceRepositoryTransaction) => Promise<T>,
+  ): Promise<T>;
+}
+
 /** Durable per-session runtime pin used by gateway adapters. */
 export type RuntimeSelection = "harness" | "python";
 
@@ -297,8 +386,6 @@ export interface RuntimeSelectionStore {
   save(sessionId: string, runtime: RuntimeSelection): Promise<void>;
   clear?(sessionId?: string): Promise<void>;
 }
-
-export type PersistenceRepository = SessionRepository;
 
 export type TransportEvent =
   | { type: "session.started"; sessionId: string }

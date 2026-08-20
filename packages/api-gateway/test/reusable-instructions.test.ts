@@ -47,11 +47,14 @@ test("Skills and Prompt Commands work through authenticated CRUD and runtime res
     assert.equal(assigned.status, 200);
     const effective = await (await fetch(`${server.url}v1/agents/${agent.agent.id}/effective`, { headers: { cookie } })).json() as { skills: readonly { id: string; name: string }[] };
     assert.deepEqual(effective.skills.map(item => item.id), [skill.id]);
-    const completion = await fetch(`${server.url}v1/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model: "test", agentId: agent.agent.id, messages: [{ role: "user", content: "review" }] }) });
+    const completion = await fetch(`${server.url}v1/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model: "test", agentId: agent.agent.id, messages: [{ role: "system", content: "Request-specific context." }, { role: "user", content: "review" }] }) });
     assert.equal(completion.status, 200);
     const systemPrompt = String(seen?.messages.find(message => message.role === "system")?.content ?? "");
     assert.match(systemPrompt, /harness-section name="instructions"/);
+    assert.match(systemPrompt, /Be precise\./);
     assert.match(systemPrompt, /Inspect every changed line/);
+    assert.match(systemPrompt, /Request-specific context\./);
+    assert.deepEqual(seen?.messages.map(message => message.role), ["system", "user"]);
     const invalid = await fetch(`${server.url}v1/skills`, { method: "POST", headers, body: JSON.stringify({ name: "bad", instructions: "x", unknown: true }) });
     assert.equal(invalid.status, 400);
     const foreign = await fetch(`${server.url}v1/skills/not-owned`, { headers: { cookie } });

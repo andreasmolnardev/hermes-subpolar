@@ -20,6 +20,12 @@
   migration, CRUD APIs, effective-configuration visibility, and Skills settings
   and Agent-picker UI. Added separate owner-scoped Prompt Commands with CRUD
   APIs, management UI, and editable beginning-of-input slash expansion in chat.
+- Added DOM-backed frontend interaction tests for slash-command filtering,
+  disabled-command hiding, editable expansion without submission, Skills
+  settings CRUD affordances, and Agent Skill assignment behavior. Existing
+  request-specific system messages are now preserved inside the server-owned
+  harness instruction section instead of bypassing Agent instructions and
+  enabled Skills. Prompt variables and Project Skill defaults remain deferred.
 - Route-level React pages now live in dedicated `web-ui/src/pages` files, leaving
   `SubpolarApp` responsible for authentication and route orchestration.
 - Settings layout now uses responsive split navigation with compact mobile tab

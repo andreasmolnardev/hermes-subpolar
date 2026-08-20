@@ -221,7 +221,7 @@ function ProvidersSettings() {
   )
 }
 
-function SkillsSettings() {
+export function SkillsSettings() {
   const [items, setItems] = useState<readonly SubpolarSkill[]>([])
   const [query, setQuery] = useState('')
   const [editing, setEditing] = useState<string | null>(null)

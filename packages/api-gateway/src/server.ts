@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { createGateway, createGatewayPersistenceAdapter, type GatewayProtocolEvent } from "./index";
-import { type ChatProvider, type ProviderMessage } from "chat-provider-interface";
+import { type ChatProvider, type ProviderContent, type ProviderMessage } from "chat-provider-interface";
 import {
   AuthenticationError,
   IdempotencyConflictError,
@@ -296,10 +296,16 @@ function promptAttribute(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-function agentSkillInstructions(agent: { readonly instructions: string }, skills: readonly { readonly id: string; readonly name: string; readonly instructions: string }[]): string {
+function providerContentText(content: ProviderContent): string {
+  if (typeof content === "string") return content;
+  return content.map(part => "text" in part ? part.text : JSON.stringify(part)).join("\n");
+}
+
+function agentSkillInstructions(agent: { readonly instructions: string }, skills: readonly { readonly id: string; readonly name: string; readonly instructions: string }[], clientSystemMessages: readonly ProviderContent[] = []): string {
   const agentInstructions = `<agent-instructions>\n${agent.instructions}\n</agent-instructions>`;
   const skillInstructions = skills.map(skill => `<skill id="${promptAttribute(skill.id)}" name="${promptAttribute(skill.name)}">\n${skill.instructions}\n</skill>`).join("\n");
-  return `${agentInstructions}\n<skills>\n${skillInstructions}\n</skills>`;
+  const clientInstructions = clientSystemMessages.length === 0 ? "" : `\n<client-system-instructions>\n${clientSystemMessages.map(providerContentText).join("\n")}\n</client-system-instructions>`;
+  return `${agentInstructions}\n<skills>\n${skillInstructions}\n</skills>${clientInstructions}`;
 }
 
 export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGatewayServer {
@@ -379,14 +385,17 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       await sessions.createSession(sessionRecord(sessionId, input.projectId, effectiveModel));
     }
     if (agent !== null) {
-      const hasSystem = input.messages.some(message => message.role === "system");
       const tools = effectiveAgent?.tools ?? [];
       const reasoningEffort = effectiveAgent?.reasoningEffort;
-      if (!hasSystem && (agent.instructions.trim() || (effectiveAgent?.skills.length ?? 0) > 0)) {
+      const clientSystemMessages = input.messages.filter(message => message.role === "system").map(message => message.content);
+      if (agent.instructions.trim() || (effectiveAgent?.skills.length ?? 0) > 0 || clientSystemMessages.length > 0) {
         const contextAssembler: HarnessContextAssembler = async context => {
-          if ((effectiveAgent?.skills.length ?? 0) === 0) return [{ role: "system", content: agent.instructions }, ...context.messages];
-          return assembleHarnessContext(context, {
-            sources: [{ kind: "instructions", content: agentSkillInstructions(agent, effectiveAgent?.skills ?? []) }],
+          if ((effectiveAgent?.skills.length ?? 0) === 0 && clientSystemMessages.length === 0) return [{ role: "system", content: agent.instructions }, ...context.messages];
+          // Client-provided system messages are preserved as data inside the server-owned
+          // structured section. They must not bypass Agent instructions or assigned Skills.
+          const messages = context.messages.filter(message => message.role !== "system");
+          return assembleHarnessContext({ ...context, messages }, {
+            sources: [{ kind: "instructions", content: agentSkillInstructions(agent, effectiveAgent?.skills ?? [], clientSystemMessages) }],
           }).messages;
         };
         return { input: { ...input, model: effectiveModel }, sessionId, tools, contextAssembler, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };

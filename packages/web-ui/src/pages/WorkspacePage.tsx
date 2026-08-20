@@ -320,9 +320,17 @@ function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automa
     const enabled = new Set(draft.capabilities.filter(item => item.enabled).map(item => item.capabilityId))
     const inventoryPolicy = new Map(inventory.map(item => [item.capabilityId, item.defaultPolicy]))
     const policy = (id: string) => draft.permissions.find(item => item.capabilityId === id)?.policy ?? inventoryPolicy.get(id) ?? 'deny'
+    const capabilityMutating = (capability: SubpolarCapability): boolean | undefined => {
+      if (!Array.isArray(capability.capabilities) && typeof capability.capabilities.mutating === 'boolean') return capability.capabilities.mutating
+      if (Array.isArray(capability.capabilities) && capability.capabilities.includes('mutating')) return true
+      return undefined
+    }
     const grouped = (source: string) => rows.filter(item => source === 'MCP' ? item.source.toLowerCase().includes('mcp') : source === 'OpenAPI' ? item.source.toLowerCase().includes('openapi') : source === 'Built-in' ? item.source.toLowerCase().includes('tool-runtime:') && !item.source.toLowerCase().includes('mcp') && !item.source.toLowerCase().includes('openapi') : !item.source.toLowerCase().includes('tool-runtime:'))
-    const setBulkPolicy = (mutating: boolean, value: 'allow' | 'ask') => {
-      const ids = draft.capabilities.map(item => item.capabilityId).filter(id => mutating === /\.(write|delete|push|execute)$/.test(id) || (!mutating && !/\.(write|delete|push|execute)$/.test(id)))
+    const setBulkPolicy = (mutatingSelection: boolean, value: 'allow' | 'ask') => {
+      const ids = draft.capabilities.filter(item => item.enabled).map(item => item.capabilityId).filter(id => {
+        const capability = rows.find(candidate => candidate.capabilityId === id)
+        return capability !== undefined && capabilityMutating(capability) === mutatingSelection
+      })
       const next = [...draft.permissions.filter(item => !ids.includes(item.capabilityId)), ...ids.map(capabilityId => ({ capabilityId, policy: value }))]
       setDraft({ ...draft, permissions: next })
       void save({ permissions: next })
@@ -605,10 +613,10 @@ function Chat({
                 disabled={streaming}
                 className={control}
               >
-                <option value="normal">Normal effort</option>
+                <option value="">Default effort</option>
                 <option value="low">Low effort</option>
+                <option value="medium">Medium effort</option>
                 <option value="high">High effort</option>
-                <option value="max">Max effort</option>
               </select>
               <ChevronDown className="pointer-events-none absolute right-3 top-1" size={12} />
             </div>
@@ -721,7 +729,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     [draft, setDraft] = useState(''),
     [model, setModel] = useState('default'),
     [modelProviders, setModelProviders] = useState<readonly SubpolarModelProvider[]>([]),
-    [effort, setEffort] = useState('normal'),
+    [effort, setEffort] = useState<'' | 'low' | 'medium' | 'high'>(''),
     [permission, setPermission] = useState('full'),
     [streaming, setStreaming] = useState(false),
     [error, setError] = useState<string | null>(null)
@@ -895,7 +903,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
         ...(selectedProject ? { projectId: selectedProject } : {}),
         ...(selectedAgent ? { agentId: selectedAgent } : {})
         , permissionMode: permission as 'full' | 'ask' | 'read-only'
-        , reasoningEffort: effort as 'low' | 'medium' | 'high'
+        ...(effort === '' ? {} : { reasoningEffort: effort })
       })
     } catch {
       setStreaming(false)

@@ -29,9 +29,30 @@ export type AgentRecord = {
   readonly ownerId: string;
   readonly projectId: string;
   readonly name: string;
+  readonly description: string;
   readonly icon: string;
   readonly instructions: string;
+  readonly model?: string;
+  readonly reasoningEffort?: string;
+  readonly capabilities: readonly AgentCapabilityAssignment[];
+  readonly permissions: readonly AgentPermissionPolicy[];
+  readonly skillIds: readonly string[];
   readonly createdAt: string;
+};
+
+export type AgentCapabilityAssignment = { readonly capabilityId: string; readonly enabled: boolean };
+export type AgentPermission = "allow" | "ask" | "deny";
+export type AgentPermissionPolicy = { readonly capabilityId: string; readonly policy: AgentPermission };
+export type AgentConfigurationInput = {
+  readonly name?: string;
+  readonly description?: string;
+  readonly icon?: string;
+  readonly instructions?: string;
+  readonly model?: string;
+  readonly reasoningEffort?: string;
+  readonly capabilities?: readonly AgentCapabilityAssignment[];
+  readonly permissions?: readonly AgentPermissionPolicy[];
+  readonly skillIds?: readonly string[];
 };
 
 export type OwnedSessionRecord = {
@@ -114,6 +135,7 @@ type Row = {
   owner_id?: string;
   project_id?: string;
   name?: string;
+  description?: string;
   icon?: string;
   instructions?: string;
   created_at?: string;
@@ -147,10 +169,33 @@ CREATE TABLE IF NOT EXISTS agents (
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
   icon TEXT NOT NULL DEFAULT 'bot',
   instructions TEXT NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE(owner_id, project_id, name)
+);
+CREATE TABLE IF NOT EXISTS agent_capabilities (
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  capability_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  PRIMARY KEY (agent_id, capability_id)
+);
+CREATE TABLE IF NOT EXISTS agent_permissions (
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  capability_id TEXT NOT NULL,
+  policy TEXT NOT NULL CHECK (policy IN ('allow', 'ask', 'deny')),
+  PRIMARY KEY (agent_id, capability_id)
+);
+CREATE TABLE IF NOT EXISTS agent_skills (
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  skill_id TEXT NOT NULL,
+  PRIMARY KEY (agent_id, skill_id)
+);
+CREATE TABLE IF NOT EXISTS agent_model_config (
+  agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+  model TEXT,
+  reasoning_effort TEXT
 );
 CREATE TABLE IF NOT EXISTS session_owners (
   session_id TEXT PRIMARY KEY,
@@ -374,6 +419,11 @@ export class SQLiteIdentityRepository {
     } catch {
       // Existing databases already have icon column.
     }
+    try {
+      this.db.exec("ALTER TABLE agents ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+    } catch {
+      // Existing databases already have description column.
+    }
   }
 
   close(): void {
@@ -487,12 +537,28 @@ export class SQLiteIdentityRepository {
     return project;
   }
 
-  listAgents(userId: string, projectId?: string): readonly AgentRecord[] {
-    const query = projectId === undefined
-      ? "SELECT id, owner_id AS ownerId, project_id AS projectId, name, icon, instructions, created_at AS createdAt FROM agents WHERE owner_id = ? ORDER BY created_at, id"
-      : "SELECT id, owner_id AS ownerId, project_id AS projectId, name, icon, instructions, created_at AS createdAt FROM agents WHERE owner_id = ? AND project_id = ? ORDER BY created_at, id";
-    return projectId === undefined ? this.db.query<AgentRecord, [string]>(query).all(userId) : this.db.query<AgentRecord, [string, string]>(query).all(userId, projectId);
+  private agent(row: Row): AgentRecord {
+    const id = required(row.id, "agent id");
+    const model = this.db.query<{ model: string | null; reasoning_effort: string | null }, [string]>("SELECT model, reasoning_effort FROM agent_model_config WHERE agent_id = ?").get(id);
+    return {
+      id, ownerId: required(row.owner_id, "agent owner"), projectId: required(row.project_id, "agent project"), name: required(row.name, "agent name"),
+      description: row.description ?? "", icon: row.icon ?? "bot", instructions: row.instructions ?? "",
+      ...(model?.model ? { model: model.model } : {}), ...(model?.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}),
+      capabilities: this.db.query<{ capability_id: string; enabled: number }, [string]>("SELECT capability_id, enabled FROM agent_capabilities WHERE agent_id = ? ORDER BY capability_id").all(id).map(item => ({ capabilityId: item.capability_id, enabled: item.enabled === 1 })),
+      permissions: this.db.query<{ capability_id: string; policy: AgentPermission }, [string]>("SELECT capability_id, policy FROM agent_permissions WHERE agent_id = ? ORDER BY capability_id").all(id).map(item => ({ capabilityId: item.capability_id, policy: item.policy })),
+      skillIds: this.db.query<{ skill_id: string }, [string]>("SELECT skill_id FROM agent_skills WHERE agent_id = ? ORDER BY skill_id").all(id).map(item => item.skill_id),
+      createdAt: required(row.created_at, "agent createdAt"),
+    };
   }
+
+  private agentRows(userId: string, projectId?: string): readonly Row[] {
+    const query = projectId === undefined
+      ? "SELECT id, owner_id, project_id, name, description, icon, instructions, created_at FROM agents WHERE owner_id = ? ORDER BY created_at, id"
+      : "SELECT id, owner_id, project_id, name, description, icon, instructions, created_at FROM agents WHERE owner_id = ? AND project_id = ? ORDER BY created_at, id";
+    return projectId === undefined ? this.db.query<Row, [string]>(query).all(userId) : this.db.query<Row, [string, string]>(query).all(userId, projectId);
+  }
+
+  listAgents(userId: string, projectId?: string): readonly AgentRecord[] { return this.agentRows(userId, projectId).map(row => this.agent(row)); }
 
   createAgent(userId: string, projectId: string, name: string, instructions: string, icon = "bot"): AgentRecord {
     const project = this.db.query<{ id: string }, [string, string]>("SELECT id FROM projects WHERE id = ? AND owner_id = ?").get(projectId, userId);
@@ -500,14 +566,35 @@ export class SQLiteIdentityRepository {
     if (name.trim().length === 0 || name.length > 128 || instructions.length > 100_000 || !/^[a-z-]{2,32}$/.test(icon)) throw new Error("agent is invalid");
     const agent = { id: randomUUID(), ownerId: userId, projectId, name: name.trim(), icon, instructions, createdAt: now() };
     this.db.run("INSERT INTO agents (id, owner_id, project_id, name, icon, instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [agent.id, agent.ownerId, agent.projectId, agent.name, agent.icon, agent.instructions, agent.createdAt]);
-    return agent;
+    return this.getAgent(userId, agent.id) as AgentRecord;
   }
 
   getAgent(userId: string, agentId: string): AgentRecord | null {
-    return this.db.query<AgentRecord, [string, string]>(
-      "SELECT id, owner_id AS ownerId, project_id AS projectId, name, icon, instructions, created_at AS createdAt FROM agents WHERE id = ? AND owner_id = ?",
-    ).get(agentId, userId);
+    const row = this.db.query<Row, [string, string]>("SELECT id, owner_id, project_id, name, description, icon, instructions, created_at FROM agents WHERE id = ? AND owner_id = ?").get(agentId, userId);
+    return row === null ? null : this.agent(row);
   }
+
+  updateAgent(userId: string, agentId: string, input: AgentConfigurationInput): AgentRecord {
+    const existing = this.getAgent(userId, agentId);
+    if (existing === null) throw new OwnershipError("Agent is not owned by the authenticated user");
+    const name = input.name === undefined ? existing.name : input.name.trim();
+    const instructions = input.instructions ?? existing.instructions;
+    const description = input.description ?? existing.description;
+    if (!name || name.length > 128 || instructions.length > 100_000 || description.length > 10_000) throw new Error("agent is invalid");
+    this.db.run("BEGIN IMMEDIATE");
+    try {
+      this.db.run("UPDATE agents SET name = ?, description = ?, icon = ?, instructions = ? WHERE id = ?", [name, description, input.icon === undefined ? existing.icon : input.icon, instructions, agentId]);
+      if (input.model !== undefined || input.reasoningEffort !== undefined) this.db.run("INSERT INTO agent_model_config (agent_id, model, reasoning_effort) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET model = excluded.model, reasoning_effort = excluded.reasoning_effort", [agentId, input.model ?? existing.model ?? null, input.reasoningEffort ?? existing.reasoningEffort ?? null]);
+      if (input.capabilities !== undefined) { this.validateCapabilities(input.capabilities); this.db.run("DELETE FROM agent_capabilities WHERE agent_id = ?", [agentId]); for (const item of input.capabilities) this.db.run("INSERT INTO agent_capabilities (agent_id, capability_id, enabled) VALUES (?, ?, ?)", [agentId, item.capabilityId, item.enabled ? 1 : 0]); }
+      if (input.permissions !== undefined) { this.validatePermissions(input.permissions); this.db.run("DELETE FROM agent_permissions WHERE agent_id = ?", [agentId]); for (const item of input.permissions) this.db.run("INSERT INTO agent_permissions (agent_id, capability_id, policy) VALUES (?, ?, ?)", [agentId, item.capabilityId, item.policy]); }
+      if (input.skillIds !== undefined) { this.validateSkills(input.skillIds); this.db.run("DELETE FROM agent_skills WHERE agent_id = ?", [agentId]); for (const skillId of input.skillIds) this.db.run("INSERT INTO agent_skills (agent_id, skill_id) VALUES (?, ?)", [agentId, skillId]); }
+      this.db.run("COMMIT"); return this.getAgent(userId, agentId) as AgentRecord;
+    } catch (error) { this.db.run("ROLLBACK"); throw error; }
+  }
+
+  private validateCapabilities(items: readonly AgentCapabilityAssignment[]): void { if (new Set(items.map(item => item.capabilityId)).size !== items.length || items.some(item => !item.capabilityId || item.capabilityId.length > 512)) throw new Error("agent capabilities are invalid"); }
+  private validatePermissions(items: readonly AgentPermissionPolicy[]): void { if (new Set(items.map(item => item.capabilityId)).size !== items.length || items.some(item => !item.capabilityId || !["allow", "ask", "deny"].includes(item.policy))) throw new Error("agent permissions are invalid"); }
+  private validateSkills(items: readonly string[]): void { if (new Set(items).size !== items.length || items.some(item => !item || item.length > 512)) throw new Error("agent skills are invalid"); }
 
   claimSession(userId: string, sessionId: string, projectId?: string, agentId?: string): void {
     if (projectId !== undefined && this.db.query<{ id: string }, [string, string]>("SELECT id FROM projects WHERE id = ? AND owner_id = ?").get(projectId, userId) === null) throw new OwnershipError();

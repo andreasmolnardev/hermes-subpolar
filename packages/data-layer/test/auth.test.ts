@@ -27,6 +27,31 @@ test("identity repository scopes projects, agents, and sessions to their owner",
   }
 });
 
+test("agent capability assignments and policies persist through updates", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    const project = repository.createProject(session.principal.id, "private");
+    const agent = repository.createAgent(session.principal.id, project.id, "default", "instructions", "code");
+    const updated = repository.updateAgent(session.principal.id, agent.id, {
+      description: "restricted agent",
+      capabilities: [{ capabilityId: "shell.execute", enabled: true }],
+      permissions: [{ capabilityId: "shell.execute", policy: "ask" }],
+      skillIds: ["code-review"],
+      model: "model-a",
+      reasoningEffort: "medium",
+    });
+    assert.equal(updated.description, "restricted agent");
+    assert.deepEqual(updated.capabilities, [{ capabilityId: "shell.execute", enabled: true }]);
+    assert.deepEqual(updated.permissions, [{ capabilityId: "shell.execute", policy: "ask" }]);
+    assert.deepEqual(updated.skillIds, ["code-review"]);
+    assert.equal(updated.model, "model-a");
+    assert.equal(updated.reasoningEffort, "medium");
+  } finally {
+    repository.close();
+  }
+});
+
 test("provider credentials are ciphertext behind an opaque handle", () => {
   const directory = mkdtempSync(join(tmpdir(), "subpolar-provider-"));
   const databasePath = join(directory, "state.db");

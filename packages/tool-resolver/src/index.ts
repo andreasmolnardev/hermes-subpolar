@@ -53,6 +53,13 @@ export type ResolvedTool = {
   readonly policy: Exclude<ToolPolicySnapshot["policy"], "deny">;
 };
 
+export type PermissionMode = "full" | "ask" | "read-only";
+export type PermissionResolutionContext = {
+  readonly enabledCapabilityIds: readonly string[];
+  readonly agentPolicies: readonly { readonly capabilityId: string; readonly policy: Exclude<ToolPolicy, "auto"> }[];
+  readonly sessionMode?: PermissionMode;
+};
+
 export const TOOL_POLICY_PRECEDENCE: readonly ToolPolicy[] = ["deny", "ask", "allow", "auto"];
 
 export function createToolHandle(execute: (...args: readonly unknown[]) => unknown): ToolHandle {
@@ -604,6 +611,33 @@ export function resolveToolDescriptors(
   }
 
   return resolved.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+export function resolveAgentToolDescriptors(
+  definitions: readonly ToolDefinition[],
+  context: PermissionResolutionContext,
+): readonly ToolDescriptor[] {
+  const enabled = new Set(context.enabledCapabilityIds);
+  const policies = new Map(context.agentPolicies.map(item => [item.capabilityId, item.policy]));
+  const overrides: ToolPolicyInput[] = [];
+  for (const definition of definitions) {
+    if (!enabled.has(definition.name)) {
+      overrides.push({ toolName: definition.name, policy: "deny" });
+      continue;
+    }
+    let policy: ToolPolicy = policies.get(definition.name) ?? definition.policy ?? "deny";
+    if (context.sessionMode === "read-only" && isMutatingCapability(definition.name, definition)) policy = "deny";
+    else if (context.sessionMode === "ask" && policy === "allow" && isMutatingCapability(definition.name, definition)) policy = "ask";
+    else if (context.sessionMode === "full" && policy === "ask") policy = "allow";
+    overrides.push({ toolName: definition.name, policy });
+  }
+  return resolveToolDescriptors(definitions, overrides);
+}
+
+function isMutatingCapability(capabilityId: string, definition: ToolDefinition): boolean {
+  if (/\.(write|delete|push|execute)$/.test(capabilityId)) return true;
+  const capabilities = definition.capabilities;
+  return !Array.isArray(capabilities) && isRecord(capabilities) && capabilities.mutating === true;
 }
 
 function resolveLegacyTools(snapshot: readonly ToolPolicyInput[]): readonly ResolvedTool[] {

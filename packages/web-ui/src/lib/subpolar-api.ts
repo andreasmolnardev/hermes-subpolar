@@ -2,7 +2,10 @@ import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
 
 export type SubpolarUser = { readonly id: string; readonly username: string };
 export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly createdAt: string };
-export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly icon: string; readonly instructions: string; readonly createdAt: string };
+export type AgentCapabilityAssignment = { readonly capabilityId: string; readonly enabled: boolean };
+export type AgentPermissionPolicy = { readonly capabilityId: string; readonly policy: "allow" | "ask" | "deny" };
+export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly description: string; readonly icon: string; readonly instructions: string; readonly model?: string; readonly reasoningEffort?: string; readonly capabilities: readonly AgentCapabilityAssignment[]; readonly permissions: readonly AgentPermissionPolicy[]; readonly skillIds: readonly string[]; readonly createdAt: string };
+export type SubpolarAgentUpdate = Partial<Pick<SubpolarAgent, "name" | "description" | "icon" | "instructions" | "model" | "reasoningEffort" | "capabilities" | "permissions" | "skillIds">>;
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
@@ -114,6 +117,10 @@ export function agents(projectId?: string): Promise<{ readonly agents: readonly 
 
 export function createAgent(projectId: string, name: string, instructions: string, icon: string): Promise<{ readonly agent: SubpolarAgent }> {
   return subpolarRequest("/v1/agents", { method: "POST", body: JSON.stringify({ projectId, name, instructions, icon }) });
+}
+
+export function updateAgent(agentId: string, changes: SubpolarAgentUpdate): Promise<{ readonly agent: SubpolarAgent }> {
+  return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: JSON.stringify(changes) });
 }
 
 export function sessions(): Promise<{ readonly sessions: readonly SubpolarSession[] }> {

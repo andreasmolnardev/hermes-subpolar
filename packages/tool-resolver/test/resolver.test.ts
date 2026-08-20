@@ -4,6 +4,7 @@ import { test } from "bun:test";
 import {
   createToolHandle,
   resolveToolDescriptors,
+  resolveAgentToolDescriptors,
   resolveTools,
   sanitizeJsonSchema,
   sanitizeToolSchemas,
@@ -81,6 +82,24 @@ test("filters denied and disabled tools fail-closed", () => {
     tool("disabled"),
     tool("unknown-policy", { policy: undefined })
   ], policies), []);
+});
+
+test("agent resolution denies unassigned tools and tightens mutating tools", () => {
+  const definitions = [
+    tool("shell.read"),
+    tool("shell.execute"),
+  ];
+  const resolved = resolveAgentToolDescriptors(definitions, {
+    enabledCapabilityIds: ["shell.execute"],
+    agentPolicies: [{ capabilityId: "shell.execute", policy: "allow" }],
+    sessionMode: "ask",
+  });
+  assert.deepEqual(resolved.map(item => [item.name, item.policy]), [["shell.execute", "ask"]]);
+  assert.deepEqual(resolveAgentToolDescriptors(definitions, {
+    enabledCapabilityIds: ["shell.execute"],
+    agentPolicies: [{ capabilityId: "shell.execute", policy: "allow" }],
+    sessionMode: "read-only",
+  }), []);
 });
 
 test("uses restrictive policy precedence independent of input order", () => {

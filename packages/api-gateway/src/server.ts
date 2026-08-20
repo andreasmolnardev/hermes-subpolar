@@ -12,9 +12,10 @@ import {
   type AuthenticatedPrincipal,
   type AuthSession,
   type SessionRecord,
+  type AgentConfigurationInput,
 } from "data-layer";
 import type { HarnessApprovalPolicy } from "harness";
-import type { ToolDefinition, ToolPolicyInput } from "tool-resolver";
+import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
@@ -46,11 +47,11 @@ export type ApiGatewayServer = ReturnType<typeof Bun.serve> & {
 };
 
 type WebSocketData = { readonly principal: AuthenticatedPrincipal; readonly token: string };
-type TurnInput = { readonly model: string; readonly messages: readonly ProviderMessage[]; readonly sessionId?: string; readonly projectId?: string; readonly agentId?: string; readonly requestId?: string };
+type TurnInput = { readonly model: string; readonly messages: readonly ProviderMessage[]; readonly sessionId?: string; readonly projectId?: string; readonly agentId?: string; readonly requestId?: string; readonly permissionMode?: PermissionMode };
 
 const SESSION_COOKIE = "subpolar_session";
 const CSRF_COOKIE = "subpolar_csrf";
-const CHAT_REQUEST_FIELDS = new Set(["model", "messages", "sessionId", "projectId", "agentId", "requestId", "stream"]);
+const CHAT_REQUEST_FIELDS = new Set(["model", "messages", "sessionId", "projectId", "agentId", "requestId", "permissionMode", "stream"]);
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   const responseHeaders = new Headers(headers);
@@ -123,6 +124,7 @@ function turnInput(value: unknown): TurnInput {
   const projectId = stringField("projectId");
   const agentId = stringField("agentId");
   const requestId = stringField("requestId");
+  const permissionMode = body.permissionMode === undefined ? undefined : ["full", "ask", "read-only"].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : (() => { throw new TypeError("permissionMode is invalid"); })();
   return {
     model: body.model,
     messages: parseMessages(body.messages),
@@ -130,6 +132,7 @@ function turnInput(value: unknown): TurnInput {
     ...(projectId === undefined ? {} : { projectId }),
     ...(agentId === undefined ? {} : { agentId }),
     ...(requestId === undefined ? {} : { requestId }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
   };
 }
 
@@ -228,7 +231,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     return () => activeTurns.delete(controller);
   };
 
-  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string }> => {
+  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[] }> => {
     const sessionId = input.sessionId ?? randomUUID();
     const existing = await sessions.getSession(sessionId);
     if (existing !== null) {
@@ -241,11 +244,17 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       const agent = identity.getAgent(principal.id, input.agentId);
       if (agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
       const hasSystem = input.messages.some(message => message.role === "system");
+      const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], {
+        enabledCapabilityIds: agent.capabilities.filter(item => item.enabled).map(item => item.capabilityId),
+        agentPolicies: agent.permissions,
+        ...(input.permissionMode === undefined ? {} : { sessionMode: input.permissionMode }),
+      });
       if (!hasSystem && agent.instructions.trim()) {
-        return { input: { ...input, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId };
+        return { input: { ...input, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId, tools };
       }
+      return { input, sessionId, tools };
     }
-    return { input, sessionId };
+    return { input, sessionId, tools: options.toolDefinitions ?? [] };
   };
 
   const executeTurn = async (
@@ -262,8 +271,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       model: prepared.input.model === "default" && runtime !== null ? runtime.model : prepared.input.model,
       messages: prepared.input.messages,
       toolPolicies: [],
-      toolDefinitions: options.toolDefinitions ?? [],
-      toolPolicyOverrides: options.toolPolicyOverrides ?? [],
+      toolDefinitions: prepared.tools,
+      toolPolicyOverrides: prepared.tools.length === 0 ? options.toolPolicyOverrides ?? [] : [],
       sessionId: prepared.sessionId,
       requestId: prepared.input.requestId ?? randomUUID(),
       signal,
@@ -491,6 +500,19 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           try { const value = await body(request, maxRequestBytes); return json({ agent: identity.createAgent(auth.principal.id, String(value.projectId ?? ""), String(value.name ?? ""), String(value.instructions ?? ""), String(value.icon ?? "")) }, 201); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400); }
         }
         return json({ error: "method_not_allowed" }, 405);
+      }
+
+      const agentPath = /^\/v1\/agents\/([^/]+)$/.exec(url.pathname);
+      if (agentPath !== null) {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        if (request.method !== "PATCH") return json({ error: "method_not_allowed" }, 405);
+        try {
+          const value = await body(request, maxRequestBytes);
+          return json({ agent: identity.updateAgent(auth.principal.id, decodeURIComponent(agentPath[1] as string), value as AgentConfigurationInput) });
+        } catch (error) {
+          return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400);
+        }
       }
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {

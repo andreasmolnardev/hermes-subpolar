@@ -5,6 +5,7 @@ export type SubpolarChatRequest = {
   readonly sessionId?: string;
   readonly projectId?: string;
   readonly agentId?: string;
+  readonly permissionMode?: "full" | "ask" | "read-only";
 };
 
 export type SubpolarSocketEvent = {

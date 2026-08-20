@@ -322,7 +322,10 @@ function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automa
     const policy = (id: string) => draft.permissions.find(item => item.capabilityId === id)?.policy ?? inventoryPolicy.get(id) ?? 'deny'
     const capabilityMutating = (capability: SubpolarCapability): boolean | undefined => {
       const metadata = capability.capabilities
-      if (!Array.isArray(metadata) && typeof metadata['mutating'] === 'boolean') return metadata['mutating'] as boolean
+      if (!Array.isArray(metadata)) {
+        const objectMetadata = metadata as Record<string, unknown>
+        if (typeof objectMetadata.mutating === 'boolean') return objectMetadata.mutating
+      }
       if (Array.isArray(capability.capabilities) && capability.capabilities.includes('mutating')) return true
       return undefined
     }

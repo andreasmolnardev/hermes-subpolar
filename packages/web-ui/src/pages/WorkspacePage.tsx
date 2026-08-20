@@ -901,8 +901,8 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
           .filter(isPromptMessage)
           .map(message => ({ role: message.role, content: messageText(message) })),
         ...(selectedProject ? { projectId: selectedProject } : {}),
-        ...(selectedAgent ? { agentId: selectedAgent } : {})
-        , permissionMode: permission as 'full' | 'ask' | 'read-only'
+        ...(selectedAgent ? { agentId: selectedAgent } : {}),
+        permissionMode: permission as 'full' | 'ask' | 'read-only',
         ...(effort === '' ? {} : { reasoningEffort: effort })
       })
     } catch {

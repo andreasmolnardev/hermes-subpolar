@@ -41,6 +41,42 @@ export type AgentRecord = {
   readonly capabilityMode: "legacy" | "explicit";
 };
 
+export type SkillRecord = {
+  readonly id: string;
+  readonly ownerId: string;
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly enabled: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type SkillInput = {
+  readonly name: string;
+  readonly description?: string;
+  readonly instructions: string;
+  readonly enabled?: boolean;
+};
+
+export type PromptCommandRecord = {
+  readonly id: string;
+  readonly ownerId: string;
+  readonly name: string;
+  readonly description: string;
+  readonly prompt: string;
+  readonly enabled: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type PromptCommandInput = {
+  readonly name: string;
+  readonly description?: string;
+  readonly prompt: string;
+  readonly enabled?: boolean;
+};
+
 export type AgentCapabilityAssignment = { readonly capabilityId: string; readonly enabled: boolean };
 export type AgentPermission = "allow" | "ask" | "deny";
 export type AgentPermissionPolicy = { readonly capabilityId: string; readonly policy: AgentPermission };
@@ -186,6 +222,17 @@ CREATE TABLE IF NOT EXISTS agents (
   created_at TEXT NOT NULL,
   UNIQUE(owner_id, project_id, name)
 );
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  instructions TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skills_owner_updated ON skills(owner_id, updated_at, id);
 CREATE TABLE IF NOT EXISTS agent_capabilities (
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   capability_id TEXT NOT NULL,
@@ -200,9 +247,23 @@ CREATE TABLE IF NOT EXISTS agent_permissions (
 );
 CREATE TABLE IF NOT EXISTS agent_skills (
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  skill_id TEXT NOT NULL,
+  skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (agent_id, skill_id)
 );
+CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_id);
+CREATE TABLE IF NOT EXISTS prompt_commands (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_commands_owner_updated ON prompt_commands(owner_id, updated_at, id);
 CREATE TABLE IF NOT EXISTS agent_model_config (
   agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
   model TEXT,
@@ -449,6 +510,7 @@ export class SQLiteIdentityRepository {
     } catch {
       // Existing databases already have the migration marker.
     }
+    this.migrateAgentSkills();
   }
 
   close(): void {
@@ -457,6 +519,47 @@ export class SQLiteIdentityRepository {
 
   private tableExists(table: string): boolean {
     return this.db.query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== null;
+  }
+
+  private migrateAgentSkills(): void {
+    if (!this.tableExists("agent_skills")) return;
+    const foreignKeys = this.db.query<{ table: string }, []>("PRAGMA foreign_key_list(agent_skills)").all();
+    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(agent_skills)").all().map(row => row.name));
+    if (foreignKeys.some(row => row.table === "skills") && columns.has("position")) return;
+
+    this.db.run("BEGIN IMMEDIATE");
+    try {
+      const legacy = this.db.query<{ agent_id: string; skill_id: string; position: number }, []>(
+        "SELECT agent_id, skill_id, rowid AS position FROM agent_skills ORDER BY agent_id, rowid",
+      ).all();
+      for (const item of legacy) {
+        const owner = this.db.query<{ owner_id: string }, [string]>("SELECT owner_id FROM agents WHERE id = ?").get(item.agent_id);
+        if (owner === null) continue;
+        this.db.run(
+          "INSERT OR IGNORE INTO skills (id, owner_id, name, description, instructions, enabled, created_at, updated_at) VALUES (?, ?, ?, '', '', 0, ?, ?)",
+          [item.skill_id, owner.owner_id, `Legacy skill ${item.skill_id.slice(0, 12)}`, now(), now()],
+        );
+      }
+      this.db.run("DROP INDEX IF EXISTS idx_agent_skills_skill");
+      this.db.exec("ALTER TABLE agent_skills RENAME TO agent_skills_legacy");
+      this.db.exec(`
+        CREATE TABLE agent_skills (
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (agent_id, skill_id)
+        );
+        CREATE INDEX idx_agent_skills_skill ON agent_skills(skill_id);
+      `);
+      for (const item of legacy) {
+        this.db.run("INSERT OR IGNORE INTO agent_skills (agent_id, skill_id, position) VALUES (?, ?, ?)", [item.agent_id, item.skill_id, item.position]);
+      }
+      this.db.exec("DROP TABLE agent_skills_legacy");
+      this.db.run("COMMIT");
+    } catch (error) {
+      this.db.run("ROLLBACK");
+      throw error;
+    }
   }
 
   private assertProviderSchema(): void {
@@ -562,6 +665,121 @@ export class SQLiteIdentityRepository {
     return project;
   }
 
+  private skill(row: { id: string; owner_id: string; name: string; description: string; instructions: string; enabled: number; created_at: string; updated_at: string }): SkillRecord {
+    return {
+      id: row.id,
+      ownerId: row.owner_id,
+      name: row.name,
+      description: row.description,
+      instructions: row.instructions,
+      enabled: row.enabled === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listSkills(userId: string): readonly SkillRecord[] {
+    return this.db.query<{ id: string; owner_id: string; name: string; description: string; instructions: string; enabled: number; created_at: string; updated_at: string }, [string]>(
+      "SELECT id, owner_id, name, description, instructions, enabled, created_at, updated_at FROM skills WHERE owner_id = ? ORDER BY created_at, id",
+    ).all(userId).map(row => this.skill(row));
+  }
+
+  getSkill(userId: string, skillId: string): SkillRecord | null {
+    const row = this.db.query<{ id: string; owner_id: string; name: string; description: string; instructions: string; enabled: number; created_at: string; updated_at: string }, [string, string]>(
+      "SELECT id, owner_id, name, description, instructions, enabled, created_at, updated_at FROM skills WHERE id = ? AND owner_id = ?",
+    ).get(skillId, userId);
+    return row === null ? null : this.skill(row);
+  }
+
+  createSkill(userId: string, input: SkillInput): SkillRecord {
+    const name = input.name.trim();
+    const description = input.description ?? "";
+    if (!name || name.length > 128 || description.length > 10_000 || typeof input.instructions !== "string" || input.instructions.length > 100_000) throw new Error("skill is invalid");
+    if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error("skill is invalid");
+    const timestamp = now();
+    const skill = { id: randomUUID(), ownerId: userId, name, description, instructions: input.instructions, enabled: input.enabled ?? true, createdAt: timestamp, updatedAt: timestamp };
+    this.db.run("INSERT INTO skills (id, owner_id, name, description, instructions, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [skill.id, skill.ownerId, skill.name, skill.description, skill.instructions, skill.enabled ? 1 : 0, skill.createdAt, skill.updatedAt]);
+    return skill;
+  }
+
+  updateSkill(userId: string, skillId: string, input: Partial<SkillInput>): SkillRecord {
+    const existing = this.getSkill(userId, skillId);
+    if (existing === null) throw new OwnershipError("Skill is not owned by the authenticated user");
+    const name = input.name === undefined ? existing.name : input.name.trim();
+    const description = input.description ?? existing.description;
+    const instructions = input.instructions ?? existing.instructions;
+    const enabled = input.enabled ?? existing.enabled;
+    if (!name || name.length > 128 || description.length > 10_000 || instructions.length > 100_000 || typeof enabled !== "boolean") throw new Error("skill is invalid");
+    const updatedAt = now();
+    this.db.run("UPDATE skills SET name = ?, description = ?, instructions = ?, enabled = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [name, description, instructions, enabled ? 1 : 0, updatedAt, skillId, userId]);
+    return this.getSkill(userId, skillId) as SkillRecord;
+  }
+
+  deleteSkill(userId: string, skillId: string): void {
+    const result = this.db.run("DELETE FROM skills WHERE id = ? AND owner_id = ?", [skillId, userId]);
+    if (result.changes === 0) throw new OwnershipError("Skill is not owned by the authenticated user");
+  }
+
+  skillAssignmentCount(userId: string, skillId: string): number {
+    return this.db.query<{ count: number }, [string, string]>("SELECT COUNT(*) AS count FROM agent_skills s JOIN agents a ON a.id = s.agent_id WHERE s.skill_id = ? AND a.owner_id = ?").get(skillId, userId)?.count ?? 0;
+  }
+
+  skillAssignmentCounts(userId: string): ReadonlyMap<string, number> {
+    return new Map(this.db.query<{ skill_id: string; count: number }, [string]>("SELECT s.skill_id, COUNT(*) AS count FROM agent_skills s JOIN agents a ON a.id = s.agent_id WHERE a.owner_id = ? GROUP BY s.skill_id").all(userId).map(row => [row.skill_id, row.count] as const));
+  }
+
+  effectiveAgentSkills(userId: string, agentId: string): readonly SkillRecord[] {
+    return this.db.query<{ id: string; owner_id: string; name: string; description: string; instructions: string; enabled: number; created_at: string; updated_at: string }, [string, string]>(
+      "SELECT s.id, s.owner_id, s.name, s.description, s.instructions, s.enabled, s.created_at, s.updated_at FROM agent_skills a JOIN agents agent ON agent.id = a.agent_id JOIN skills s ON s.id = a.skill_id WHERE agent.id = ? AND agent.owner_id = ? AND s.owner_id = agent.owner_id AND s.enabled = 1 ORDER BY a.position, a.skill_id",
+    ).all(agentId, userId).map(row => this.skill(row));
+  }
+
+  private promptCommand(row: { id: string; owner_id: string; name: string; description: string; prompt: string; enabled: number; created_at: string; updated_at: string }): PromptCommandRecord {
+    return { id: row.id, ownerId: row.owner_id, name: row.name, description: row.description, prompt: row.prompt, enabled: row.enabled === 1, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+
+  listPromptCommands(userId: string): readonly PromptCommandRecord[] {
+    return this.db.query<{ id: string; owner_id: string; name: string; description: string; prompt: string; enabled: number; created_at: string; updated_at: string }, [string]>(
+      "SELECT id, owner_id, name, description, prompt, enabled, created_at, updated_at FROM prompt_commands WHERE owner_id = ? ORDER BY created_at, id",
+    ).all(userId).map(row => this.promptCommand(row));
+  }
+
+  getPromptCommand(userId: string, commandId: string): PromptCommandRecord | null {
+    const row = this.db.query<{ id: string; owner_id: string; name: string; description: string; prompt: string; enabled: number; created_at: string; updated_at: string }, [string, string]>(
+      "SELECT id, owner_id, name, description, prompt, enabled, created_at, updated_at FROM prompt_commands WHERE id = ? AND owner_id = ?",
+    ).get(commandId, userId);
+    return row === null ? null : this.promptCommand(row);
+  }
+
+  createPromptCommand(userId: string, input: PromptCommandInput): PromptCommandRecord {
+    const name = input.name.trim().toLowerCase();
+    const description = input.description ?? "";
+    if (!/^[a-z0-9_-]+$/.test(name) || name.length > 64 || description.length > 10_000 || typeof input.prompt !== "string" || input.prompt.length > 100_000 || input.prompt.trim().length === 0) throw new Error("prompt command is invalid");
+    if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error("prompt command is invalid");
+    const timestamp = now();
+    const command = { id: randomUUID(), ownerId: userId, name, description, prompt: input.prompt, enabled: input.enabled ?? true, createdAt: timestamp, updatedAt: timestamp };
+    this.db.run("INSERT INTO prompt_commands (id, owner_id, name, description, prompt, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [command.id, command.ownerId, command.name, command.description, command.prompt, command.enabled ? 1 : 0, command.createdAt, command.updatedAt]);
+    return command;
+  }
+
+  updatePromptCommand(userId: string, commandId: string, input: Partial<PromptCommandInput>): PromptCommandRecord {
+    const existing = this.getPromptCommand(userId, commandId);
+    if (existing === null) throw new OwnershipError("Prompt Command is not owned by the authenticated user");
+    const name = input.name === undefined ? existing.name : input.name.trim().toLowerCase();
+    const description = input.description ?? existing.description;
+    const prompt = input.prompt ?? existing.prompt;
+    const enabled = input.enabled ?? existing.enabled;
+    if (!/^[a-z0-9_-]+$/.test(name) || name.length > 64 || description.length > 10_000 || prompt.length > 100_000 || prompt.trim().length === 0 || typeof enabled !== "boolean") throw new Error("prompt command is invalid");
+    const updatedAt = now();
+    this.db.run("UPDATE prompt_commands SET name = ?, description = ?, prompt = ?, enabled = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [name, description, prompt, enabled ? 1 : 0, updatedAt, commandId, userId]);
+    return this.getPromptCommand(userId, commandId) as PromptCommandRecord;
+  }
+
+  deletePromptCommand(userId: string, commandId: string): void {
+    const result = this.db.run("DELETE FROM prompt_commands WHERE id = ? AND owner_id = ?", [commandId, userId]);
+    if (result.changes === 0) throw new OwnershipError("Prompt Command is not owned by the authenticated user");
+  }
+
   private agent(row: Row): AgentRecord {
     const id = required(row.id, "agent id");
     const model = this.db.query<{ model: string | null; reasoning_effort: string | null }, [string]>("SELECT model, reasoning_effort FROM agent_model_config WHERE agent_id = ?").get(id);
@@ -571,7 +789,7 @@ export class SQLiteIdentityRepository {
       ...(model?.model ? { model: model.model } : {}), ...(model?.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}),
       capabilities: this.db.query<{ capability_id: string; enabled: number }, [string]>("SELECT capability_id, enabled FROM agent_capabilities WHERE agent_id = ? ORDER BY capability_id").all(id).map(item => ({ capabilityId: item.capability_id, enabled: item.enabled === 1 })),
       permissions: this.db.query<{ capability_id: string; policy: AgentPermission }, [string]>("SELECT capability_id, policy FROM agent_permissions WHERE agent_id = ? ORDER BY capability_id").all(id).map(item => ({ capabilityId: item.capability_id, policy: item.policy })),
-      skillIds: this.db.query<{ skill_id: string }, [string]>("SELECT skill_id FROM agent_skills WHERE agent_id = ? ORDER BY skill_id").all(id).map(item => item.skill_id),
+      skillIds: this.db.query<{ skill_id: string }, [string]>("SELECT skill_id FROM agent_skills WHERE agent_id = ? ORDER BY position, skill_id").all(id).map(item => item.skill_id),
       createdAt: required(row.created_at, "agent createdAt"),
       capabilityMode: row.capability_mode === "explicit" ? "explicit" : "legacy",
     };
@@ -636,14 +854,18 @@ export class SQLiteIdentityRepository {
       if (input.model !== undefined || input.reasoningEffort !== undefined) this.db.run("INSERT INTO agent_model_config (agent_id, model, reasoning_effort) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET model = excluded.model, reasoning_effort = excluded.reasoning_effort", [agentId, input.model === null ? null : input.model ?? existing.model ?? null, input.reasoningEffort === null ? null : input.reasoningEffort ?? existing.reasoningEffort ?? null]);
       if (input.capabilities !== undefined) { this.validateCapabilities(input.capabilities); this.db.run("DELETE FROM agent_capabilities WHERE agent_id = ?", [agentId]); for (const item of input.capabilities) this.db.run("INSERT INTO agent_capabilities (agent_id, capability_id, enabled) VALUES (?, ?, ?)", [agentId, item.capabilityId, item.enabled ? 1 : 0]); }
       if (input.permissions !== undefined) { this.validatePermissions(input.permissions); this.db.run("DELETE FROM agent_permissions WHERE agent_id = ?", [agentId]); for (const item of input.permissions) this.db.run("INSERT INTO agent_permissions (agent_id, capability_id, policy) VALUES (?, ?, ?)", [agentId, item.capabilityId, item.policy]); }
-      if (input.skillIds !== undefined) { this.validateSkills(input.skillIds); this.db.run("DELETE FROM agent_skills WHERE agent_id = ?", [agentId]); for (const skillId of input.skillIds) this.db.run("INSERT INTO agent_skills (agent_id, skill_id) VALUES (?, ?)", [agentId, skillId]); }
+      if (input.skillIds !== undefined) { this.validateSkills(input.skillIds, userId); this.db.run("DELETE FROM agent_skills WHERE agent_id = ?", [agentId]); input.skillIds.forEach((skillId, position) => this.db.run("INSERT INTO agent_skills (agent_id, skill_id, position) VALUES (?, ?, ?)", [agentId, skillId, position])); }
       this.db.run("COMMIT"); return this.getAgent(userId, agentId) as AgentRecord;
     } catch (error) { this.db.run("ROLLBACK"); throw error; }
   }
 
   private validateCapabilities(items: readonly AgentCapabilityAssignment[]): void { if (new Set(items.map(item => item.capabilityId)).size !== items.length || items.some(item => !item.capabilityId || item.capabilityId.length > 512)) throw new Error("agent capabilities are invalid"); }
   private validatePermissions(items: readonly AgentPermissionPolicy[]): void { if (new Set(items.map(item => item.capabilityId)).size !== items.length || items.some(item => !item.capabilityId || !["allow", "ask", "deny"].includes(item.policy))) throw new Error("agent permissions are invalid"); }
-  private validateSkills(items: readonly string[]): void { if (new Set(items).size !== items.length || items.some(item => !item || item.length > 512)) throw new Error("agent skills are invalid"); }
+  private validateSkills(items: readonly string[], userId: string): void {
+    if (new Set(items).size !== items.length || items.some(item => !item || item.length > 512)) throw new Error("agent skills are invalid");
+    const owned = new Set(this.db.query<{ id: string }, [string]>("SELECT id FROM skills WHERE owner_id = ?").all(userId).map(item => item.id));
+    if (items.some(item => !owned.has(item))) throw new OwnershipError("Skill is not owned by the authenticated user");
+  }
 
   claimSession(userId: string, sessionId: string, projectId?: string, agentId?: string): void {
     if (projectId !== undefined && this.db.query<{ id: string }, [string, string]>("SELECT id FROM projects WHERE id = ? AND owner_id = ?").get(projectId, userId) === null) throw new OwnershipError();

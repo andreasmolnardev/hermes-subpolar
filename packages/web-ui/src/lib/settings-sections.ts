@@ -12,6 +12,7 @@ import {
   UserRound,
   Volume2,
   Wrench,
+  Terminal,
 } from "lucide-react";
 
 export type SettingsScope = "user" | "agent";
@@ -28,6 +29,7 @@ export const SETTINGS_SECTIONS: Record<SettingsScope, readonly SettingsSection[]
     { id: "account", label: "Account", description: "Identity, password, sessions, and sign out.", icon: UserRound },
     { id: "appearance", label: "Appearance", description: "Theme and interface preferences.", icon: Palette },
     { id: "chat", label: "Chat", description: "Conversation defaults and behavior.", icon: MessageCircle },
+    { id: "prompt-commands", label: "Prompt Commands", description: "Reusable shortcuts for composing user prompts.", icon: Terminal },
     { id: "voice", label: "Voice", description: "Speech, voices, and recording.", icon: Volume2 },
     { id: "notifications", label: "Notifications", description: "Desktop and task notifications.", icon: Bell },
     { id: "keybinds", label: "Keybinds", description: "Keyboard shortcuts.", icon: Keyboard },

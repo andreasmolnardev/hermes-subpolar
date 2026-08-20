@@ -15,6 +15,11 @@
 - New chat composer now asks what to work on and provides project context
   selection from the prompt itself.
 - Settings navigation now shows icons for every scope and section tab.
+- Added first-class owner-scoped Skills with ordered Agent assignments, enabled
+  runtime resolution through the harness prompt assembler, legacy assignment
+  migration, CRUD APIs, effective-configuration visibility, and Skills settings
+  and Agent-picker UI. Added separate owner-scoped Prompt Commands with CRUD
+  APIs, management UI, and editable beginning-of-input slash expansion in chat.
 - Route-level React pages now live in dedicated `web-ui/src/pages` files, leaving
   `SubpolarApp` responsible for authentication and route orchestration.
 - Settings layout now uses responsive split navigation with compact mobile tab

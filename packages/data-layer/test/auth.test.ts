@@ -34,18 +34,19 @@ test("agent capability assignments and policies persist through updates", async 
     const session = await repository.bootstrap("operator", "correct horse");
     const project = repository.createProject(session.principal.id, "private");
     const agent = repository.createAgent(session.principal.id, project.id, "default", "instructions", "code");
+    const skill = repository.createSkill(session.principal.id, { name: "Code review", instructions: "Review code carefully." });
     const updated = repository.updateAgent(session.principal.id, agent.id, {
       description: "restricted agent",
       capabilities: [{ capabilityId: "shell.execute", enabled: true }],
       permissions: [{ capabilityId: "shell.execute", policy: "ask" }],
-      skillIds: ["code-review"],
+      skillIds: [skill.id],
       model: "model-a",
       reasoningEffort: "medium",
     });
     assert.equal(updated.description, "restricted agent");
     assert.deepEqual(updated.capabilities, [{ capabilityId: "shell.execute", enabled: true }]);
     assert.deepEqual(updated.permissions, [{ capabilityId: "shell.execute", policy: "ask" }]);
-    assert.deepEqual(updated.skillIds, ["code-review"]);
+    assert.deepEqual(updated.skillIds, [skill.id]);
     assert.equal(updated.model, "model-a");
     assert.equal(updated.reasoningEffort, "medium");
     assert.equal(updated.capabilityMode, "explicit");
@@ -54,6 +55,72 @@ test("agent capability assignments and policies persist through updates", async 
     assert.equal(cleared.reasoningEffort, undefined);
   } finally {
     repository.close();
+  }
+});
+
+test("Skills and Prompt Commands persist, isolate owners, and clean Agent assignments", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "subpolar-reusable-instructions-"));
+  const databasePath = join(directory, "state.db");
+  const first = new SQLiteIdentityRepository(databasePath);
+  const session = await first.bootstrap("operator", "correct horse");
+  const project = first.createProject(session.principal.id, "private");
+  const agent = first.createAgent(session.principal.id, project.id, "default", "instructions");
+  const skill = first.createSkill(session.principal.id, { name: "React", description: "UI guidance", instructions: "Use components.", enabled: false });
+  const secondSkill = first.createSkill(session.principal.id, { name: "TypeScript", instructions: "Keep types precise." });
+  const command = first.createPromptCommand(session.principal.id, { name: "review", description: "Review changes", prompt: "Review this.", enabled: true });
+  assert.equal(first.getSkill("other-user", skill.id), null);
+  assert.equal(first.getPromptCommand("other-user", command.id), null);
+  assert.throws(() => first.updateAgent(session.principal.id, agent.id, { skillIds: ["not-owned"] }), OwnershipError);
+  first.updateAgent(session.principal.id, agent.id, { skillIds: [skill.id, secondSkill.id] });
+  assert.deepEqual(first.getAgent(session.principal.id, agent.id)?.skillIds, [skill.id, secondSkill.id]);
+  first.close();
+
+  const second = new SQLiteIdentityRepository(databasePath);
+  try {
+    assert.equal(second.listSkills(session.principal.id)[0]?.name, "React");
+    assert.equal(second.listPromptCommands(session.principal.id)[0]?.name, "review");
+    assert.deepEqual(second.getAgent(session.principal.id, agent.id)?.skillIds, [skill.id, secondSkill.id]);
+    assert.deepEqual(second.effectiveAgentSkills(session.principal.id, agent.id), [secondSkill]);
+    const enabled = second.updateSkill(session.principal.id, skill.id, { enabled: true });
+    assert.equal(enabled.enabled, true);
+    assert.deepEqual(second.effectiveAgentSkills(session.principal.id, agent.id).map(item => item.id), [skill.id, secondSkill.id]);
+    second.updateSkill(session.principal.id, secondSkill.id, { enabled: false });
+    assert.deepEqual(second.effectiveAgentSkills(session.principal.id, agent.id).map(item => item.id), [skill.id]);
+    second.deleteSkill(session.principal.id, skill.id);
+    assert.deepEqual(second.getAgent(session.principal.id, agent.id)?.skillIds, [secondSkill.id]);
+    second.deletePromptCommand(session.principal.id, command.id);
+    assert.equal(second.listPromptCommands(session.principal.id).length, 0);
+  } finally {
+    second.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy opaque Agent Skill IDs are migrated to disabled owned records safely", () => {
+  const directory = mkdtempSync(join(tmpdir(), "subpolar-legacy-skills-"));
+  const databasePath = join(directory, "state.db");
+  const database = new Database(databasePath);
+  database.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE projects (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE agents (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT 'bot', instructions TEXT NOT NULL, capability_mode TEXT NOT NULL DEFAULT 'legacy', created_at TEXT NOT NULL);
+    CREATE TABLE agent_skills (agent_id TEXT NOT NULL, skill_id TEXT NOT NULL, PRIMARY KEY (agent_id, skill_id));
+  `);
+  database.run("INSERT INTO users VALUES ('user-1', 'operator', 'hash', '2026-01-01T00:00:00.000Z')");
+  database.run("INSERT INTO projects VALUES ('project-1', 'user-1', 'private', '2026-01-01T00:00:00.000Z')");
+  database.run("INSERT INTO agents VALUES ('agent-1', 'user-1', 'project-1', 'reviewer', '', 'bot', 'instructions', 'legacy', '2026-01-01T00:00:00.000Z')");
+  database.run("INSERT INTO agent_skills VALUES ('agent-1', 'legacy-skill')");
+  database.close();
+  const repository = new SQLiteIdentityRepository(databasePath);
+  try {
+    assert.deepEqual(repository.getAgent("user-1", "agent-1")?.skillIds, ["legacy-skill"]);
+    assert.deepEqual(repository.listSkills("user-1").map(skill => ({ id: skill.id, enabled: skill.enabled })), [{ id: "legacy-skill", enabled: false }]);
+    const migrated = new Database(databasePath, { readonly: true });
+    try { assert.equal(migrated.query<{ table: string }, []>("PRAGMA foreign_key_list(agent_skills)").all().some(row => row.table === "skills"), true); }
+    finally { migrated.close(); }
+  } finally {
+    repository.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

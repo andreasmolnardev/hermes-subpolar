@@ -40,6 +40,7 @@ import {
   type HarnessBudgets,
   type HarnessRetryPolicy,
   type HarnessToolOutputLimits,
+  type HarnessContextAssembler,
   type HarnessSessionRepository,
   type HarnessPersistencePort
 } from "harness";
@@ -118,6 +119,7 @@ export type GatewayExecutionRequest = {
   idGenerator?: HarnessIdGenerator;
   sessionRepository?: GatewaySessionRepository;
   persistence?: HarnessPersistencePort;
+  contextAssembler?: HarnessContextAssembler;
   /** Existing gateway protocol event stream. */
   eventSink?: GatewayProtocolEventSink;
   /** Existing data-layer transport event stream. */
@@ -153,6 +155,7 @@ export type GatewayNormalizedRequest = {
   readonly idGenerator?: HarnessIdGenerator;
   readonly sessionRepository?: GatewaySessionRepository;
   readonly persistence?: HarnessPersistencePort;
+  readonly contextAssembler?: HarnessContextAssembler;
 };
 
 export type GatewayOptions = {
@@ -176,7 +179,7 @@ const GATEWAY_REQUEST_FIELDS = new Set([
   "sessionId", "cwd", "signal", "timeoutMs", "turnLeaseTimeoutMs", "deadline", "options", "cacheHints",
   "metadata", "budgets", "retryPolicy", "toolExecutor", "toolTimeoutMs", "toolConcurrency", "toolOutputLimits",
   "approvalPolicy", "clock", "sleeper", "idGenerator", "sessionRepository", "persistence", "eventSink",
-  "transportEventSink"
+  "transportEventSink", "contextAssembler"
 ]);
 const GATEWAY_OPTION_FIELDS = new Set([
   "sessionRepository", "persistence", "sessionCwdStore", "toolExecutor", "turnLeaseManager", "turnLease"
@@ -425,7 +428,8 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.sleeper === undefined ? {} : { sleeper: request.sleeper }),
     ...(request.idGenerator === undefined ? {} : { idGenerator: request.idGenerator }),
      ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository }),
-     ...(request.persistence === undefined ? {} : { persistence: request.persistence })
+     ...(request.persistence === undefined ? {} : { persistence: request.persistence }),
+     ...(request.contextAssembler === undefined ? {} : { contextAssembler: request.contextAssembler })
   };
 }
 
@@ -938,6 +942,7 @@ export const harnessRuntimeAdapter = {
       ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
       ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository }),
       ...(request.persistence === undefined ? {} : { persistence: request.persistence }),
+      ...(request.contextAssembler === undefined ? {} : { contextAssembler: request.contextAssembler }),
       ...(eventSink === undefined ? {} : { eventSink: (event: HarnessEvent) => eventSink(event) }),
       idGenerator: request.idGenerator ?? defaultIdGenerator(),
       ...(request.cwd === undefined ? {} : { cwd: request.cwd })

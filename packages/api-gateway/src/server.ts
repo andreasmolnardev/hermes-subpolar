@@ -13,8 +13,10 @@ import {
   type AuthSession,
   type SessionRecord,
   type AgentConfigurationInput,
+  type SkillInput,
+  type PromptCommandInput,
 } from "data-layer";
-import type { HarnessApprovalPolicy } from "harness";
+import { assembleHarnessContext, type HarnessApprovalPolicy, type HarnessContextAssembler } from "harness";
 import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
@@ -194,6 +196,44 @@ function parseAgentUpdate(value: unknown): AgentConfigurationInput {
   };
 }
 
+function parseSkillInput(value: unknown, partial = false): SkillInput | Partial<SkillInput> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("skill must be an object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["name", "description", "instructions", "enabled"]);
+  const unsupported = Object.keys(record).find(key => !allowed.has(key));
+  if (unsupported !== undefined) throw new TypeError("skill field is unsupported");
+  if (!partial && (typeof record.name !== "string" || typeof record.instructions !== "string")) throw new TypeError("skill name and instructions are required");
+  if (record.name !== undefined && (typeof record.name !== "string" || record.name.length > 128)) throw new TypeError("skill name is invalid");
+  if (record.description !== undefined && (typeof record.description !== "string" || record.description.length > 10_000)) throw new TypeError("skill description is invalid");
+  if (record.instructions !== undefined && (typeof record.instructions !== "string" || record.instructions.length > 100_000)) throw new TypeError("skill instructions are invalid");
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") throw new TypeError("skill enabled state is invalid");
+  return {
+    ...(record.name === undefined ? {} : { name: record.name }),
+    ...(record.description === undefined ? {} : { description: record.description }),
+    ...(record.instructions === undefined ? {} : { instructions: record.instructions }),
+    ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
+  } as SkillInput | Partial<SkillInput>;
+}
+
+function parsePromptCommandInput(value: unknown, partial = false): PromptCommandInput | Partial<PromptCommandInput> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt command must be an object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["name", "description", "prompt", "enabled"]);
+  const unsupported = Object.keys(record).find(key => !allowed.has(key));
+  if (unsupported !== undefined) throw new TypeError("prompt command field is unsupported");
+  if (!partial && (typeof record.name !== "string" || typeof record.prompt !== "string")) throw new TypeError("prompt command name and prompt are required");
+  if (record.name !== undefined && (typeof record.name !== "string" || record.name.length > 64)) throw new TypeError("prompt command name is invalid");
+  if (record.description !== undefined && (typeof record.description !== "string" || record.description.length > 10_000)) throw new TypeError("prompt command description is invalid");
+  if (record.prompt !== undefined && (typeof record.prompt !== "string" || record.prompt.length > 100_000)) throw new TypeError("prompt command prompt is invalid");
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") throw new TypeError("prompt command enabled state is invalid");
+  return {
+    ...(record.name === undefined ? {} : { name: record.name }),
+    ...(record.description === undefined ? {} : { description: record.description }),
+    ...(record.prompt === undefined ? {} : { prompt: record.prompt }),
+    ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
+  } as PromptCommandInput | Partial<PromptCommandInput>;
+}
+
 async function body(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
   const contentLength = request.headers.get("content-length");
   if (contentLength !== null && Number(contentLength) > maxBytes) throw new TypeError("request body is too large");
@@ -250,6 +290,16 @@ function requestFingerprint(principalId: string, input: TurnInput): string {
   return createHash("sha256")
     .update(canonicalJson({ endpoint: "subpolar.v1/chat/completions", principalId, input }))
     .digest("hex");
+}
+
+function promptAttribute(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function agentSkillInstructions(agent: { readonly instructions: string }, skills: readonly { readonly id: string; readonly name: string; readonly instructions: string }[]): string {
+  const agentInstructions = `<agent-instructions>\n${agent.instructions}\n</agent-instructions>`;
+  const skillInstructions = skills.map(skill => `<skill id="${promptAttribute(skill.id)}" name="${promptAttribute(skill.name)}">\n${skill.instructions}\n</skill>`).join("\n");
+  return `${agentInstructions}\n<skills>\n${skillInstructions}\n</skills>`;
 }
 
 export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGatewayServer {
@@ -309,10 +359,11 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     });
     const configuredEffort = requestedReasoning ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
     const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort as "low" | "medium" | "high" : undefined;
-    return { projectOverride, model, tools, reasoningEffort };
+    const skills = identity.effectiveAgentSkills(principal.id, agent.id);
+    return { projectOverride, model, tools, reasoningEffort, skills };
   };
 
-  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; reasoningEffort?: "low" | "medium" | "high" }> => {
+  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; reasoningEffort?: "low" | "medium" | "high"; contextAssembler?: HarnessContextAssembler }> => {
     const sessionId = input.sessionId ?? randomUUID();
     const agent = input.agentId === undefined ? null : identity.getAgent(principal.id, input.agentId);
     if (input.agentId !== undefined && agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
@@ -331,8 +382,14 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       const hasSystem = input.messages.some(message => message.role === "system");
       const tools = effectiveAgent?.tools ?? [];
       const reasoningEffort = effectiveAgent?.reasoningEffort;
-      if (!hasSystem && agent.instructions.trim()) {
-        return { input: { ...input, model: effectiveModel, messages: [{ role: "system", content: agent.instructions }, ...input.messages] }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+      if (!hasSystem && (agent.instructions.trim() || (effectiveAgent?.skills.length ?? 0) > 0)) {
+        const contextAssembler: HarnessContextAssembler = async context => {
+          if ((effectiveAgent?.skills.length ?? 0) === 0) return [{ role: "system", content: agent.instructions }, ...context.messages];
+          return assembleHarnessContext(context, {
+            sources: [{ kind: "instructions", content: agentSkillInstructions(agent, effectiveAgent?.skills ?? []) }],
+          }).messages;
+        };
+        return { input: { ...input, model: effectiveModel }, sessionId, tools, contextAssembler, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
       }
       return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
     }
@@ -382,6 +439,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         await sessions.resolvePendingApproval(approvalRequestId, decision, new Date().toISOString());
         return decision;
       } }),
+      ...(prepared.contextAssembler === undefined ? {} : { contextAssembler: prepared.contextAssembler }),
     }, options.provider ?? createProvider(runtime as NonNullable<typeof runtime>, { resolveCredential: handle => identity.resolveCredentialHandle(handle) }));
   };
 
@@ -570,6 +628,68 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         } catch { return json({ error: "invalid_templates" }, 400); }
       }
 
+      if (url.pathname === "/v1/skills") {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        if (request.method === "GET") {
+          const skills = identity.listSkills(auth.principal.id);
+          const assignments = identity.skillAssignmentCounts(auth.principal.id);
+          return json({ skills: skills.map(skill => ({ ...skill, assignmentCount: assignments.get(skill.id) ?? 0 })) });
+        }
+        if (request.method === "POST") {
+          try { const value = await body(request, maxRequestBytes); return json({ skill: identity.createSkill(auth.principal.id, parseSkillInput(value) as SkillInput) }, 201); }
+          catch { return json({ error: "invalid_skill" }, 400); }
+        }
+        return json({ error: "method_not_allowed" }, 405, { allow: "GET, POST" });
+      }
+
+      const skillPath = /^\/v1\/skills\/([^/]+)$/.exec(url.pathname);
+      if (skillPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const skillId = decodeURIComponent(skillPath[1] as string);
+        if (request.method === "GET") {
+          const skill = identity.getSkill(auth.principal.id, skillId);
+          return skill === null ? json({ error: "not_found" }, 404) : json({ skill, assignmentCount: identity.skillAssignmentCount(auth.principal.id, skillId) });
+        }
+        if (request.method === "DELETE") {
+          try { identity.deleteSkill(auth.principal.id, skillId); return json({ deleted: true }); }
+          catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "not_found" }, error instanceof OwnershipError ? 403 : 404); }
+        }
+        if (request.method !== "PATCH") return json({ error: "method_not_allowed" }, 405, { allow: "GET, PATCH, DELETE" });
+        try { const value = await body(request, maxRequestBytes); return json({ skill: identity.updateSkill(auth.principal.id, skillId, parseSkillInput(value, true) as Partial<SkillInput>) }); }
+        catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_skill" }, error instanceof OwnershipError ? 403 : 400); }
+      }
+
+      if (url.pathname === "/v1/prompt-commands") {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        if (request.method === "GET") return json({ commands: identity.listPromptCommands(auth.principal.id) });
+        if (request.method === "POST") {
+          try { const value = await body(request, maxRequestBytes); return json({ command: identity.createPromptCommand(auth.principal.id, parsePromptCommandInput(value) as PromptCommandInput) }, 201); }
+          catch { return json({ error: "invalid_prompt_command" }, 400); }
+        }
+        return json({ error: "method_not_allowed" }, 405, { allow: "GET, POST" });
+      }
+
+      const promptCommandPath = /^\/v1\/prompt-commands\/([^/]+)$/.exec(url.pathname);
+      if (promptCommandPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const commandId = decodeURIComponent(promptCommandPath[1] as string);
+        if (request.method === "GET") {
+          const command = identity.getPromptCommand(auth.principal.id, commandId);
+          return command === null ? json({ error: "not_found" }, 404) : json({ command });
+        }
+        if (request.method === "DELETE") {
+          try { identity.deletePromptCommand(auth.principal.id, commandId); return json({ deleted: true }); }
+          catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "not_found" }, error instanceof OwnershipError ? 403 : 404); }
+        }
+        if (request.method !== "PATCH") return json({ error: "method_not_allowed" }, 405, { allow: "GET, PATCH, DELETE" });
+        try { const value = await body(request, maxRequestBytes); return json({ command: identity.updatePromptCommand(auth.principal.id, commandId, parsePromptCommandInput(value, true) as Partial<PromptCommandInput>) }); }
+        catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_prompt_command" }, error instanceof OwnershipError ? 403 : 400); }
+      }
+
       if (url.pathname === "/v1/projects") {
         const auth = authenticated(request, identity, request.method !== "GET");
         if (auth instanceof Response) return auth;
@@ -622,7 +742,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const projectId = url.searchParams.get("projectId") ?? agent.projectId;
         if (projectId !== agent.projectId) return json({ error: "forbidden" }, 403);
         const effective = resolveEffectiveAgentConfiguration(auth.principal, agent, sessionId, projectId, "default", undefined, undefined);
-        return json({ agent, model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })) });
+        return json({ agent, model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })), skills: effective.skills.map(skill => ({ id: skill.id, name: skill.name })) });
       }
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {

@@ -36,6 +36,7 @@ import {
   sessions,
   updateAgent,
   type SubpolarAgent,
+  type SubpolarAgentUpdate,
   type SubpolarCapability,
   type SubpolarMessage,
   type SubpolarModelProvider,
@@ -326,7 +327,7 @@ function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automa
       setDraft({ ...draft, permissions: next })
       void save({ permissions: next })
     }
-    const save = async (changes: Partial<SubpolarAgent>) => {
+    const save = async (changes: SubpolarAgentUpdate) => {
       const result = await updateAgent(draft.id, changes)
       setDraft(result.agent)
       setSaved(true)

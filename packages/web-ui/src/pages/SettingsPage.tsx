@@ -6,6 +6,18 @@ import {
   modelDefaults,
   saveModelDefaults,
   setupProviders,
+  createPromptCommand,
+  createSkill,
+  deletePromptCommand,
+  deleteSkill,
+  promptCommands,
+  skills,
+  updatePromptCommand,
+  updateSkill,
+  type SubpolarPromptCommand,
+  type SubpolarPromptCommandInput,
+  type SubpolarSkill,
+  type SubpolarSkillInput,
   type SubpolarModelDefaults,
   type SubpolarModelProvider,
   type SubpolarUser
@@ -206,6 +218,59 @@ function ProvidersSettings() {
       {providerList('Configured providers', configured, true)}
       {providerList('Available providers', available, false)}
     </>
+  )
+}
+
+export function SkillsSettings() {
+  const [items, setItems] = useState<readonly SubpolarSkill[]>([])
+  const [query, setQuery] = useState('')
+  const [editing, setEditing] = useState<string | null>(null)
+  const [form, setForm] = useState<SubpolarSkillInput>({ name: '', description: '', instructions: '', enabled: true })
+  const [error, setError] = useState<string | null>(null)
+  const load = () => void skills().then(result => setItems(result.skills)).catch(() => setError('Could not load Skills.'))
+  useEffect(load, [])
+  const visible = items.filter(item => `${item.name} ${item.description}`.toLowerCase().includes(query.toLowerCase()))
+  function edit(item: SubpolarSkill) { setEditing(item.id); setForm({ name: item.name, description: item.description, instructions: item.instructions, enabled: item.enabled }) }
+  function newSkill() { setEditing('new'); setForm({ name: '', description: '', instructions: '', enabled: true }) }
+  async function save(event: FormEvent) {
+    event.preventDefault(); setError(null)
+    try {
+      const result = editing === 'new' ? await createSkill(form) : await updateSkill(editing as string, form)
+      setItems(current => editing === 'new' ? [...current, result.skill] : current.map(item => item.id === result.skill.id ? { ...result.skill, assignmentCount: item.assignmentCount } : item))
+      setEditing(null)
+    } catch { setError('Could not save Skill.') }
+  }
+  async function remove(item: SubpolarSkill) {
+    const count = item.assignmentCount ?? 0
+    if (!window.confirm(`Delete “${item.name}”?${count > 0 ? `\n\nThis Skill is assigned to ${count} Agent${count === 1 ? '' : 's'}. Deleting it will remove those assignments.` : ''}`)) return
+    try { await deleteSkill(item.id); setItems(current => current.filter(candidate => candidate.id !== item.id)) } catch { setError('Could not delete Skill.') }
+  }
+  return (
+    <div>
+      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Skills</h2><p className="setup-help mt-1 text-sm">Reusable instructions that augment assigned Agents at runtime.</p></div><button type="button" onClick={newSkill} className="setup-primary">Create Skill</button></div>
+      <input value={query} onChange={event => setQuery(event.target.value)} className="setup-input mt-6 w-full" placeholder="Search Skills..." />
+      {error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}
+      <div className="mt-4 space-y-2">{visible.map(item => <article key={item.id} className="setup-option rounded-xl p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{item.name}</h3><p className="setup-help mt-1 text-sm">{item.description || 'No description'}</p><p className={`mt-2 text-xs ${item.enabled ? 'text-[var(--color-primary,var(--foreground-base))]' : 'setup-help'}`}>{item.enabled ? 'Enabled' : 'Disabled'}{(item.assignmentCount ?? 0) > 0 ? ` · assigned to ${item.assignmentCount} Agent${item.assignmentCount === 1 ? '' : 's'}` : ''}</p></div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => void updateSkill(item.id, { enabled: !item.enabled }).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? { ...result.skill, assignmentCount: candidate.assignmentCount } : candidate))).catch(() => setError('Could not update Skill.'))} className="setup-step text-xs">{item.enabled ? 'Disable' : 'Enable'}</button><button type="button" onClick={() => edit(item)} className="setup-step text-xs">Edit</button><button type="button" onClick={() => void remove(item)} className="setup-step text-xs">Delete</button></div></div></article>)}</div>
+      {visible.length === 0 && <p className="setup-option mt-4 rounded-xl p-4 text-sm setup-help">No Skills match this search.</p>}
+      {editing !== null && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><form onSubmit={save} className="w-full max-w-2xl rounded-xl border border-white/10 bg-[var(--background-base)] p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">{editing === 'new' ? 'Create Skill' : 'Edit Skill'}</h3><button type="button" onClick={() => setEditing(null)} className="setup-step">Close</button></div><label className="setup-label mt-5 block">Name<input required value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} className="setup-input mt-2 w-full" /></label><label className="setup-label mt-4 block">Description<input value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} className="setup-input mt-2 w-full" /></label><label className="setup-label mt-4 block">Instructions<textarea required value={form.instructions} onChange={event => setForm({ ...form, instructions: event.target.value })} className="setup-input mt-2 min-h-56 w-full" /></label><label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={form.enabled} onChange={event => setForm({ ...form, enabled: event.target.checked })} /> Enabled</label><button type="submit" className="setup-primary mt-5">Save Skill</button></form></div>}
+    </div>
+  )
+}
+
+function PromptCommandsSettings() {
+  const [items, setItems] = useState<readonly SubpolarPromptCommand[]>([])
+  const [query, setQuery] = useState('')
+  const [editing, setEditing] = useState<string | null>(null)
+  const [form, setForm] = useState<SubpolarPromptCommandInput>({ name: '', description: '', prompt: '', enabled: true })
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => { void promptCommands().then(result => setItems(result.commands)).catch(() => setError('Could not load Prompt Commands.')) }, [])
+  const visible = items.filter(item => `${item.name} ${item.description}`.toLowerCase().includes(query.toLowerCase()))
+  function edit(item: SubpolarPromptCommand) { setEditing(item.id); setForm({ name: item.name, description: item.description, prompt: item.prompt, enabled: item.enabled }) }
+  function newCommand() { setEditing('new'); setForm({ name: '', description: '', prompt: '', enabled: true }) }
+  async function save(event: FormEvent) { event.preventDefault(); setError(null); try { const result = editing === 'new' ? await createPromptCommand(form) : await updatePromptCommand(editing as string, form); setItems(current => editing === 'new' ? [...current, result.command] : current.map(item => item.id === result.command.id ? result.command : item)); setEditing(null) } catch { setError('Could not save Prompt Command.') } }
+  async function remove(item: SubpolarPromptCommand) { if (!window.confirm(`Delete /${item.name}?`)) return; try { await deletePromptCommand(item.id); setItems(current => current.filter(candidate => candidate.id !== item.id)) } catch { setError('Could not delete Prompt Command.') } }
+  return (
+    <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Prompt Commands</h2><p className="setup-help mt-1 text-sm">Shortcuts that expand into editable user input; they never change Agent instructions.</p></div><button type="button" onClick={newCommand} className="setup-primary">Create Command</button></div><input value={query} onChange={event => setQuery(event.target.value)} className="setup-input mt-6 w-full" placeholder="Search Prompt Commands..." />{error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}<div className="mt-4 space-y-2">{visible.map(item => <article key={item.id} className="setup-option rounded-xl p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">/{item.name}</h3><p className="setup-help mt-1 text-sm">{item.description || 'No description'}</p><p className="mt-2 text-xs">{item.enabled ? 'Enabled' : 'Disabled'}</p></div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => void updatePromptCommand(item.id, { enabled: !item.enabled }).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.command : candidate))).catch(() => setError('Could not update Prompt Command.'))} className="setup-step text-xs">{item.enabled ? 'Disable' : 'Enable'}</button><button type="button" onClick={() => edit(item)} className="setup-step text-xs">Edit</button><button type="button" onClick={() => void remove(item)} className="setup-step text-xs">Delete</button></div></div></article>)}</div>{visible.length === 0 && <p className="setup-option mt-4 rounded-xl p-4 text-sm setup-help">No Prompt Commands match this search.</p>}{editing !== null && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><form onSubmit={save} className="w-full max-w-2xl rounded-xl border border-white/10 bg-[var(--background-base)] p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">{editing === 'new' ? 'Create Prompt Command' : 'Edit Prompt Command'}</h3><button type="button" onClick={() => setEditing(null)} className="setup-step">Close</button></div><label className="setup-label mt-5 block">Command<input required pattern="[a-z0-9_-]+" value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} className="setup-input mt-2 w-full" placeholder="review" /></label><label className="setup-label mt-4 block">Description<input value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} className="setup-input mt-2 w-full" /></label><label className="setup-label mt-4 block">Prompt<textarea required value={form.prompt} onChange={event => setForm({ ...form, prompt: event.target.value })} className="setup-input mt-2 min-h-44 w-full" /></label><label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={form.enabled} onChange={event => setForm({ ...form, enabled: event.target.checked })} /> Enabled</label><button type="submit" className="setup-primary mt-5">Save Command</button></form></div>}</div>
   )
 }
 
@@ -415,6 +480,10 @@ export default function SettingsPage({ user, onLogout }: { user: SubpolarUser; o
             ) : (
               <ModelsSettings />
             )
+          ) : scope === 'agent' && section.id === 'skills' ? (
+            <SkillsSettings />
+          ) : scope === 'user' && section.id === 'prompt-commands' ? (
+            <PromptCommandsSettings />
           ) : (
             <>
               <h2 className="text-xl font-semibold">{section.label}</h2>

@@ -7,6 +7,10 @@ export type AgentPermissionPolicy = { readonly capabilityId: string; readonly po
 export type SubpolarCapability = { readonly capabilityId: string; readonly name: string; readonly description: string; readonly source: string; readonly capabilities: readonly unknown[] | Record<string, unknown>; readonly defaultPolicy: "allow" | "ask" | "deny" };
 export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly description: string; readonly icon: string; readonly instructions: string; readonly model?: string; readonly reasoningEffort?: string; readonly capabilities: readonly AgentCapabilityAssignment[]; readonly permissions: readonly AgentPermissionPolicy[]; readonly skillIds: readonly string[]; readonly createdAt: string };
 export type SubpolarAgentUpdate = Partial<Pick<SubpolarAgent, "name" | "description" | "icon" | "instructions" | "capabilities" | "permissions" | "skillIds">> & { readonly model?: string | null; readonly reasoningEffort?: string | null };
+export type SubpolarSkill = { readonly id: string; readonly ownerId: string; readonly name: string; readonly description: string; readonly instructions: string; readonly enabled: boolean; readonly createdAt: string; readonly updatedAt: string; readonly assignmentCount?: number };
+export type SubpolarSkillInput = { readonly name: string; readonly description: string; readonly instructions: string; readonly enabled: boolean };
+export type SubpolarPromptCommand = { readonly id: string; readonly ownerId: string; readonly name: string; readonly description: string; readonly prompt: string; readonly enabled: boolean; readonly createdAt: string; readonly updatedAt: string };
+export type SubpolarPromptCommandInput = { readonly name: string; readonly description: string; readonly prompt: string; readonly enabled: boolean };
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
@@ -130,6 +134,38 @@ export function getAgent(agentId: string): Promise<{ readonly agent: SubpolarAge
 
 export function deleteAgent(agentId: string): Promise<{ readonly deleted: true }> {
   return subpolarRequest(`/v1/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+}
+
+export function skills(): Promise<{ readonly skills: readonly SubpolarSkill[] }> {
+  return subpolarRequest("/v1/skills");
+}
+
+export function createSkill(input: SubpolarSkillInput): Promise<{ readonly skill: SubpolarSkill }> {
+  return subpolarRequest("/v1/skills", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateSkill(skillId: string, changes: Partial<SubpolarSkillInput>): Promise<{ readonly skill: SubpolarSkill }> {
+  return subpolarRequest(`/v1/skills/${encodeURIComponent(skillId)}`, { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+export function deleteSkill(skillId: string): Promise<{ readonly deleted: true }> {
+  return subpolarRequest(`/v1/skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
+}
+
+export function promptCommands(): Promise<{ readonly commands: readonly SubpolarPromptCommand[] }> {
+  return subpolarRequest("/v1/prompt-commands");
+}
+
+export function createPromptCommand(input: SubpolarPromptCommandInput): Promise<{ readonly command: SubpolarPromptCommand }> {
+  return subpolarRequest("/v1/prompt-commands", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updatePromptCommand(commandId: string, changes: Partial<SubpolarPromptCommandInput>): Promise<{ readonly command: SubpolarPromptCommand }> {
+  return subpolarRequest(`/v1/prompt-commands/${encodeURIComponent(commandId)}`, { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+export function deletePromptCommand(commandId: string): Promise<{ readonly deleted: true }> {
+  return subpolarRequest(`/v1/prompt-commands/${encodeURIComponent(commandId)}`, { method: "DELETE" });
 }
 
 export function effectiveAgent(agentId: string, projectId?: string): Promise<Record<string, unknown>> {

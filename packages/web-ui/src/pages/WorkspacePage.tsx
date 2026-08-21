@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from 'react'
 import {
   AppWindow,
   Bot,
@@ -31,7 +31,9 @@ import {
   createAgent,
   createProject,
   modelDefaults,
+  promptCommands,
   projects,
+  skills,
   sessionTranscript,
   sessions,
   updateAgent,
@@ -40,13 +42,17 @@ import {
   type SubpolarCapability,
   type SubpolarMessage,
   type SubpolarModelProvider,
+  type SubpolarPromptCommand,
   type SubpolarProject,
+  type SubpolarSkill,
   type SubpolarSession,
   type SubpolarUser
 } from '@/lib/subpolar-api'
 import { SubpolarWebSocketClient, type SubpolarSocketEvent } from '@/lib/subpolar-client'
 import { projectSubpolarActivity, subpolarEventType, type SubpolarActivityKind } from '@/lib/subpolar-events'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { AgentSkillPicker } from '@/components/AgentSkillPicker'
+import { PromptCommandComposer } from '@/components/PromptCommandComposer'
 
 type View = 'chat' | 'agents' | 'automations' | 'apps'
 type WorkspaceView = View | 'projects'
@@ -311,7 +317,7 @@ function Gallery({
   )
 }
 
-function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent; inventory?: readonly SubpolarCapability[] }) {
+function Detail({ kind, name, agent, inventory = [], skillInventory = [] }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent; inventory?: readonly SubpolarCapability[]; skillInventory?: readonly SubpolarSkill[] }) {
   const [draft, setDraft] = useState(agent)
   const [saved, setSaved] = useState(false)
   useEffect(() => setDraft(agent), [agent?.id])
@@ -355,7 +361,7 @@ function Detail({ kind, name, agent, inventory = [] }: { kind: 'agent' | 'automa
             <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Instructions</h2><textarea value={draft.instructions} onChange={event => setDraft({ ...draft, instructions: event.target.value })} onBlur={() => void save({ instructions: draft.instructions })} className="min-h-40 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3" /></section>
             <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Model</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.model ?? ''} onChange={event => setDraft({ ...draft, model: event.target.value })} onBlur={() => void save({ model: draft.model?.trim() || null })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Conversation default" /><select value={draft.reasoningEffort ?? ''} onChange={event => { const value = event.target.value || null; setDraft({ ...draft, reasoningEffort: value ?? undefined }); void save({ reasoningEffort: value }) }} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="">Default reasoning</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div><p className="mt-2 text-xs text-[#829b92]">A conversation can temporarily choose another model.</p></section>
             <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Tools & permissions</h2><p className="mb-3 text-xs text-[#829b92]">Capabilities are references to server-exposed tools; integration setup stays elsewhere.</p><div className="mb-3 flex gap-2"><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(false, 'allow')}>Set reads Allow</button><button className="rounded border border-white/15 px-2 py-1 text-xs" onClick={() => setBulkPolicy(true, 'ask')}>Set writes Ask</button></div>{(['Built-in', 'MCP', 'OpenAPI', 'Other'] as const).map(group => { const groupRows = grouped(group); return groupRows.length === 0 ? null : <div key={group} className="mb-4"><p className="mb-2 text-xs uppercase tracking-widest text-[#829b92]">{group}</p><div className="grid gap-2">{groupRows.map(capability => <div key={capability.capabilityId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 p-3"><div><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled.has(capability.capabilityId)} onChange={event => { const next = [...draft.capabilities.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, enabled: event.target.checked }]; const permissions = event.target.checked && !draft.permissions.some(item => item.capabilityId === capability.capabilityId) ? [...draft.permissions, { capabilityId: capability.capabilityId, policy: capability.defaultPolicy }] : draft.permissions; setDraft({ ...draft, capabilities: next, permissions }); void save({ capabilities: next, permissions }) }} />{capability.name}</label><p className="ml-6 text-xs text-[#829b92]">{capability.capabilityId} · {capability.description}</p></div>{enabled.has(capability.capabilityId) && <select value={policy(capability.capabilityId)} onChange={event => { const next = [...draft.permissions.filter(item => item.capabilityId !== capability.capabilityId), { capabilityId: capability.capabilityId, policy: event.target.value as 'allow' | 'ask' | 'deny' }]; setDraft({ ...draft, permissions: next }); void save({ permissions: next }) }} className="rounded border border-white/10 bg-[#091d1e] px-2 py-1 text-xs"><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select>}</div>)}</div></div> })}</section>
-            <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Skills</h2><textarea value={draft.skillIds.join('\n')} onChange={event => setDraft({ ...draft, skillIds: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} onBlur={() => void save({ skillIds: draft.skillIds })} placeholder="One assigned skill ID per line" className="min-h-20 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3 text-sm" /></section>
+            <AgentSkillPicker skills={skillInventory} assignedIds={draft.skillIds} onChange={skillIds => { setDraft({ ...draft, skillIds }); void save({ skillIds }) }} />
           </div>
         </div>
       </main>
@@ -515,7 +521,8 @@ function Chat({
   setProject,
   streaming,
   onSend,
-  onCancel
+  onCancel,
+  commandInventory
 }: {
   messages: readonly ChatMessage[]
   draft: string
@@ -536,13 +543,8 @@ function Chat({
   streaming: boolean
   onSend: () => void
   onCancel: () => void
+  commandInventory: readonly SubpolarPromptCommand[]
 }) {
-  function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault()
-      onSend()
-    }
-  }
   const control =
     'max-w-[11rem] appearance-none bg-transparent pr-5 text-xs font-medium text-[var(--color-muted-foreground,var(--midground-base))] outline-none disabled:opacity-50'
   return (
@@ -578,15 +580,7 @@ function Chat({
           </div>
         )}
         <div className="mx-auto max-w-4xl rounded-[1.35rem] border border-[color-mix(in_srgb,var(--midground-base)_16%,transparent)] bg-[var(--color-card,var(--background-base))] p-3 shadow-2xl shadow-black/30">
-          <textarea
-            value={draft}
-            onChange={event => setDraft(event.target.value)}
-            onKeyDown={keyDown}
-            disabled={streaming}
-            rows={3}
-            placeholder="Ask for follow-up changes or attach images"
-            className="min-h-20 w-full resize-none bg-transparent px-1 py-1 text-sm outline-none placeholder:text-[var(--color-muted-foreground,var(--midground-base))]"
-          />
+          <PromptCommandComposer draft={draft} setDraft={setDraft} commands={commandInventory} disabled={streaming} onSubmit={onSend} />
           <div className="flex flex-wrap items-center gap-2 pt-2">
             <div className="relative flex items-center gap-1.5 border-r border-[color-mix(in_srgb,var(--midground-base)_16%,transparent)] pr-3">
               <select
@@ -727,6 +721,8 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     [agentList, setAgentList] = useState<readonly SubpolarAgent[]>([]),
     [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([]),
     [capabilityInventory, setCapabilityInventory] = useState<readonly SubpolarCapability[]>([])
+  const [skillInventory, setSkillInventory] = useState<readonly SubpolarSkill[]>([])
+  const [commandInventory, setCommandInventory] = useState<readonly SubpolarPromptCommand[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false),
     [mobileOpen, setMobileOpen] = useState(false),
     [messages, setMessages] = useState<readonly ChatMessage[]>([]),
@@ -808,6 +804,10 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   }, [])
   useEffect(() => {
     void capabilities().then(result => setCapabilityInventory(result.capabilities)).catch(() => setCapabilityInventory([]))
+  }, [])
+  useEffect(() => {
+    void skills().then(result => setSkillInventory(result.skills)).catch(() => setSkillInventory([]))
+    void promptCommands().then(result => setCommandInventory(result.commands)).catch(() => setCommandInventory([]))
   }, [])
   useEffect(() => {
     void modelDefaults()
@@ -1049,6 +1049,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
               const id = requestRef.current
               if (id) void clientRef.current?.cancel(id)
             }}
+            commandInventory={commandInventory}
           />
         ) : view === 'projects' ? (
           <ProjectOverview projects={projectList} selectedProject={selectedProject} />
@@ -1072,6 +1073,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
             }
             agent={activeAgent}
             inventory={capabilityInventory}
+            skillInventory={skillInventory}
           />
         ) : (
           <Gallery

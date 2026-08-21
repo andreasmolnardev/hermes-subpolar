@@ -231,6 +231,33 @@
         "responses": { "200": { "description": "Effective configuration", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "Not found" } }
       }
     },
+    "/v1/skills": {
+      "get": {
+        "summary": "List owned Skills",
+        "security": [{ "sessionCookie": [] }],
+        "responses": { "200": { "description": "Skills", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Skills" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      },
+      "post": {
+        "summary": "Create an owned Skill",
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": { "$ref": "#/components/requestBodies/SkillCreate" },
+        "responses": { "201": { "description": "Skill", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidSkill" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
+      }
+    },
+    "/v1/skills/{skillId}": {
+      "get": { "summary": "Retrieve an owned Skill", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/SkillId" }], "responses": { "200": { "description": "Skill", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillEnvelope" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "patch": { "summary": "Update an owned Skill", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/SkillId" }], "requestBody": { "$ref": "#/components/requestBodies/SkillUpdate" }, "responses": { "200": { "description": "Skill", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidSkill" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } },
+      "delete": { "summary": "Delete an owned Skill and its Agent assignments", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/SkillId" }], "responses": { "200": { "description": "Deleted" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } }
+    },
+    "/v1/prompt-commands": {
+      "get": { "summary": "List owned Prompt Commands", "security": [{ "sessionCookie": [] }], "responses": { "200": { "description": "Prompt Commands", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommands" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } } },
+      "post": { "summary": "Create an owned Prompt Command", "security": [{ "sessionCookie": [] }], "requestBody": { "$ref": "#/components/requestBodies/PromptCommandCreate" }, "responses": { "201": { "description": "Prompt Command", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidPromptCommand" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } } }
+    },
+    "/v1/prompt-commands/{commandId}": {
+      "get": { "summary": "Retrieve an owned Prompt Command", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/CommandId" }], "responses": { "200": { "description": "Prompt Command", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandEnvelope" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "patch": { "summary": "Update an owned Prompt Command", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/CommandId" }], "requestBody": { "$ref": "#/components/requestBodies/PromptCommandUpdate" }, "responses": { "200": { "description": "Prompt Command", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidPromptCommand" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } },
+      "delete": { "summary": "Delete an owned Prompt Command", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/CommandId" }], "responses": { "200": { "description": "Deleted" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } }
+    },
     "/v1/capabilities": {
       "get": {
         "summary": "List server-exposed capabilities",
@@ -291,6 +318,8 @@
       "ProjectId": { "name": "projectId", "in": "query", "required": false, "schema": { "type": "string", "minLength": 1 } },
       "AgentId": { "name": "agentId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
       "SessionId": { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "SkillId": { "name": "skillId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "CommandId": { "name": "commandId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
       "ProviderId": { "name": "providerId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
       "ProviderModel": { "name": "model", "in": "query", "required": false, "schema": { "type": "string" } },
       "ProviderBaseUrl": { "name": "baseUrl", "in": "query", "required": false, "schema": { "type": "string", "format": "uri" } },
@@ -307,6 +336,10 @@
       "ProjectCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectCreate" } } } },
       "AgentCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentCreate" } } } },
       "AgentUpdate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentUpdate" } } } },
+      "SkillCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillCreate" } } } },
+      "SkillUpdate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillUpdate" } } } },
+      "PromptCommandCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandCreate" } } } },
+      "PromptCommandUpdate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandUpdate" } } } },
       "ChatRequest": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatRequest" } } } }
     },
     "responses": {
@@ -327,7 +360,9 @@
       "Configured": { "description": "Provider configured", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Configured" } } } },
       "InvalidTemplates": { "description": "Invalid templates", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidProject": { "description": "Invalid project", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "InvalidAgent": { "description": "Invalid agent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "InvalidAgent": { "description": "Invalid agent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "InvalidSkill": { "description": "Invalid Skill", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "InvalidPromptCommand": { "description": "Invalid Prompt Command", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
     },
     "schemas": {
       "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false },
@@ -354,6 +389,8 @@
       "OwnedSession": { "type": "object", "required": ["sessionId", "ownerId", "createdAt"], "properties": { "sessionId": { "type": "string" }, "ownerId": { "type": "string" }, "projectId": { "type": "string" }, "agentId": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "Projects": { "type": "object", "required": ["projects"], "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "additionalProperties": false },
       "Agents": { "type": "object", "required": ["agents"], "properties": { "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } } }, "additionalProperties": false },
+      "Skills": { "type": "object", "required": ["skills"], "properties": { "skills": { "type": "array", "items": { "$ref": "#/components/schemas/Skill" } } }, "additionalProperties": false },
+      "PromptCommands": { "type": "object", "required": ["commands"], "properties": { "commands": { "type": "array", "items": { "$ref": "#/components/schemas/PromptCommand" } } }, "additionalProperties": false },
       "Model": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string" }, "label": { "type": "string" } }, "additionalProperties": false },
       "ModelProvider": { "type": "object", "required": ["id", "models"], "properties": { "id": { "type": "string" }, "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } } }, "additionalProperties": false },
       "ModelCatalog": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/ModelProvider" } } }, "additionalProperties": false },
@@ -361,11 +398,19 @@
       "Sessions": { "type": "object", "required": ["sessions"], "properties": { "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/OwnedSession" } } }, "additionalProperties": false },
       "ProjectEnvelope": { "type": "object", "required": ["project"], "properties": { "project": { "$ref": "#/components/schemas/Project" } }, "additionalProperties": false },
       "AgentEnvelope": { "type": "object", "required": ["agent"], "properties": { "agent": { "$ref": "#/components/schemas/Agent" } }, "additionalProperties": false },
+      "SkillEnvelope": { "type": "object", "required": ["skill"], "properties": { "skill": { "$ref": "#/components/schemas/Skill" }, "assignmentCount": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+      "PromptCommandEnvelope": { "type": "object", "required": ["command"], "properties": { "command": { "$ref": "#/components/schemas/PromptCommand" } }, "additionalProperties": false },
       "InitialAgentsRequest": { "type": "object", "required": ["templates"], "properties": { "templates": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": true },
       "InitialAgents": { "type": "object", "required": ["project", "agents"], "properties": { "project": { "$ref": "#/components/schemas/Project" }, "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } } }, "additionalProperties": false },
       "ProjectCreate": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } }, "additionalProperties": true },
       "AgentCreate": { "type": "object", "required": ["projectId", "name", "instructions", "icon"], "properties": { "projectId": { "type": "string" }, "name": { "type": "string" }, "instructions": { "type": "string" }, "icon": { "type": "string", "pattern": "^[a-z-]{2,32}$" } }, "additionalProperties": true },
       "AgentUpdate": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "icon": { "type": "string" }, "instructions": { "type": "string" }, "model": { "type": ["string", "null"] }, "reasoningEffort": { "type": ["string", "null"] }, "capabilities": { "type": "array" }, "permissions": { "type": "array" }, "skillIds": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
+      "Skill": { "type": "object", "required": ["id", "ownerId", "name", "description", "instructions", "enabled", "createdAt", "updatedAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "name": { "type": "string", "minLength": 1, "maxLength": 128 }, "description": { "type": "string", "maxLength": 10000 }, "instructions": { "type": "string", "maxLength": 100000 }, "enabled": { "type": "boolean" }, "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "PromptCommand": { "type": "object", "required": ["id", "ownerId", "name", "description", "prompt", "enabled", "createdAt", "updatedAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "name": { "type": "string", "pattern": "^[a-z0-9_-]+$", "maxLength": 64 }, "description": { "type": "string", "maxLength": 10000 }, "prompt": { "type": "string", "minLength": 1, "maxLength": 100000 }, "enabled": { "type": "boolean" }, "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "SkillCreate": { "type": "object", "required": ["name", "instructions"], "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "instructions": { "type": "string" }, "enabled": { "type": "boolean" } }, "additionalProperties": false },
+      "SkillUpdate": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "instructions": { "type": "string" }, "enabled": { "type": "boolean" } }, "additionalProperties": false },
+      "PromptCommandCreate": { "type": "object", "required": ["name", "prompt"], "properties": { "name": { "type": "string", "pattern": "^[a-z0-9_-]+$" }, "description": { "type": "string" }, "prompt": { "type": "string" }, "enabled": { "type": "boolean" } }, "additionalProperties": false },
+      "PromptCommandUpdate": { "type": "object", "properties": { "name": { "type": "string", "pattern": "^[a-z0-9_-]+$" }, "description": { "type": "string" }, "prompt": { "type": "string" }, "enabled": { "type": "boolean" } }, "additionalProperties": false },
       "ChatMessage": { "type": "object", "required": ["role", "content"], "properties": { "role": { "enum": ["system", "user", "assistant"] }, "content": { "type": "string" } }, "additionalProperties": true },
       "ChatRequest": { "type": "object", "required": ["model", "messages"], "properties": { "model": { "type": "string", "minLength": 1 }, "messages": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/ChatMessage" } }, "stream": { "type": "boolean" }, "sessionId": { "type": "string" }, "projectId": { "type": "string" }, "agentId": { "type": "string" }, "permissionMode": { "enum": ["full", "ask", "read-only"] }, "reasoningEffort": { "enum": ["low", "medium", "high"] }, "requestId": { "type": "string" } }, "additionalProperties": true },
       "Transcript": { "type": "object", "required": ["session", "messages"], "properties": { "session": { "type": "object", "additionalProperties": true }, "messages": { "type": "array", "items": { "type": "object", "additionalProperties": true } } }, "additionalProperties": false },

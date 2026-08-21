@@ -11,6 +11,7 @@
   "dependencies": {
     "harness": "0.0.0",
     "tool-resolver": "0.0.0",
+    "tool-runtime": "0.0.0",
     "chat-provider-interface": "0.0.0",
     "data-layer": "0.0.0",
     "@hermes/shared": "0.0.0"

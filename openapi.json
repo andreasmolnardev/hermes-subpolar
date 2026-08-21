@@ -265,6 +265,27 @@
         "responses": { "200": { "description": "Capabilities", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
       }
     },
+    "/v1/integrations": {
+      "get": { "summary": "List owned MCP and OpenAPI integrations", "security": [{ "sessionCookie": [] }], "responses": { "200": { "description": "Integrations", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Integrations" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } } },
+      "post": { "summary": "Create an integration and discover its capabilities", "security": [{ "sessionCookie": [] }], "requestBody": { "$ref": "#/components/requestBodies/IntegrationCreate" }, "responses": { "201": { "description": "Integration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidIntegration" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } } }
+    },
+    "/v1/integrations/{integrationId}": {
+      "get": { "summary": "Retrieve an owned integration", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }], "responses": { "200": { "description": "Integration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationEnvelope" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "patch": { "summary": "Update an owned integration", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }], "requestBody": { "$ref": "#/components/requestBodies/IntegrationUpdate" }, "responses": { "200": { "description": "Integration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationEnvelope" } } } }, "400": { "$ref": "#/components/responses/InvalidIntegration" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } },
+      "delete": { "summary": "Delete an owned integration", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }], "responses": { "200": { "description": "Deleted" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } }
+    },
+    "/v1/integrations/{integrationId}/test": {
+      "post": { "summary": "Reconnect and rediscover an integration", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }], "responses": { "200": { "description": "Integration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationEnvelope" } } } }, "400": { "$ref": "#/components/responses/RequestFailed" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } }
+    },
+    "/v1/integrations/{integrationId}/oauth/start": {
+      "get": { "summary": "Start MCP OAuth authorization", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }], "responses": { "200": { "description": "Authorization URL", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OAuthStart" } } } }, "400": { "$ref": "#/components/responses/RequestFailed" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/v1/integrations/{integrationId}/oauth/callback": {
+      "get": { "summary": "Complete MCP OAuth authorization", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }, { "$ref": "#/components/parameters/OAuthState" }, { "$ref": "#/components/parameters/OAuthCode" }], "responses": { "303": { "description": "Redirect to integrations settings" }, "400": { "$ref": "#/components/responses/RequestFailed" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/v1/integrations/{integrationId}/oauth/revoke": {
+      "post": { "summary": "Revoke MCP OAuth credentials", "security": [{ "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/IntegrationId" }], "responses": { "200": { "description": "Integration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationEnvelope" } } } }, "400": { "$ref": "#/components/responses/RequestFailed" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/ForbiddenOrCsrf" } } }
+    },
     "/v1/sessions": {
       "get": {
         "summary": "List owned sessions",
@@ -323,6 +344,7 @@
       "ProviderId": { "name": "providerId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
       "ProviderModel": { "name": "model", "in": "query", "required": false, "schema": { "type": "string" } },
       "ProviderBaseUrl": { "name": "baseUrl", "in": "query", "required": false, "schema": { "type": "string", "format": "uri" } },
+      "IntegrationId": { "name": "integrationId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
       "OAuthState": { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } },
       "OAuthCode": { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } }
     },
@@ -340,6 +362,8 @@
       "SkillUpdate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillUpdate" } } } },
       "PromptCommandCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandCreate" } } } },
       "PromptCommandUpdate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromptCommandUpdate" } } } },
+      "IntegrationCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationCreate" } } } },
+      "IntegrationUpdate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrationUpdate" } } } },
       "ChatRequest": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatRequest" } } } }
     },
     "responses": {
@@ -362,7 +386,8 @@
       "InvalidProject": { "description": "Invalid project", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidAgent": { "description": "Invalid agent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidSkill": { "description": "Invalid Skill", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "InvalidPromptCommand": { "description": "Invalid Prompt Command", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "InvalidPromptCommand": { "description": "Invalid Prompt Command", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "InvalidIntegration": { "description": "Invalid integration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
     },
     "schemas": {
       "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false },
@@ -400,6 +425,12 @@
       "AgentEnvelope": { "type": "object", "required": ["agent"], "properties": { "agent": { "$ref": "#/components/schemas/Agent" } }, "additionalProperties": false },
       "SkillEnvelope": { "type": "object", "required": ["skill"], "properties": { "skill": { "$ref": "#/components/schemas/Skill" }, "assignmentCount": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
       "PromptCommandEnvelope": { "type": "object", "required": ["command"], "properties": { "command": { "$ref": "#/components/schemas/PromptCommand" } }, "additionalProperties": false },
+      "IntegrationCapability": { "type": "object", "required": ["capabilityId", "name", "description", "source", "capabilities", "integrationId"], "properties": { "capabilityId": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "source": { "type": "string" }, "capabilities": { "type": ["array", "object"] }, "integrationId": { "type": "string" } }, "additionalProperties": false },
+      "Integration": { "type": "object", "required": ["id", "ownerId", "name", "type", "enabled", "status", "config", "capabilities", "createdAt", "updatedAt"], "properties": { "id": { "type": "string" }, "ownerId": { "type": "string" }, "name": { "type": "string" }, "type": { "type": "string" }, "enabled": { "type": "boolean" }, "status": { "enum": ["connected", "disconnected", "authentication_required", "configuration_error", "unknown"] }, "config": { "type": "object", "additionalProperties": true }, "capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/IntegrationCapability" } }, "lastSuccessfulDiscovery": { "type": "string", "format": "date-time" }, "lastError": { "type": "string" }, "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "Integrations": { "type": "object", "required": ["integrations"], "properties": { "integrations": { "type": "array", "items": { "$ref": "#/components/schemas/Integration" } } }, "additionalProperties": false },
+      "IntegrationEnvelope": { "type": "object", "required": ["integration"], "properties": { "integration": { "$ref": "#/components/schemas/Integration" } }, "additionalProperties": false },
+      "IntegrationCreate": { "type": "object", "required": ["name", "type", "config"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 }, "type": { "type": "string", "minLength": 1 }, "enabled": { "type": "boolean" }, "config": { "type": "object", "additionalProperties": true }, "secrets": { "type": "object", "additionalProperties": true } }, "additionalProperties": false },
+      "IntegrationUpdate": { "type": "object", "properties": { "name": { "type": "string", "maxLength": 128 }, "type": { "type": "string" }, "enabled": { "type": "boolean" }, "config": { "type": "object", "additionalProperties": true }, "secrets": { "type": "object", "additionalProperties": true } }, "additionalProperties": false },
       "InitialAgentsRequest": { "type": "object", "required": ["templates"], "properties": { "templates": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": true },
       "InitialAgents": { "type": "object", "required": ["project", "agents"], "properties": { "project": { "$ref": "#/components/schemas/Project" }, "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" } } }, "additionalProperties": false },
       "ProjectCreate": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } }, "additionalProperties": true },

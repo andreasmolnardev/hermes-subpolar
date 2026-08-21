@@ -5,6 +5,9 @@ export type SubpolarProject = { readonly id: string; readonly ownerId: string; r
 export type AgentCapabilityAssignment = { readonly capabilityId: string; readonly enabled: boolean };
 export type AgentPermissionPolicy = { readonly capabilityId: string; readonly policy: "allow" | "ask" | "deny" };
 export type SubpolarCapability = { readonly capabilityId: string; readonly name: string; readonly description: string; readonly source: string; readonly capabilities: readonly unknown[] | Record<string, unknown>; readonly defaultPolicy: "allow" | "ask" | "deny" };
+export type SubpolarIntegrationCapability = { readonly capabilityId: string; readonly name: string; readonly description: string; readonly source: string; readonly capabilities: readonly string[] | Record<string, unknown>; readonly integrationId: string };
+export type SubpolarIntegration = { readonly id: string; readonly ownerId: string; readonly name: string; readonly type: string; readonly enabled: boolean; readonly status: "connected" | "disconnected" | "authentication_required" | "configuration_error" | "unknown"; readonly config: Record<string, unknown>; readonly capabilities: readonly SubpolarIntegrationCapability[]; readonly lastSuccessfulDiscovery?: string; readonly lastError?: string; readonly createdAt: string; readonly updatedAt: string };
+export type SubpolarIntegrationInput = { readonly name: string; readonly type: string; readonly enabled?: boolean; readonly config: Record<string, unknown>; readonly secrets?: Record<string, unknown> };
 export type SubpolarAgent = { readonly id: string; readonly ownerId: string; readonly projectId: string; readonly name: string; readonly description: string; readonly icon: string; readonly instructions: string; readonly model?: string; readonly reasoningEffort?: string; readonly capabilities: readonly AgentCapabilityAssignment[]; readonly permissions: readonly AgentPermissionPolicy[]; readonly skillIds: readonly string[]; readonly createdAt: string };
 export type SubpolarAgentUpdate = Partial<Pick<SubpolarAgent, "name" | "description" | "icon" | "instructions" | "capabilities" | "permissions" | "skillIds">> & { readonly model?: string | null; readonly reasoningEffort?: string | null };
 export type SubpolarSkill = { readonly id: string; readonly ownerId: string; readonly name: string; readonly description: string; readonly instructions: string; readonly enabled: boolean; readonly createdAt: string; readonly updatedAt: string; readonly assignmentCount?: number };
@@ -175,6 +178,34 @@ export function effectiveAgent(agentId: string, projectId?: string): Promise<Rec
 
 export function capabilities(): Promise<{ readonly capabilities: readonly SubpolarCapability[] }> {
   return subpolarRequest("/v1/capabilities");
+}
+
+export function integrations(): Promise<{ readonly integrations: readonly SubpolarIntegration[] }> {
+  return subpolarRequest("/v1/integrations");
+}
+
+export function createIntegration(input: SubpolarIntegrationInput): Promise<{ readonly integration: SubpolarIntegration }> {
+  return subpolarRequest("/v1/integrations", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateIntegration(integrationId: string, input: Partial<SubpolarIntegrationInput>): Promise<{ readonly integration: SubpolarIntegration }> {
+  return subpolarRequest(`/v1/integrations/${encodeURIComponent(integrationId)}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function deleteIntegration(integrationId: string): Promise<{ readonly deleted: true }> {
+  return subpolarRequest(`/v1/integrations/${encodeURIComponent(integrationId)}`, { method: "DELETE" });
+}
+
+export function testIntegration(integrationId: string): Promise<{ readonly integration: SubpolarIntegration }> {
+  return subpolarRequest(`/v1/integrations/${encodeURIComponent(integrationId)}/test`, { method: "POST" });
+}
+
+export function startIntegrationOAuth(integrationId: string): Promise<{ readonly authorizationUrl: string }> {
+  return subpolarRequest(`/v1/integrations/${encodeURIComponent(integrationId)}/oauth/start`);
+}
+
+export function revokeIntegrationOAuth(integrationId: string): Promise<{ readonly integration: SubpolarIntegration }> {
+  return subpolarRequest(`/v1/integrations/${encodeURIComponent(integrationId)}/oauth/revoke`, { method: "POST" });
 }
 
 export function sessions(): Promise<{ readonly sessions: readonly SubpolarSession[] }> {

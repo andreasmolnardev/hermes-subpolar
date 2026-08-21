@@ -2,6 +2,14 @@
 
 ## Current State
 
+- Added owner-configurable MCP and OpenAPI Integrations. MCP supports HTTP /
+  Streamable HTTP and stdio discovery, OpenAPI definitions can be supplied by
+  URL or content, and normalized capabilities flow through the existing Agent
+  capability-ID resolver. Integration secrets are encrypted server-side and
+  omitted from responses. Added connection health, reconnect/test, deletion,
+  OAuth state/token/revoke flow, API contracts, settings UI, and persistence
+  behavior coverage.
+
 - Split settings into User and Agent scopes. User settings now own account and
   interface preferences; Agent settings expose models, tools, skills, plugins,
   and memory without

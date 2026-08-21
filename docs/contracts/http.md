@@ -36,6 +36,13 @@ is rooted at `/v1`. The two `/api` paths are operational probes only.
 | POST | `/v1/projects` | session | origin + CSRF | Create a project |
 | GET | `/v1/agents` | session | none | `{agents}` |
 | POST | `/v1/agents` | session | origin + CSRF | Create an agent |
+| GET | `/v1/integrations` | session | none | `{integrations}` without secrets |
+| POST | `/v1/integrations` | session | origin + CSRF | Create MCP/OpenAPI integration |
+| GET/PATCH/DELETE | `/v1/integrations/{integrationId}` | session | read / origin + CSRF | Manage an integration |
+| POST | `/v1/integrations/{integrationId}/test` | session | origin + CSRF | Rediscover capabilities |
+| GET | `/v1/integrations/{integrationId}/oauth/start` | session | none | Begin MCP OAuth; server-bound state protects the flow |
+| GET | `/v1/integrations/{integrationId}/oauth/callback` | session | state | Complete MCP OAuth |
+| POST | `/v1/integrations/{integrationId}/oauth/revoke` | session | origin + CSRF | Revoke MCP OAuth |
 | GET | `/v1/sessions` | session | none | `{sessions}` |
 | GET | `/v1/sessions/{sessionId}` | session | none | `{session,messages}` |
 | POST | `/v1/chat/completions` | session | origin + CSRF | One completion or SSE |
@@ -92,6 +99,20 @@ needed.
 
 `POST /v1/projects` accepts `{name}`. `POST /v1/agents` accepts
 `{projectId,name,instructions}`. Creation returns the wrapped record with `201`.
+
+## Integrations
+
+Integrations are owner-scoped global configuration. Supported initial types are
+`mcp` with `http`/streamable HTTP or `stdio` transport, and `openapi`. The
+configuration response contains normalized capability metadata, status, and
+discovery timestamps, but never secret values. Agents store only selected
+capability IDs; `/v1/capabilities` exposes the discovered definitions that the
+resolver can enforce at runtime.
+
+Create and update requests use `{name,type,enabled,config,secrets}`. `secrets`
+may contain MCP environment values or headers, bearer/API-key values, and OAuth
+client secrets. They are encrypted server-side and are write-only. OAuth state
+is server-bound, short-lived, owner-bound, and single-use.
 
 ## Chat Requests
 

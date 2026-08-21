@@ -5,6 +5,134 @@ export type McpTransport = {
   close?: () => void | Promise<void>;
 };
 
+export type McpHttpTransportOptions = {
+  readonly endpoint: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly fetch?: typeof fetch;
+};
+
+/** A small Streamable HTTP transport. It deliberately accepts JSON and SSE responses. */
+export function createMcpHttpTransport(options: McpHttpTransportOptions): McpTransport {
+  const endpoint = new URL(options.endpoint);
+  if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(endpoint.hostname))) {
+    throw new TypeError("MCP HTTP endpoint must use HTTPS");
+  }
+  if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new TypeError("MCP endpoint must not contain credentials or query state");
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(value)) throw new TypeError("MCP headers are invalid");
+  }
+  let sessionId: string | undefined;
+  return {
+    async request(method, params, signal) {
+      const response = await (options.fetch ?? fetch)(endpoint, {
+        method: "POST",
+        headers: { accept: "application/json, text/event-stream", "content-type": "application/json", ...options.headers, ...(sessionId === undefined ? {} : { "mcp-session-id": sessionId }) },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        redirect: "error",
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (!response.ok) throw new Error(`MCP HTTP request failed (${response.status})`);
+      sessionId = response.headers.get("mcp-session-id") ?? sessionId;
+      const text = await response.text();
+      if (text.trim().length === 0) return {};
+      if (response.headers.get("content-type")?.includes("text/event-stream")) {
+        const data = text.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).filter(Boolean).at(-1);
+        if (data === undefined) throw new Error("MCP stream response is invalid");
+        return JSON.parse(data) as unknown;
+      }
+      return JSON.parse(text) as unknown;
+    },
+  };
+}
+
+export type McpStdioTransportOptions = {
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly spawn?: (command: string, options: McpStdioSpawnOptions) => McpStdioProcess;
+};
+
+export type McpStdioSpawnOptions = {
+  readonly stdin: "pipe";
+  readonly stdout: "pipe";
+  readonly stderr: "ignore";
+  readonly env: Readonly<Record<string, string | undefined>>;
+};
+
+type McpStdioProcess = {
+  readonly stdin: { write(chunk: Uint8Array): number | Promise<unknown> };
+  readonly stdout: ReadableStream<Uint8Array>;
+  kill(): unknown;
+};
+
+/** JSON-lines plus Content-Length framing, for MCP stdio servers. */
+export function createMcpStdioTransport(options: McpStdioTransportOptions): McpTransport {
+  if (!options.command.trim() || /[\r\n]/.test(options.command)) throw new TypeError("MCP command is invalid");
+  const child = (options.spawn ?? ((command, spawnOptions) => Bun.spawn([command, ...(options.args ?? [])], spawnOptions as never) as unknown as McpStdioProcess))(options.command, {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { ...globalThis.process?.env, ...options.env },
+  });
+  const reader = child.stdout.getReader();
+  const writer = child.stdin;
+  let buffer = new Uint8Array();
+  let nextId = 1;
+  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  let reading = false;
+  const append = (chunk: Uint8Array) => { const next = new Uint8Array(buffer.length + chunk.length); next.set(buffer); next.set(chunk, buffer.length); buffer = next; };
+  const take = (): unknown | undefined => {
+    const text = new TextDecoder().decode(buffer);
+    const separator = text.indexOf("\r\n\r\n");
+    if (separator >= 0 && text.slice(0, separator).toLowerCase().includes("content-length:")) {
+      const length = Number(/content-length:\s*(\d+)/i.exec(text.slice(0, separator))?.[1]);
+      const start = separator + 4;
+      const encoded = new TextEncoder().encode(text.slice(start));
+      if (!Number.isFinite(length) || encoded.length < length) return undefined;
+      const payload = new TextDecoder().decode(encoded.slice(0, length));
+      buffer = encoded.slice(length);
+      return JSON.parse(payload) as unknown;
+    }
+    const newline = text.indexOf("\n");
+    if (newline < 0) return undefined;
+    const payload = text.slice(0, newline).trim();
+    buffer = new TextEncoder().encode(text.slice(newline + 1));
+    return payload.length === 0 ? take() : JSON.parse(payload) as unknown;
+  };
+  const readLoop = async (): Promise<void> => {
+    if (reading) return;
+    reading = true;
+    try {
+      while (true) {
+        const next = take();
+        if (next !== undefined) {
+          if (isRecord(next) && typeof next.id === "number") pending.get(next.id)?.resolve(next);
+          continue;
+        }
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("MCP stdio server disconnected");
+        append(chunk.value);
+      }
+    } catch (error) {
+      for (const item of pending.values()) item.reject(error instanceof Error ? error : new Error("MCP stdio request failed"));
+      pending.clear();
+    } finally { reading = false; }
+  };
+  return {
+    async request(method, params, signal) {
+      const id = nextId++;
+      const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+      const bytes = new TextEncoder().encode(payload);
+      await writer.write(new TextEncoder().encode(`Content-Length: ${bytes.length}\r\n\r\n${payload}`));
+      const result = new Promise<unknown>((resolve, reject) => pending.set(id, { resolve, reject }));
+      void readLoop();
+      if (signal === undefined) return result;
+      return Promise.race([result, new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new DOMException("MCP request cancelled", "AbortError")), { once: true }))]);
+    },
+    async close() { for (const item of pending.values()) item.reject(new Error("MCP transport closed")); pending.clear(); child.kill(); reader.releaseLock(); },
+  };
+}
+
 export type McpToolOptions = {
   readonly serverName: string;
   readonly transport: McpTransport;

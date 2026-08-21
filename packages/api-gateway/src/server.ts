@@ -13,6 +13,7 @@ import {
   type AuthSession,
   type SessionRecord,
   type AgentConfigurationInput,
+  type IntegrationInput,
   type SkillInput,
   type PromptCommandInput,
 } from "data-layer";
@@ -21,6 +22,7 @@ import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, 
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
+import { IntegrationManager } from "./integrations";
 import {
   beginDeviceOAuth,
   beginProviderOAuth,
@@ -196,6 +198,25 @@ function parseAgentUpdate(value: unknown): AgentConfigurationInput {
   };
 }
 
+function parseIntegrationInput(value: unknown, partial = false): IntegrationInput | Partial<IntegrationInput> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("integration must be an object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["name", "type", "enabled", "config", "secrets"]);
+  if (Object.keys(record).some(key => !allowed.has(key))) throw new TypeError("integration field is unsupported");
+  if (!partial && (typeof record.name !== "string" || typeof record.type !== "string" || typeof record.config !== "object" || record.config === null || Array.isArray(record.config))) throw new TypeError("integration name, type, and config are required");
+  if (record.name !== undefined && (typeof record.name !== "string" || record.name.length > 128)) throw new TypeError("integration name is invalid");
+  if (record.type !== undefined && (typeof record.type !== "string" || record.type.length > 64)) throw new TypeError("integration type is invalid");
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") throw new TypeError("integration enabled state is invalid");
+  for (const key of ["config", "secrets"] as const) if (record[key] !== undefined && (typeof record[key] !== "object" || record[key] === null || Array.isArray(record[key]))) throw new TypeError("integration data is invalid");
+  return {
+    ...(record.name === undefined ? {} : { name: record.name as string }),
+    ...(record.type === undefined ? {} : { type: record.type as string }),
+    ...(record.enabled === undefined ? {} : { enabled: record.enabled as boolean }),
+    ...(record.config === undefined ? {} : { config: record.config as Record<string, unknown> }),
+    ...(record.secrets === undefined ? {} : { secrets: record.secrets as Record<string, unknown> }),
+  } as IntegrationInput | Partial<IntegrationInput>;
+}
+
 function parseSkillInput(value: unknown, partial = false): SkillInput | Partial<SkillInput> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("skill must be an object");
   const record = value as Record<string, unknown>;
@@ -317,6 +338,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const databasePath = join(dataDir, "state.db");
   const sessions = new SQLiteSessionRepository(databasePath);
   const identity = new SQLiteIdentityRepository(databasePath);
+  const integrations = new IntegrationManager(identity);
   const persistence = createGatewayPersistenceAdapter(sessions);
   const gateway = createGateway({ sessionRepository: persistence, persistence });
   const activeTurns = new Set<AbortController>();
@@ -346,15 +368,16 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     return () => activeTurns.delete(controller);
   };
 
-  const resolveEffectiveAgentConfiguration = (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {
+  const resolveEffectiveAgentConfiguration = async (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {
+    const toolDefinitions: readonly ToolDefinition[] = [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(principal.id))];
     const projectOverride = projectId === undefined ? null : identity.getAgentProjectOverride(principal.id, projectId, agent.id);
     const model = requestedModel !== "default" ? requestedModel : projectOverride?.model ?? agent.model;
     const effectiveCapabilities = projectOverride?.capabilities ?? agent.capabilities;
     const effectivePermissions = projectOverride?.permissions ?? agent.permissions;
     const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
-      ? (options.toolDefinitions ?? []).map(definition => definition.capabilityId ?? definition.name)
+      ? toolDefinitions.map(definition => definition.capabilityId ?? definition.name)
       : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
-    const tools = resolveAgentToolDescriptors(options.toolDefinitions ?? [], {
+    const tools = resolveAgentToolDescriptors(toolDefinitions, {
       userId: principal.id,
       sessionId,
       ...(projectId === undefined ? {} : { projectId }),
@@ -373,7 +396,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const sessionId = input.sessionId ?? randomUUID();
     const agent = input.agentId === undefined ? null : identity.getAgent(principal.id, input.agentId);
     if (input.agentId !== undefined && agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
-    const effectiveAgent = agent === null ? null : resolveEffectiveAgentConfiguration(principal, agent, sessionId, input.projectId, input.model, input.reasoningEffort, input.permissionMode);
+    const effectiveAgent = agent === null ? null : await resolveEffectiveAgentConfiguration(principal, agent, sessionId, input.projectId, input.model, input.reasoningEffort, input.permissionMode);
     const selectedModel = effectiveAgent?.model ?? agent?.model;
     const effectiveModel = selectedModel ?? (options.provider === undefined ? identity.providerConnection()?.model ?? input.model : input.model);
     const explicitReasoning = input.reasoningEffort;
@@ -402,7 +425,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       }
       return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
     }
-    return { input: { ...input, model: effectiveModel }, sessionId, tools: options.toolDefinitions ?? [], ...(explicitReasoning === undefined ? {} : { reasoningEffort: explicitReasoning }) };
+    return { input: { ...input, model: effectiveModel }, sessionId, tools: [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(principal.id))], ...(explicitReasoning === undefined ? {} : { reasoningEffort: explicitReasoning }) };
   };
 
   const executeTurn = async (
@@ -612,7 +635,70 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       if (url.pathname === "/v1/capabilities" && request.method === "GET") {
         const auth = authenticated(request, identity);
         if (auth instanceof Response) return auth;
-        return json({ capabilities: (options.toolDefinitions ?? []).map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow" })) });
+        const definitions = [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(auth.principal.id))];
+        return json({ capabilities: definitions.map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow" })) });
+      }
+
+      if (url.pathname === "/v1/integrations" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        return auth instanceof Response ? auth : json({ integrations: identity.listIntegrations(auth.principal.id) });
+      }
+
+      if (url.pathname === "/v1/integrations" && request.method === "POST") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const value = await body(request, maxRequestBytes);
+          const created = identity.createIntegration(auth.principal.id, parseIntegrationInput(value));
+          return json({ integration: await integrations.discover(auth.principal.id, created.id) }, 201);
+        } catch { return json({ error: "invalid_integration" }, 400); }
+      }
+
+      const integrationPath = /^\/v1\/integrations\/([^/]+)(?:\/(discover|test|oauth\/start|oauth\/callback|oauth\/revoke))?$/.exec(url.pathname);
+      if (integrationPath !== null) {
+        const integrationId = decodeURIComponent(integrationPath[1] as string);
+        const action = integrationPath[2];
+        if (action === "oauth/callback" && request.method === "GET") {
+          const auth = authenticated(request, identity);
+          if (auth instanceof Response) return auth;
+          const state = url.searchParams.get("state");
+          const code = url.searchParams.get("code");
+          if (state === null || code === null) return json({ error: "oauth_callback_invalid" }, 400);
+          try {
+            await integrations.completeOAuth(auth.principal.id, integrationId, code, state, `${url.origin}/v1/integrations/${encodeURIComponent(integrationId)}/oauth/callback`);
+            return Response.redirect(`${url.origin}/settings/agent/integrations?connected=1`, 303);
+          } catch { return json({ error: "oauth_exchange_failed" }, 400); }
+        }
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        if (action === undefined) {
+          if (request.method === "GET") {
+            const integration = identity.getIntegration(auth.principal.id, integrationId);
+            return integration === null ? json({ error: "not_found" }, 404) : json({ integration });
+          }
+          if (request.method === "DELETE") {
+            try { await integrations.closeTransport(`${auth.principal.id}:${integrationId}`); identity.deleteIntegration(auth.principal.id, integrationId); return json({ deleted: true }); }
+            catch { return json({ error: "not_found" }, 404); }
+          }
+          if (request.method === "PATCH") {
+            try { const value = await body(request, maxRequestBytes); const integration = identity.updateIntegration(auth.principal.id, integrationId, parseIntegrationInput(value, true)); integrations.invalidate(auth.principal.id, integrationId); return json({ integration }); }
+            catch { return json({ error: "invalid_integration" }, 400); }
+          }
+          return json({ error: "method_not_allowed" }, 405);
+        }
+        if ((action === "discover" || action === "test") && (request.method === "POST" || request.method === "GET")) {
+          try { return json({ integration: await integrations.test(auth.principal.id, integrationId) }); }
+          catch { return json({ error: "integration_test_failed" }, 400); }
+        }
+        if (action === "oauth/start" && request.method === "GET") {
+          try { return json(identity.beginIntegrationOAuth(auth.principal.id, integrationId, `${url.origin}/v1/integrations/${encodeURIComponent(integrationId)}/oauth/callback`)); }
+          catch { return json({ error: "oauth_start_failed" }, 400); }
+        }
+        if (action === "oauth/revoke" && request.method === "POST") {
+          try { return json({ integration: await integrations.revokeOAuth(auth.principal.id, integrationId) }); }
+          catch { return json({ error: "oauth_revoke_failed" }, 400); }
+        }
+        return json({ error: "method_not_allowed" }, 405);
       }
 
       const providerModelsPath = /^\/v1\/providers\/([^/]+)\/models$/.exec(url.pathname);
@@ -750,7 +836,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const sessionId = url.searchParams.get("sessionId") ?? randomUUID();
         const projectId = url.searchParams.get("projectId") ?? agent.projectId;
         if (projectId !== agent.projectId) return json({ error: "forbidden" }, 403);
-        const effective = resolveEffectiveAgentConfiguration(auth.principal, agent, sessionId, projectId, "default", undefined, undefined);
+        const effective = await resolveEffectiveAgentConfiguration(auth.principal, agent, sessionId, projectId, "default", undefined, undefined);
         return json({ agent, model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })), skills: effective.skills.map(skill => ({ id: skill.id, name: skill.name })) });
       }
 
@@ -929,6 +1015,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       try {
         await server.stop(true);
       } finally {
+        await integrations.closeAll();
         sessions.close();
         identity.close();
       }

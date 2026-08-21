@@ -1,7 +1,27 @@
 import { strict as assert } from "node:assert";
 import { test } from "bun:test";
 
-import { createMcpToolDefinitions } from "../src/index.ts";
+import { createMcpHttpTransport, createMcpToolDefinitions } from "../src/index.ts";
+
+test("MCP HTTP transport preserves server sessions and accepts JSON responses", async () => {
+  const requests: Request[] = [];
+  let call = 0;
+  const transport = createMcpHttpTransport({
+    endpoint: "https://mcp.example.test/mcp",
+    headers: { "x-test": "ok" },
+    fetch: async input => {
+      const request = input instanceof Request ? input : new Request(input);
+      requests.push(request);
+      call += 1;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } }), { headers: { "content-type": "application/json", "mcp-session-id": "session-1" } });
+    },
+  });
+  await transport.request("initialize", {});
+  await transport.request("tools/list", {});
+  assert.equal(requests[0]?.headers.get("x-test"), "ok");
+  assert.equal(requests[1]?.headers.get("mcp-session-id"), "session-1");
+  assert.equal(call, 2);
+});
 
 test("MCP discovery creates correlated native tool handles", async () => {
   const calls: unknown[] = [];

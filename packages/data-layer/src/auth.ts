@@ -134,6 +134,41 @@ export type ProviderCredentials = {
   readonly arguments?: readonly string[];
 };
 
+export type IntegrationType = "mcp" | "openapi" | (string & {});
+export type IntegrationStatus = "connected" | "disconnected" | "authentication_required" | "configuration_error" | "unknown";
+export type IntegrationCapabilityRecord = {
+  readonly capabilityId: string;
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly capabilities: readonly string[] | Record<string, unknown>;
+  readonly integrationId: string;
+};
+export type IntegrationRecord = {
+  readonly id: string;
+  readonly ownerId: string;
+  readonly name: string;
+  readonly type: IntegrationType;
+  readonly enabled: boolean;
+  readonly status: IntegrationStatus;
+  readonly config: Record<string, unknown>;
+  readonly capabilities: readonly IntegrationCapabilityRecord[];
+  readonly lastSuccessfulDiscovery?: string;
+  readonly lastError?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+export type IntegrationInput = {
+  readonly name: string;
+  readonly type: IntegrationType;
+  readonly enabled?: boolean;
+  readonly config: Record<string, unknown>;
+  /** Never returned; values are encrypted before persistence. */
+  readonly secrets?: Record<string, unknown>;
+};
+export type IntegrationRuntimeConfig = { readonly integration: IntegrationRecord; readonly secrets: Record<string, unknown> };
+export type IntegrationOAuthState = { readonly integrationId: string; readonly ownerId: string; readonly redirectUri: string; readonly codeVerifier: string };
+
 export type ProviderOAuthState = {
   readonly state: string;
   readonly ownerId: string;
@@ -314,6 +349,41 @@ CREATE TABLE IF NOT EXISTS user_model_defaults (
   image TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS integrations (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  secrets_ciphertext TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'unknown',
+  last_successful_discovery TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_integrations_owner ON integrations(owner_id, updated_at, id);
+CREATE TABLE IF NOT EXISTS integration_capabilities (
+  integration_id TEXT NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+  capability_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  source TEXT NOT NULL,
+  capabilities_json TEXT NOT NULL,
+  PRIMARY KEY (integration_id, capability_id)
+);
+CREATE TABLE IF NOT EXISTS integration_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  integration_id TEXT NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  redirect_uri TEXT NOT NULL,
+  code_verifier_ciphertext TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_oauth_expiry ON integration_oauth_states(expires_at);
 `;
 
 // Keep persistence independent from the runtime/profile package boundary.
@@ -332,12 +402,19 @@ const CREDENTIAL_IV_BYTES = 12;
 const CREDENTIAL_TAG_BYTES = 16;
 const CREDENTIAL_KEY_FILE = "provider-credentials.key";
 const CREDENTIAL_AAD = Buffer.from("hermes.provider-credential.v1");
+const INTEGRATION_CREDENTIAL_AAD = Buffer.from("hermes.integration-credential.v1");
 
 type ProviderRow = {
   provider: string;
   base_url: string;
   credential_ciphertext: string;
   model: string;
+};
+
+type IntegrationRow = {
+  id: string; owner_id: string; name: string; type: string; config_json: string; secrets_ciphertext: string;
+  enabled: number; status: string; last_successful_discovery: string | null; last_error: string | null;
+  created_at: string; updated_at: string;
 };
 
 function isFileNotFound(error: unknown): boolean {
@@ -369,15 +446,21 @@ function providerCredentialKey(path: string | null, createIfMissing: boolean): B
   }
 }
 
-function encryptCredential(credentials: ProviderCredentials, key: Buffer): string {
+function encryptJson(value: object, key: Buffer, aad: Buffer): string {
   const iv = randomBytes(CREDENTIAL_IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(CREDENTIAL_AAD);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(credentials), "utf8"), cipher.final()]);
+  cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
   return [iv, cipher.getAuthTag(), ciphertext].map(part => part.toString("base64url")).join(".");
 }
 
+function encryptCredential(credentials: ProviderCredentials, key: Buffer): string { return encryptJson(credentials, key, CREDENTIAL_AAD); }
+
 function decryptCredential(value: string, key: Buffer): ProviderCredentials {
+  return decryptJson(value, key, CREDENTIAL_AAD) as ProviderCredentials;
+}
+
+function decryptJson(value: string, key: Buffer, aad: Buffer): Record<string, unknown> {
   try {
     const parts = value.split(".");
     if (parts.length !== 3) throw new Error("invalid credential");
@@ -388,13 +471,13 @@ function decryptCredential(value: string, key: Buffer): ProviderCredentials {
       throw new Error("invalid credential");
     }
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
-    decipher.setAAD(CREDENTIAL_AAD);
+    decipher.setAAD(aad);
     decipher.setAuthTag(tag);
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
     if (plaintext.trim().length === 0) throw new Error("invalid credential");
     try {
       const parsed: unknown = JSON.parse(plaintext);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as ProviderCredentials;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
     } catch {
       // Credentials written before the provider registry stored the API key directly.
     }
@@ -403,6 +486,9 @@ function decryptCredential(value: string, key: Buffer): ProviderCredentials {
     throw new Error("provider credential is unavailable");
   }
 }
+
+function encryptIntegrationSecrets(secrets: Record<string, unknown>, key: Buffer): string { return encryptJson(secrets, key, INTEGRATION_CREDENTIAL_AAD); }
+function decryptIntegrationSecrets(value: string, key: Buffer): Record<string, unknown> { return decryptJson(value, key, INTEGRATION_CREDENTIAL_AAD); }
 
 function providerSlug(value: unknown): string {
   if (typeof value !== "string") throw new Error("provider is invalid");
@@ -475,6 +561,19 @@ function expires(): string {
 function required(value: string | undefined, label: string): string {
   if (value === undefined || value.length === 0) throw new Error(`${label} is invalid`);
   return value;
+}
+
+function integrationStatus(value: string): IntegrationStatus {
+  if (value === "connected" || value === "disconnected" || value === "authentication_required" || value === "configuration_error" || value === "unknown") return value;
+  return "unknown";
+}
+
+function jsonRecord(value: string, label: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch { /* redacted invalid persisted data is treated as unavailable */ }
+  throw new Error(`${label} is invalid`);
 }
 
 export class SQLiteIdentityRepository {
@@ -572,6 +671,159 @@ export class SQLiteIdentityRepository {
 
   private key(createIfMissing = false): Buffer {
     return this.credentialKey ??= providerCredentialKey(this.credentialKeyPath, createIfMissing);
+  }
+
+  private integrationFromRow(row: IntegrationRow, includeSecrets = false): IntegrationRecord | IntegrationRuntimeConfig {
+    const capabilities = this.db.query<{ capability_id: string; name: string; description: string; source: string; capabilities_json: string }, [string]>(
+      "SELECT capability_id, name, description, source, capabilities_json FROM integration_capabilities WHERE integration_id = ? ORDER BY capability_id",
+    ).all(row.id).map(item => ({
+      capabilityId: item.capability_id,
+      name: item.name,
+      description: item.description,
+      source: item.source,
+      capabilities: JSON.parse(item.capabilities_json) as readonly string[] | Record<string, unknown>,
+      integrationId: row.id,
+    }));
+    const integration: IntegrationRecord = {
+      id: row.id,
+      ownerId: row.owner_id,
+      name: row.name,
+      type: row.type,
+      enabled: row.enabled === 1,
+      status: integrationStatus(row.status),
+      config: jsonRecord(row.config_json, "integration config"),
+      capabilities,
+      ...(row.last_successful_discovery === null ? {} : { lastSuccessfulDiscovery: row.last_successful_discovery }),
+      ...(row.last_error === null ? {} : { lastError: row.last_error }),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+    if (!includeSecrets) return integration;
+    return { integration, secrets: decryptIntegrationSecrets(row.secrets_ciphertext, this.key()) };
+  }
+
+  private integrationRow(userId: string, integrationId: string): IntegrationRow | null {
+    return this.db.query<IntegrationRow, [string, string]>("SELECT id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, last_successful_discovery, last_error, created_at, updated_at FROM integrations WHERE id = ? AND owner_id = ?").get(integrationId, userId);
+  }
+
+  listIntegrations(userId: string): readonly IntegrationRecord[] {
+    return this.db.query<IntegrationRow, [string]>("SELECT id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, last_successful_discovery, last_error, created_at, updated_at FROM integrations WHERE owner_id = ? ORDER BY created_at, id").all(userId).map(row => this.integrationFromRow(row) as IntegrationRecord);
+  }
+
+  getIntegration(userId: string, integrationId: string): IntegrationRecord | null {
+    const row = this.integrationRow(userId, integrationId);
+    return row === null ? null : this.integrationFromRow(row) as IntegrationRecord;
+  }
+
+  getIntegrationRuntimeConfig(userId: string, integrationId: string): IntegrationRuntimeConfig | null {
+    const row = this.integrationRow(userId, integrationId);
+    return row === null ? null : this.integrationFromRow(row, true) as IntegrationRuntimeConfig;
+  }
+
+  createIntegration(userId: string, input: IntegrationInput): IntegrationRecord {
+    if (!input.name.trim() || input.name.length > 128 || !input.type.trim() || typeof input.config !== "object" || input.config === null || Array.isArray(input.config)) throw new Error("integration is invalid");
+    if (!this.tableExists("users") || this.db.query<{ id: string }, [string]>("SELECT id FROM users WHERE id = ?").get(userId) === null) throw new OwnershipError();
+    const id = randomUUID();
+    const at = now();
+    const safeConfig = this.safeIntegrationConfig(input.config, input.secrets ?? {});
+    this.db.run("INSERT INTO integrations (id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)", [id, userId, input.name.trim(), input.type.trim(), JSON.stringify(safeConfig), encryptIntegrationSecrets(input.secrets ?? {}, this.key(true)), input.enabled === false ? 0 : 1, at, at]);
+    return this.getIntegration(userId, id) as IntegrationRecord;
+  }
+
+  updateIntegration(userId: string, integrationId: string, input: Partial<IntegrationInput>): IntegrationRecord {
+    const existing = this.getIntegrationRuntimeConfig(userId, integrationId);
+    if (existing === null) throw new OwnershipError();
+    const name = input.name === undefined ? existing.integration.name : input.name.trim();
+    if (!name || name.length > 128) throw new Error("integration name is invalid");
+    const secrets = input.secrets === undefined ? existing.secrets : { ...existing.secrets, ...input.secrets };
+    const config = input.config === undefined ? existing.integration.config : this.safeIntegrationConfig(input.config, secrets);
+    this.db.run("UPDATE integrations SET name = ?, type = ?, config_json = ?, secrets_ciphertext = ?, enabled = ?, updated_at = ?, status = 'unknown', last_error = NULL WHERE id = ? AND owner_id = ?", [name, input.type?.trim() ?? existing.integration.type, JSON.stringify(config), encryptIntegrationSecrets(secrets, this.key(true)), input.enabled === undefined ? (existing.integration.enabled ? 1 : 0) : input.enabled ? 1 : 0, now(), integrationId, userId]);
+    return this.getIntegration(userId, integrationId) as IntegrationRecord;
+  }
+
+  deleteIntegration(userId: string, integrationId: string): void {
+    const result = this.db.run("DELETE FROM integrations WHERE id = ? AND owner_id = ?", [integrationId, userId]);
+    if (result.changes === 0) throw new OwnershipError();
+  }
+
+  private safeIntegrationConfig(config: Record<string, unknown>, secrets: Record<string, unknown>): Record<string, unknown> {
+    const redact = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(redact);
+      if (typeof value !== "object" || value === null) return value;
+      const sensitiveKeys = new Set(["token", "accesstoken", "refreshtoken", "secret", "clientsecret", "password", "apikey", "api_key", "authorization", "privatekey", "private_key", "headers", "environment", "env"]);
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !sensitiveKeys.has(key.toLowerCase())).map(([key, item]) => [key, redact(item)]));
+    };
+    const safe = redact(config) as Record<string, unknown>;
+    const headers = secrets.headers;
+    const environment = secrets.environment ?? secrets.env;
+    if (typeof headers === "object" && headers !== null && !Array.isArray(headers)) safe.headerNames = Object.keys(headers);
+    if (typeof environment === "object" && environment !== null && !Array.isArray(environment)) safe.environmentVariableNames = Object.keys(environment);
+    if (typeof secrets.token === "string" || typeof secrets.apiKey === "string" || typeof secrets.accessToken === "string") safe.authConfigured = true;
+    return safe;
+  }
+
+  setIntegrationDiscovery(userId: string, integrationId: string, status: IntegrationStatus, capabilities: readonly Omit<IntegrationCapabilityRecord, "integrationId">[], error?: string): IntegrationRecord {
+    const row = this.integrationRow(userId, integrationId);
+    if (row === null) throw new OwnershipError();
+    const at = now();
+    this.db.run("BEGIN IMMEDIATE");
+    try {
+      this.db.run("DELETE FROM integration_capabilities WHERE integration_id = ?", [integrationId]);
+      for (const capability of capabilities) this.db.run("INSERT INTO integration_capabilities (integration_id, capability_id, name, description, source, capabilities_json) VALUES (?, ?, ?, ?, ?, ?)", [integrationId, capability.capabilityId, capability.name, capability.description, capability.source, JSON.stringify(capability.capabilities)]);
+      this.db.run("UPDATE integrations SET status = ?, last_successful_discovery = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, status === "connected" ? at : row.last_successful_discovery, error ?? null, at, integrationId, userId]);
+      this.db.run("COMMIT");
+    } catch (error) { this.db.run("ROLLBACK"); throw error; }
+    return this.getIntegration(userId, integrationId) as IntegrationRecord;
+  }
+
+  updateIntegrationStatus(userId: string, integrationId: string, status: IntegrationStatus, error?: string): IntegrationRecord {
+    const row = this.integrationRow(userId, integrationId);
+    if (row === null) throw new OwnershipError();
+    this.db.run("UPDATE integrations SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, error ?? null, now(), integrationId, userId]);
+    return this.getIntegration(userId, integrationId) as IntegrationRecord;
+  }
+
+  beginIntegrationOAuth(userId: string, integrationId: string, redirectUri: string): { readonly state: string; readonly authorizationUrl: string; readonly expiresAt: string } {
+    const runtime = this.getIntegrationRuntimeConfig(userId, integrationId);
+    if (runtime === null) throw new OwnershipError();
+    const auth = runtime.integration.config.auth;
+    if (typeof auth !== "object" || auth === null || Array.isArray(auth) || typeof (auth as Record<string, unknown>).authorizationUrl !== "string" || typeof (auth as Record<string, unknown>).clientId !== "string") throw new Error("OAuth configuration is invalid");
+    const state = randomBytes(32).toString("base64url");
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    this.db.run("INSERT INTO integration_oauth_states (state_hash, integration_id, owner_id, redirect_uri, code_verifier_ciphertext, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [hashToken(state), integrationId, userId, redirectUri, encryptJson({ verifier }, this.key(true), INTEGRATION_CREDENTIAL_AAD), expiresAt, now()]);
+    const url = new URL((auth as Record<string, unknown>).authorizationUrl as string);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("client_id", (auth as Record<string, unknown>).clientId as string);
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("state", state);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    if (Array.isArray((auth as Record<string, unknown>).scopes)) url.searchParams.set("scope", (auth as Record<string, unknown>).scopes.filter((item): item is string => typeof item === "string").join(" "));
+    return { state, authorizationUrl: url.toString(), expiresAt };
+  }
+
+  consumeIntegrationOAuthState(userId: string, state: string): IntegrationOAuthState {
+    const row = this.db.query<{ integration_id: string; owner_id: string; redirect_uri: string; code_verifier_ciphertext: string; expires_at: string }, [string]>("SELECT integration_id, owner_id, redirect_uri, code_verifier_ciphertext, expires_at FROM integration_oauth_states WHERE state_hash = ?").get(hashToken(state));
+    if (row === null || row.owner_id !== userId || Date.parse(row.expires_at) <= Date.now()) throw new AuthenticationError("OAuth state is invalid");
+    this.db.run("DELETE FROM integration_oauth_states WHERE state_hash = ?", [hashToken(state)]);
+    return { integrationId: row.integration_id, ownerId: row.owner_id, redirectUri: row.redirect_uri, codeVerifier: String(decryptJson(row.code_verifier_ciphertext, this.key(), INTEGRATION_CREDENTIAL_AAD).verifier ?? "") };
+  }
+
+  saveIntegrationOAuthCredentials(userId: string, integrationId: string, credentials: Record<string, unknown>): IntegrationRecord {
+    const runtime = this.getIntegrationRuntimeConfig(userId, integrationId);
+    if (runtime === null) throw new OwnershipError();
+    this.db.run("UPDATE integrations SET secrets_ciphertext = ?, status = 'unknown', last_error = NULL, updated_at = ? WHERE id = ? AND owner_id = ?", [encryptIntegrationSecrets({ ...runtime.secrets, ...credentials }, this.key(true)), now(), integrationId, userId]);
+    return this.getIntegration(userId, integrationId) as IntegrationRecord;
+  }
+
+  revokeIntegrationOAuth(userId: string, integrationId: string): IntegrationRecord {
+    const runtime = this.getIntegrationRuntimeConfig(userId, integrationId);
+    if (runtime === null) throw new OwnershipError();
+    const secrets = { ...runtime.secrets };
+    for (const key of ["accessToken", "refreshToken", "token", "tokenType", "expiresAt"]) delete secrets[key];
+    return this.updateIntegration(userId, integrationId, { secrets });
   }
 
   private user(row: Row): IdentityUser {

@@ -37,6 +37,7 @@ export const SETTINGS_SECTIONS: Record<SettingsScope, readonly SettingsSection[]
   ],
   agent: [
     { id: "models", label: "Models", description: "Providers, models, and runtime defaults.", icon: Cpu },
+    { id: "integrations", label: "Integrations", description: "Configure MCP and OpenAPI capability sources.", icon: Plug },
     { id: "tools", label: "Tools", description: "Global capability catalog.", icon: Wrench },
     { id: "skills", label: "Skills", description: "Installed agent skills.", icon: Puzzle },
     { id: "plugins", label: "Plugins", description: "Installed extensions and permissions.", icon: Plug },

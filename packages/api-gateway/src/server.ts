@@ -344,6 +344,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const activeTurns = new Set<AbortController>();
   const socketTurns = new Map<object, Map<string, AbortController>>();
   const pendingApprovals = new WeakMap<object, Map<string, { readonly resolve: (decision: "allow" | "deny") => void }>>();
+  const publicAgent = <T extends NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>>(agent: T): T => ({ ...agent, capabilities: agent.capabilities.map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(agent.ownerId, item.capabilityId) })), permissions: agent.permissions.map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(agent.ownerId, item.capabilityId) })) }) as T;
   let shutdownPromise: Promise<void> | undefined;
 
   const configuredCredential = async (connection: NonNullable<ReturnType<SQLiteIdentityRepository["providerConnection"]>>) => {
@@ -372,8 +373,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const toolDefinitions: readonly ToolDefinition[] = [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(principal.id))];
     const projectOverride = projectId === undefined ? null : identity.getAgentProjectOverride(principal.id, projectId, agent.id);
     const model = requestedModel !== "default" ? requestedModel : projectOverride?.model ?? agent.model;
-    const effectiveCapabilities = projectOverride?.capabilities ?? agent.capabilities;
-    const effectivePermissions = projectOverride?.permissions ?? agent.permissions;
+    const effectiveCapabilities = (projectOverride?.capabilities ?? agent.capabilities).map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(principal.id, item.capabilityId) }));
+    const effectivePermissions = (projectOverride?.permissions ?? agent.permissions).map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(principal.id, item.capabilityId) }));
     const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
       ? toolDefinitions.map(definition => definition.capabilityId ?? definition.name)
       : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
@@ -636,7 +637,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const auth = authenticated(request, identity);
         if (auth instanceof Response) return auth;
         const definitions = [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(auth.principal.id))];
-        return json({ capabilities: definitions.map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow" })) });
+        return json({ capabilities: definitions.map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow", ...(definition.integrationId === undefined ? {} : { integrationId: definition.integrationId }), ...(definition.integrationName === undefined ? {} : { integrationName: definition.integrationName }), ...(definition.integrationType === undefined ? {} : { integrationType: definition.integrationType }), ...(definition.nativeName === undefined ? {} : { nativeName: definition.nativeName }), ...(definition.displayName === undefined ? {} : { displayName: definition.displayName }) })) });
       }
 
       if (url.pathname === "/v1/integrations" && request.method === "GET") {
@@ -649,7 +650,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (auth instanceof Response) return auth;
         try {
           const value = await body(request, maxRequestBytes);
-          const created = identity.createIntegration(auth.principal.id, parseIntegrationInput(value));
+          const created = identity.createIntegration(auth.principal.id, parseIntegrationInput(value) as IntegrationInput);
           return json({ integration: await integrations.discover(auth.principal.id, created.id) }, 201);
         } catch { return json({ error: "invalid_integration" }, 400); }
       }
@@ -798,7 +799,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       if (url.pathname === "/v1/agents") {
         const auth = authenticated(request, identity, request.method !== "GET");
         if (auth instanceof Response) return auth;
-        if (request.method === "GET") return json({ agents: identity.listAgents(auth.principal.id, url.searchParams.get("projectId") ?? undefined) });
+        if (request.method === "GET") return json({ agents: identity.listAgents(auth.principal.id, url.searchParams.get("projectId") ?? undefined).map(publicAgent) });
         if (request.method === "POST") {
           try { const value = await body(request, maxRequestBytes); return json({ agent: identity.createAgent(auth.principal.id, String(value.projectId ?? ""), String(value.name ?? ""), String(value.instructions ?? ""), String(value.icon ?? "")) }, 201); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400); }
         }
@@ -812,7 +813,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const agentId = decodeURIComponent(agentPath[1] as string);
         if (request.method === "GET") {
           const agent = identity.getAgent(auth.principal.id, agentId);
-          return agent === null ? json({ error: "not_found" }, 404) : json({ agent });
+          return agent === null ? json({ error: "not_found" }, 404) : json({ agent: publicAgent(agent) });
         }
         if (request.method === "DELETE") {
           try { identity.deleteAgent(auth.principal.id, agentId); return json({ deleted: true }); }
@@ -821,7 +822,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (request.method !== "PATCH") return json({ error: "method_not_allowed" }, 405, { allow: "GET, PATCH, DELETE" });
         try {
           const value = await body(request, maxRequestBytes);
-          return json({ agent: identity.updateAgent(auth.principal.id, agentId, parseAgentUpdate(value)) });
+          return json({ agent: publicAgent(identity.updateAgent(auth.principal.id, agentId, parseAgentUpdate(value))) });
         } catch (error) {
           return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_agent" }, error instanceof OwnershipError ? 403 : 400);
         }
@@ -837,7 +838,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         const projectId = url.searchParams.get("projectId") ?? agent.projectId;
         if (projectId !== agent.projectId) return json({ error: "forbidden" }, 403);
         const effective = await resolveEffectiveAgentConfiguration(auth.principal, agent, sessionId, projectId, "default", undefined, undefined);
-        return json({ agent, model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })), skills: effective.skills.map(skill => ({ id: skill.id, name: skill.name })) });
+        return json({ agent: publicAgent(agent), model: effective.model ?? (identity.providerConnection()?.model ?? "default"), reasoningEffort: effective.reasoningEffort, capabilities: effective.tools.map(tool => ({ capabilityId: tool.capabilityId, name: tool.name, source: tool.source, policy: tool.policy })), skills: effective.skills.map(skill => ({ id: skill.id, name: skill.name })) });
       }
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {

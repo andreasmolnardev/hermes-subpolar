@@ -143,6 +143,11 @@ export type IntegrationCapabilityRecord = {
   readonly source: string;
   readonly capabilities: readonly string[] | Record<string, unknown>;
   readonly integrationId: string;
+  readonly nativeName?: string;
+  readonly displayName?: string;
+  readonly inputSchema?: Record<string, unknown> | boolean;
+  readonly discoveredAt?: string;
+  readonly expiresAt?: string;
 };
 export type IntegrationRecord = {
   readonly id: string;
@@ -151,6 +156,7 @@ export type IntegrationRecord = {
   readonly type: IntegrationType;
   readonly enabled: boolean;
   readonly status: IntegrationStatus;
+  readonly protocol?: "modern" | "legacy";
   readonly config: Record<string, unknown>;
   readonly capabilities: readonly IntegrationCapabilityRecord[];
   readonly lastSuccessfulDiscovery?: string;
@@ -358,6 +364,7 @@ CREATE TABLE IF NOT EXISTS integrations (
   secrets_ciphertext TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   status TEXT NOT NULL DEFAULT 'unknown',
+  protocol TEXT,
   last_successful_discovery TEXT,
   last_error TEXT,
   created_at TEXT NOT NULL,
@@ -372,6 +379,11 @@ CREATE TABLE IF NOT EXISTS integration_capabilities (
   description TEXT NOT NULL,
   source TEXT NOT NULL,
   capabilities_json TEXT NOT NULL,
+  native_name TEXT,
+  display_name TEXT,
+  input_schema_json TEXT,
+  discovered_at TEXT,
+  expires_at TEXT,
   PRIMARY KEY (integration_id, capability_id)
 );
 CREATE TABLE IF NOT EXISTS integration_oauth_states (
@@ -413,7 +425,7 @@ type ProviderRow = {
 
 type IntegrationRow = {
   id: string; owner_id: string; name: string; type: string; config_json: string; secrets_ciphertext: string;
-  enabled: number; status: string; last_successful_discovery: string | null; last_error: string | null;
+  enabled: number; status: string; protocol: string | null; last_successful_discovery: string | null; last_error: string | null;
   created_at: string; updated_at: string;
 };
 
@@ -609,6 +621,16 @@ export class SQLiteIdentityRepository {
     } catch {
       // Existing databases already have the migration marker.
     }
+    for (const statement of [
+      "ALTER TABLE integrations ADD COLUMN protocol TEXT",
+      "ALTER TABLE integration_capabilities ADD COLUMN native_name TEXT",
+      "ALTER TABLE integration_capabilities ADD COLUMN display_name TEXT",
+      "ALTER TABLE integration_capabilities ADD COLUMN input_schema_json TEXT",
+      "ALTER TABLE integration_capabilities ADD COLUMN discovered_at TEXT",
+      "ALTER TABLE integration_capabilities ADD COLUMN expires_at TEXT",
+    ]) {
+      try { this.db.exec(statement); } catch { /* existing database already has the migration */ }
+    }
     this.migrateAgentSkills();
   }
 
@@ -674,8 +696,8 @@ export class SQLiteIdentityRepository {
   }
 
   private integrationFromRow(row: IntegrationRow, includeSecrets = false): IntegrationRecord | IntegrationRuntimeConfig {
-    const capabilities = this.db.query<{ capability_id: string; name: string; description: string; source: string; capabilities_json: string }, [string]>(
-      "SELECT capability_id, name, description, source, capabilities_json FROM integration_capabilities WHERE integration_id = ? ORDER BY capability_id",
+    const capabilities = this.db.query<{ capability_id: string; name: string; description: string; source: string; capabilities_json: string; native_name: string | null; display_name: string | null; input_schema_json: string | null; discovered_at: string | null; expires_at: string | null }, [string]>(
+      "SELECT capability_id, name, description, source, capabilities_json, native_name, display_name, input_schema_json, discovered_at, expires_at FROM integration_capabilities WHERE integration_id = ? ORDER BY capability_id",
     ).all(row.id).map(item => ({
       capabilityId: item.capability_id,
       name: item.name,
@@ -683,6 +705,11 @@ export class SQLiteIdentityRepository {
       source: item.source,
       capabilities: JSON.parse(item.capabilities_json) as readonly string[] | Record<string, unknown>,
       integrationId: row.id,
+      ...(item.native_name === null ? {} : { nativeName: item.native_name }),
+      ...(item.display_name === null ? {} : { displayName: item.display_name }),
+      ...(item.input_schema_json === null ? {} : { inputSchema: JSON.parse(item.input_schema_json) as Record<string, unknown> | boolean }),
+      ...(item.discovered_at === null ? {} : { discoveredAt: item.discovered_at }),
+      ...(item.expires_at === null ? {} : { expiresAt: item.expires_at }),
     }));
     const integration: IntegrationRecord = {
       id: row.id,
@@ -691,6 +718,7 @@ export class SQLiteIdentityRepository {
       type: row.type,
       enabled: row.enabled === 1,
       status: integrationStatus(row.status),
+      ...(row.protocol === "modern" || row.protocol === "legacy" ? { protocol: row.protocol } : {}),
       config: jsonRecord(row.config_json, "integration config"),
       capabilities,
       ...(row.last_successful_discovery === null ? {} : { lastSuccessfulDiscovery: row.last_successful_discovery }),
@@ -703,11 +731,11 @@ export class SQLiteIdentityRepository {
   }
 
   private integrationRow(userId: string, integrationId: string): IntegrationRow | null {
-    return this.db.query<IntegrationRow, [string, string]>("SELECT id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, last_successful_discovery, last_error, created_at, updated_at FROM integrations WHERE id = ? AND owner_id = ?").get(integrationId, userId);
+    return this.db.query<IntegrationRow, [string, string]>("SELECT id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, protocol, last_successful_discovery, last_error, created_at, updated_at FROM integrations WHERE id = ? AND owner_id = ?").get(integrationId, userId);
   }
 
   listIntegrations(userId: string): readonly IntegrationRecord[] {
-    return this.db.query<IntegrationRow, [string]>("SELECT id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, last_successful_discovery, last_error, created_at, updated_at FROM integrations WHERE owner_id = ? ORDER BY created_at, id").all(userId).map(row => this.integrationFromRow(row) as IntegrationRecord);
+    return this.db.query<IntegrationRow, [string]>("SELECT id, owner_id, name, type, config_json, secrets_ciphertext, enabled, status, protocol, last_successful_discovery, last_error, created_at, updated_at FROM integrations WHERE owner_id = ? ORDER BY created_at, id").all(userId).map(row => this.integrationFromRow(row) as IntegrationRecord);
   }
 
   getIntegration(userId: string, integrationId: string): IntegrationRecord | null {
@@ -737,8 +765,26 @@ export class SQLiteIdentityRepository {
     if (!name || name.length > 128) throw new Error("integration name is invalid");
     const secrets = input.secrets === undefined ? existing.secrets : { ...existing.secrets, ...input.secrets };
     const config = input.config === undefined ? existing.integration.config : this.safeIntegrationConfig(input.config, secrets);
+    this.migrateLegacyIntegrationCapabilityIds(existing.integration);
     this.db.run("UPDATE integrations SET name = ?, type = ?, config_json = ?, secrets_ciphertext = ?, enabled = ?, updated_at = ?, status = 'unknown', last_error = NULL WHERE id = ? AND owner_id = ?", [name, input.type?.trim() ?? existing.integration.type, JSON.stringify(config), encryptIntegrationSecrets(secrets, this.key(true)), input.enabled === undefined ? (existing.integration.enabled ? 1 : 0) : input.enabled ? 1 : 0, now(), integrationId, userId]);
     return this.getIntegration(userId, integrationId) as IntegrationRecord;
+  }
+
+  private migrateLegacyIntegrationCapabilityIds(integration: IntegrationRecord): void {
+    for (const capability of integration.capabilities) {
+      const match = /^(mcp|openapi):([^:]+):(.+)$/.exec(capability.capabilityId);
+      if (match === null || match[2] !== integration.name) continue;
+      const canonical = `integration:${integration.id}:${match[1]}:${match[3]}`;
+      this.db.run("UPDATE agent_capabilities SET capability_id = ? WHERE capability_id = ?", [canonical, capability.capabilityId]);
+      this.db.run("UPDATE agent_permissions SET capability_id = ? WHERE capability_id = ?", [canonical, capability.capabilityId]);
+      const overrides = this.db.query<{ project_id: string; agent_id: string; capabilities_json: string | null; permissions_json: string | null }, []>("SELECT project_id, agent_id, capabilities_json, permissions_json FROM agent_project_overrides").all();
+      for (const override of overrides) {
+        const replace = (json: string | null): string | null => json === null ? null : JSON.stringify((JSON.parse(json) as readonly { capabilityId: string; enabled?: boolean; policy?: string }[]).map(item => item.capabilityId === capability.capabilityId ? { ...item, capabilityId: canonical } : item));
+        const capabilities = replace(override.capabilities_json); const permissions = replace(override.permissions_json);
+        if (capabilities !== override.capabilities_json || permissions !== override.permissions_json) this.db.run("UPDATE agent_project_overrides SET capabilities_json = ?, permissions_json = ? WHERE project_id = ? AND agent_id = ?", [capabilities, permissions, override.project_id, override.agent_id]);
+      }
+      this.db.run("UPDATE integration_capabilities SET capability_id = ? WHERE integration_id = ? AND capability_id = ?", [canonical, integration.id, capability.capabilityId]);
+    }
   }
 
   deleteIntegration(userId: string, integrationId: string): void {
@@ -750,8 +796,8 @@ export class SQLiteIdentityRepository {
     const redact = (value: unknown): unknown => {
       if (Array.isArray(value)) return value.map(redact);
       if (typeof value !== "object" || value === null) return value;
-      const sensitiveKeys = new Set(["token", "accesstoken", "refreshtoken", "secret", "clientsecret", "password", "apikey", "api_key", "authorization", "privatekey", "private_key", "headers", "environment", "env"]);
-      return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !sensitiveKeys.has(key.toLowerCase())).map(([key, item]) => [key, redact(item)]));
+      const sensitiveKeys = new Set(["token", "accesstoken", "refreshtoken", "secret", "clientsecret", "password", "apikey", "api_key", "authorization", "privatekey", "private_key", "headers", "customheaders", "staticheaders", "credentials", "secrets", "environment", "environmentvariables", "env"]);
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !sensitiveKeys.has(key.toLowerCase().replaceAll("_", "").replaceAll("-", ""))).map(([key, item]) => [key, redact(item)]));
     };
     const safe = redact(config) as Record<string, unknown>;
     const headers = secrets.headers;
@@ -762,15 +808,15 @@ export class SQLiteIdentityRepository {
     return safe;
   }
 
-  setIntegrationDiscovery(userId: string, integrationId: string, status: IntegrationStatus, capabilities: readonly Omit<IntegrationCapabilityRecord, "integrationId">[], error?: string): IntegrationRecord {
+  setIntegrationDiscovery(userId: string, integrationId: string, status: IntegrationStatus, capabilities: readonly Omit<IntegrationCapabilityRecord, "integrationId">[], error?: string, protocol?: "modern" | "legacy"): IntegrationRecord {
     const row = this.integrationRow(userId, integrationId);
     if (row === null) throw new OwnershipError();
     const at = now();
     this.db.run("BEGIN IMMEDIATE");
     try {
       this.db.run("DELETE FROM integration_capabilities WHERE integration_id = ?", [integrationId]);
-      for (const capability of capabilities) this.db.run("INSERT INTO integration_capabilities (integration_id, capability_id, name, description, source, capabilities_json) VALUES (?, ?, ?, ?, ?, ?)", [integrationId, capability.capabilityId, capability.name, capability.description, capability.source, JSON.stringify(capability.capabilities)]);
-      this.db.run("UPDATE integrations SET status = ?, last_successful_discovery = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, status === "connected" ? at : row.last_successful_discovery, error ?? null, at, integrationId, userId]);
+      for (const capability of capabilities) this.db.run("INSERT INTO integration_capabilities (integration_id, capability_id, name, description, source, capabilities_json, native_name, display_name, input_schema_json, discovered_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [integrationId, capability.capabilityId, capability.name, capability.description, capability.source, JSON.stringify(capability.capabilities), capability.nativeName ?? null, capability.displayName ?? null, capability.inputSchema === undefined ? null : JSON.stringify(capability.inputSchema), capability.discoveredAt ?? at, capability.expiresAt ?? null]);
+      this.db.run("UPDATE integrations SET status = ?, protocol = ?, last_successful_discovery = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, protocol ?? row.protocol, status === "connected" ? at : row.last_successful_discovery, error ?? null, at, integrationId, userId]);
       this.db.run("COMMIT");
     } catch (error) { this.db.run("ROLLBACK"); throw error; }
     return this.getIntegration(userId, integrationId) as IntegrationRecord;
@@ -800,7 +846,8 @@ export class SQLiteIdentityRepository {
     url.searchParams.set("state", state);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
-    if (Array.isArray((auth as Record<string, unknown>).scopes)) url.searchParams.set("scope", (auth as Record<string, unknown>).scopes.filter((item): item is string => typeof item === "string").join(" "));
+    const scopes = (auth as Record<string, unknown>).scopes;
+    if (Array.isArray(scopes)) url.searchParams.set("scope", scopes.filter((item: unknown): item is string => typeof item === "string").join(" "));
     return { state, authorizationUrl: url.toString(), expiresAt };
   }
 

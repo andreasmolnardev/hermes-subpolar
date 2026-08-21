@@ -7,7 +7,12 @@ export type OpenApiToolOptions = {
   readonly document: unknown;
   readonly baseUrl: string;
   readonly allowedOperationIds: readonly string[];
+  readonly capabilityPrefix?: string;
+  readonly integrationId?: string;
+  readonly integrationName?: string;
+  readonly integrationType?: string;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly headersFactory?: () => Promise<Readonly<Record<string, string>>>;
   readonly fetch?: typeof fetch;
   readonly policy?: "allow" | "ask" | "auto" | "deny";
   readonly maxResponseBytes?: number;
@@ -305,7 +310,11 @@ async function callOperation(operation: Operation, inputValue: unknown, options:
     else if (parameter.in === "query") url.searchParams.set(parameter.name, text);
   }
   url.pathname = `${url.pathname.replace(/\/$/, "")}${path}`;
-  const headers = new Headers(options.headers);
+  const fixedHeaders = options.headersFactory === undefined ? options.headers : await options.headersFactory();
+  for (const [name, value] of Object.entries(fixedHeaders ?? {})) {
+    if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(value)) throw new TypeError("OpenAPI fixed headers are invalid");
+  }
+  const headers = new Headers(fixedHeaders);
   for (const parameter of operation.parameters) {
     if (isRecord(parameter) && parameter.in === "header" && typeof parameter.name === "string" && input[parameter.name] !== undefined) {
       const value = String(input[parameter.name]);
@@ -354,10 +363,15 @@ export function createOpenApiToolDefinitions(options: OpenApiToolOptions): reado
   if (allowed !== undefined && operations.length !== allowed.size) throw new TypeError("OpenAPI operation allowlist contains an unknown operation");
   return operations.map(operation => ({
     name: `openapi__${options.serviceName.replace(/[^a-zA-Z0-9_.-]/g, "_")}__${operation.id.replace(/[^a-zA-Z0-9_.-]/g, "_")}`,
-    capabilityId: `openapi:${options.serviceName}:${operation.id}`,
+    capabilityId: options.capabilityPrefix === undefined ? `openapi:${options.serviceName}:${operation.id}` : `${options.capabilityPrefix}${operation.id}`,
     description: `Call ${operation.method} ${operation.path}`,
     inputSchema: parameterSchema(operation),
     source: `tool-runtime:openapi:${options.serviceName}`,
+    ...(options.integrationId === undefined ? {} : { integrationId: options.integrationId }),
+    integrationName: options.integrationName ?? options.serviceName,
+    integrationType: options.integrationType ?? "openapi",
+    nativeName: operation.id,
+    displayName: operation.label,
     capabilities: { network: true, mutating: operation.method !== "GET" },
      executable: { handle: createToolHandle((input, signal) => callOperation(operation, input, options, signal instanceof AbortSignal ? signal : undefined)) },
     policy: options.policy ?? "ask"

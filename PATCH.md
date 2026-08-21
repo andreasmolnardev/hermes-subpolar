@@ -108,8 +108,18 @@
   settings. Non-interactive turns return a model-visible approval-unavailable
   tool result instead of auto-allowing.
 - The Agent editor now consumes the server capability inventory, groups tools by
-  source, and initializes explicit permission policies from capability defaults.
+  integration and initializes explicit permission policies from capability defaults.
   Agent model and reasoning PATCH fields support `null` to clear an override.
+- Integration management now persists encrypted server-side credentials, stable
+  Integration-ID capability identities, normalized discovery metadata, health,
+  cache timestamps, and owner-bound single-use OAuth/PKCE state. MCP uses one
+  caller-owned JSON-RPC correlation ID through HTTP and stdio, probes modern
+  `2026-07-28` stateless discovery first, and falls back to an explicit legacy
+  initialize/initialized lifecycle only when needed. Modern HTTP execution gets
+  a fresh transport with current credentials; legacy transports retain only the
+  session state their negotiated protocol requires. OpenAPI operations use the
+  same stable identity model and static headers are configurable without
+  returning saved values to the browser.
 
 ## Verification
 
@@ -121,3 +131,8 @@
 - Browser Playwright E2E covers bootstrap, provider setup, agent setup, and
   workspace transition using built web UI. Current environment lacks Playwright
   Chromium, so this coverage could not execute locally.
+- Integration follow-up verification passed package typechecks, OpenAPI JSON
+  parsing, the web production build, and diff checks. The focused MCP,
+  IntegrationManager, OAuth, and migration tests are included but could not be
+  executed here because the environment has no Bun runtime; the collaborative
+  preview host is also unavailable.

@@ -68,12 +68,16 @@ function signBedrockRequest(request: Parameters<NonNullable<Parameters<typeof cr
   headers.set("x-amz-date", amzDate);
   headers.set("x-amz-content-sha256", payloadHash);
   if (request.credentials.sessionToken !== undefined) headers.set("x-amz-security-token", request.credentials.sessionToken);
-  const canonicalHeaders = [...headers.entries()]
+  const canonicalHeaders = [...(headers as unknown as Iterable<[string, string]>)]
     .filter(([name]) => name === name.toLowerCase())
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => `${name}:${value.trim().replace(/\s+/g, " ")}\n`)
     .join("");
-  const signedHeaders = [...headers.keys()].filter(name => name === name.toLowerCase()).sort().join(";");
+  const signedHeaders = [...(headers as unknown as Iterable<[string, string]>)]
+    .map(([name]) => name)
+    .filter(name => name === name.toLowerCase())
+    .sort()
+    .join(";");
   const canonicalRequest = [request.method, url.pathname, url.search.slice(1), canonicalHeaders, signedHeaders, payloadHash].join("\n");
   const scope = `${date}/${request.credentials.region}/${service}/aws4_request`;
   const canonicalHash = createHash("sha256").update(canonicalRequest).digest("hex");

@@ -71,6 +71,34 @@ test("gateway validates request boundaries and rejects removed runtime fields", 
   assert.throws(() => createGateway({ runtimeConfig: {} } as never), /field is unsupported: runtimeConfig/);
 });
 
+test("gateway can route a normalized request through the staged Pi executor seam", async () => {
+  let piCalls = 0;
+  let providerCalls = 0;
+  let seenModel: string | undefined;
+  const result = await createGateway({
+    piExecutor: async (request) => {
+      piCalls += 1;
+      seenModel = request.model;
+      return completion;
+    }
+  }).executeRequest({
+    model: "pi-model",
+    sessionId: "pi-session",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: []
+  }, {
+    async complete() {
+      providerCalls += 1;
+      throw new Error("legacy provider should not be called");
+    }
+  });
+
+  assert.equal(result.message.content, "safe");
+  assert.equal(piCalls, 1);
+  assert.equal(providerCalls, 0);
+  assert.equal(seenModel, "pi-model");
+});
+
 test("unsupported executable references fail before provider effects", async () => {
   let providerCalls = 0;
   await assert.rejects(() => createGateway().executeRequest({

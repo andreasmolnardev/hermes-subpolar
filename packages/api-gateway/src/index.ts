@@ -158,6 +158,12 @@ export type GatewayNormalizedRequest = {
   readonly contextAssembler?: HarnessContextAssembler;
 };
 
+/** Optional Pi-backed execution seam. The default remains the legacy harness until parity is complete. */
+export type GatewayPiExecutor = (
+  request: GatewayNormalizedRequest,
+  eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
+) => Promise<HarnessResult>;
+
 export type GatewayOptions = {
   readonly sessionRepository?: GatewaySessionRepository;
   readonly persistence?: HarnessPersistencePort;
@@ -165,6 +171,7 @@ export type GatewayOptions = {
   readonly toolExecutor?: HarnessToolExecutor;
   readonly turnLeaseManager?: GatewayTurnLeaseManager;
   readonly turnLease?: GatewayTurnLeaseManagerOptions;
+  readonly piExecutor?: GatewayPiExecutor;
 };
 
 export type Gateway = {
@@ -182,7 +189,7 @@ const GATEWAY_REQUEST_FIELDS = new Set([
   "transportEventSink", "contextAssembler"
 ]);
 const GATEWAY_OPTION_FIELDS = new Set([
-  "sessionRepository", "persistence", "sessionCwdStore", "toolExecutor", "turnLeaseManager", "turnLease"
+  "sessionRepository", "persistence", "sessionCwdStore", "toolExecutor", "turnLeaseManager", "turnLease", "piExecutor"
 ]);
 
 function rejectUnsupportedFields(value: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): void {
@@ -689,7 +696,8 @@ function descriptorExecutor(
   validateReferencedTools(request.tools);
   for (const tool of request.tools) {
     if (isDescriptor(tool) && "handle" in tool.executable) {
-      handles.set(tool.name, tool.executable.handle.execute);
+      const handle = tool.executable.handle;
+      if (handle !== undefined) handles.set(tool.name, handle.execute);
     }
   }
   if (handles.size === 0) return undefined;
@@ -1007,11 +1015,10 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
           : { waitTimeoutMs: normalized.turnLeaseTimeoutMs })
       });
       try {
-        return await harnessRuntimeAdapter.execute(
-          configureHarnessRequest(normalized, options),
-          provider,
-          safeHarnessEventSink(request)
-        );
+        const configured = configureHarnessRequest(normalized, options);
+        const eventSink = safeHarnessEventSink(request);
+        if (options.piExecutor !== undefined) return await options.piExecutor(configured, eventSink);
+        return await harnessRuntimeAdapter.execute(configured, provider, eventSink);
       } finally {
         lease.release();
       }

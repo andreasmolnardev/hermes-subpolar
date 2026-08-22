@@ -21,6 +21,13 @@
   Subpolar-backed credential-store adapter and provider-neutral message
   hydration into Pi's transcript model. System policy remains resource-loader
   input rather than a persisted conversation message.
+- Added the Tool Resolver → Pi custom-tool adapter. Resolved descriptors retain
+  their capability identity and policy, while execution is delegated to an
+  injected Subpolar Tool Runtime callback; `ask` is closed by default without
+  an approval callback.
+- Hardened descriptor narrowing in `tool-resolver` so the Pi adapter and the
+  resolver agree on the executable-handle invariant under the Pi-compatible
+  TypeScript settings.
 
 ## Repository Residue Cleanup
 

@@ -585,6 +585,7 @@ function copyDescriptor(
   let executable: ToolExecutable;
   if ("handle" in definition.executable) {
     const originalHandle = definition.executable.handle;
+    if (originalHandle === undefined) throw new Error(`Missing executable handle for tool ${JSON.stringify(definition.name)}`);
     executable = schemaHasRenamedProperties(originalSchema)
       ? {
         handle: createToolHandle((...args: readonly unknown[]) => {

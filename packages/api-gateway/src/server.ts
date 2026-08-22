@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createGateway, createGatewayPersistenceAdapter, type GatewayProtocolEvent } from "./index";
+import { createGateway, createGatewayPersistenceAdapter, type GatewayPiExecutor, type GatewayProtocolEvent } from "./index";
 import { type ChatProvider, type ProviderContent, type ProviderMessage } from "chat-provider-interface";
 import { createHttpSpeechToTextProvider, createHttpTextToSpeechProvider, VoiceProviderError } from "voice-provider-interface";
 import {
@@ -44,6 +44,8 @@ import { AutomationRunError, AutomationScheduler, nextAutomationRun, normalizeAu
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
+  /** Optional application-owned Pi executor; legacy provider execution remains the default. */
+  readonly piExecutor?: GatewayPiExecutor;
   readonly hostname?: string;
   readonly port?: number;
   readonly staticRoot?: string;
@@ -396,7 +398,11 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const identity = new SQLiteIdentityRepository(databasePath);
   const integrations = new IntegrationManager(identity);
   const persistence = createGatewayPersistenceAdapter(sessions);
-  const gateway = createGateway({ sessionRepository: persistence, persistence });
+  const gateway = createGateway({
+    sessionRepository: persistence,
+    persistence,
+    ...(options.piExecutor === undefined ? {} : { piExecutor: options.piExecutor })
+  });
   const activeTurns = new Set<AbortController>();
   const socketTurns = new Map<object, Map<string, AbortController>>();
   const pendingApprovals = new WeakMap<object, Map<string, { readonly resolve: (decision: "allow" | "deny") => void }>>();

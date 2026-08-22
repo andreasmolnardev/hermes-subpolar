@@ -37,6 +37,9 @@
 - Kept the staged gateway/Pi source graph type-safe across Bun and DOM fetch
   declarations, including executable-handle narrowing and two documented
   upstream Pi fetch/Headers compatibility patches.
+- Exposed the same optional Pi executor through the Bun API server options so
+  an application-owned Pi runtime can be attached without making the legacy
+  provider path implicit or global.
 
 ## Repository Residue Cleanup
 

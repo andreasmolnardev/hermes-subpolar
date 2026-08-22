@@ -13,6 +13,10 @@
 - Imported the matching generated model catalog from the pinned `pi-ai`
   release artifact; Subpolar still owns provider credentials and execution
   policy, which are added in the harness adapter batches.
+- Added the first Subpolar-owned Pi harness seam: an explicit per-run context,
+  in-memory Pi session creation, controlled resource loading, custom-tool
+  authorization, and stable Subpolar event projection. The legacy provider
+  loop remains available until the parity migration is complete.
 
 ## Repository Residue Cleanup
 

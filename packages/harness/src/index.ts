@@ -56,6 +56,21 @@ import {
   type HarnessUnsupportedReason
 } from "./prompt-assembler";
 
+export { PiEventProjector } from "./pi-events";
+export type { SubpolarPiEvent, SubpolarPiEventSink } from "./pi-events";
+export { createSubpolarPiRuntime } from "./pi-runtime";
+export type { CreateSubpolarPiRuntimeOptions, SubpolarPiRuntime } from "./pi-runtime";
+export { SubpolarResourceLoader } from "./pi-resources";
+export type { SubpolarPiResourceOptions } from "./pi-resources";
+export { toPiToolDefinition } from "./pi-tools";
+export type {
+  SubpolarPiPermissionDecision,
+  SubpolarPiRunContext,
+  SubpolarPiTool,
+  SubpolarPiToolRequest,
+  SubpolarPiToolResult
+} from "./pi-tools";
+
 export {
   MAX_RETRY_ATTEMPTS,
   MAX_RETRY_BACKOFF_MS,

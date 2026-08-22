@@ -45,7 +45,7 @@ export const ALLOWED_DEPENDENCIES = {
     "shared",
     "tool-runtime"
   ]),
-  harness: new Set(["tool-resolver", "chat-provider-interface"]),
+  harness: new Set(["tool-resolver", "chat-provider-interface", "pi-coding-agent", "pi-ai"]),
   "tool-runtime": new Set(["tool-resolver"]),
   "tool-resolver": new Set(["data-layer"]),
   "chat-provider-interface": new Set(),

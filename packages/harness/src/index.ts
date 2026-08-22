@@ -62,7 +62,7 @@ export { createSubpolarPiRuntime } from "./pi-runtime";
 export type { CreateSubpolarPiRuntimeOptions, SubpolarPiRuntime } from "./pi-runtime";
 export { SubpolarResourceLoader } from "./pi-resources";
 export type { SubpolarPiResourceOptions } from "./pi-resources";
-export { toPiToolDefinition } from "./pi-tools";
+export { toPiResolvedTool, toPiToolDefinition } from "./pi-tools";
 export type {
   SubpolarPiPermissionDecision,
   SubpolarPiRunContext,
@@ -70,6 +70,7 @@ export type {
   SubpolarPiToolRequest,
   SubpolarPiToolResult
 } from "./pi-tools";
+export type { SubpolarPiResolvedToolExecutor } from "./pi-tools";
 export { SubpolarPiCredentialStore } from "./pi-credentials";
 export type { SubpolarCredentialBackend } from "./pi-credentials";
 export { hydratePiSession, toPiMessages } from "./pi-messages";

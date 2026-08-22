@@ -4,6 +4,7 @@ import type {
 	ExtensionContext,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { ToolDescriptor } from "tool-resolver";
 
 export type SubpolarPiPermissionDecision = "allow" | "deny";
 
@@ -31,6 +32,11 @@ export interface SubpolarPiTool {
 		request: SubpolarPiToolRequest & { readonly onUpdate: AgentToolUpdateCallback | undefined },
 	) => Promise<SubpolarPiToolResult>;
 }
+
+export type SubpolarPiResolvedToolExecutor = (
+	descriptor: ToolDescriptor,
+	request: SubpolarPiToolRequest & { readonly onUpdate: AgentToolUpdateCallback | undefined },
+) => Promise<SubpolarPiToolResult>;
 
 export interface SubpolarPiRunContext {
 	readonly runId: string;
@@ -66,4 +72,25 @@ export function toPiToolDefinition(tool: SubpolarPiTool, run: SubpolarPiRunConte
 			};
 		},
 	};
+}
+
+/**
+ * Adapt a Tool Resolver descriptor without allowing Pi to become the resolver
+ * or runtime. The executor remains an injected Subpolar Tool Runtime seam.
+ */
+export function toPiResolvedTool(
+	descriptor: ToolDescriptor,
+	run: SubpolarPiRunContext,
+	executor: SubpolarPiResolvedToolExecutor,
+	authorize?: SubpolarPiTool["authorize"],
+): ToolDefinition {
+	return toPiToolDefinition({
+		name: descriptor.name,
+		label: descriptor.displayName ?? descriptor.name,
+		description: descriptor.description,
+		parameters: descriptor.inputSchema as ToolDefinition["parameters"],
+		capabilityId: descriptor.capabilityId,
+		authorize: descriptor.policy === "ask" ? (authorize ?? (async () => "deny")) : async () => "allow",
+		execute: (request) => executor(descriptor, request),
+	}, run);
 }

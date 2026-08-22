@@ -9,11 +9,13 @@ import {
 	SubpolarPiCredentialStore,
 	SubpolarResourceLoader,
 	toPiMessages,
+	toPiResolvedTool,
 	toPiToolDefinition,
 	type SubpolarPiEvent,
 	type SubpolarPiTool,
 } from "../src/index";
 import { Type, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { resolveToolDescriptors } from "tool-resolver";
 
 async function withTempRun<T>(fn: (root: string) => Promise<T>): Promise<T> {
 	const root = await mkdtemp(join(tmpdir(), "hermes-subpolar-pi-"));
@@ -104,6 +106,28 @@ describe("Subpolar Pi runtime seam", () => {
 		expect(executions).toBe(0);
 		expect(result.details).toEqual({ denied: true });
 		expect(result.content).toEqual([{ type: "text", text: "Permission denied for tool dangerous.demo." }]);
+	});
+
+	test("resolved Tool Resolver descriptors stay behind the injected runtime", async () => {
+		const [descriptor] = resolveToolDescriptors([
+			{
+				name: "files.read",
+				description: "Read a file",
+				inputSchema: { type: "object", properties: {} },
+				source: "filesystem",
+				executable: { reference: "filesystem.read" },
+			},
+		], [{ toolName: "files.read", policy: "allow" }]);
+		if (!descriptor) throw new Error("expected a resolved descriptor");
+		let executed = false;
+		const piTool = toPiResolvedTool(descriptor, run, async (resolved, request) => {
+			executed = resolved.capabilityId === "files.read" && request.params !== undefined;
+			return { content: [{ type: "text", text: "ok" }] };
+		});
+
+		const result = await piTool.execute("call-1", {}, undefined, undefined, undefined as never);
+		expect(executed).toBe(true);
+		expect(result.content).toEqual([{ type: "text", text: "ok" }]);
 	});
 
 	test("message hydration keeps system policy out of the transcript and preserves tool calls", () => {

@@ -1,7 +1,10 @@
 import type { ModelProviderDefinition } from "@hermes/shared/model-providers";
 
 export type SubpolarUser = { readonly id: string; readonly username: string };
-export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly createdAt: string };
+export type SubpolarProjectRepository = { readonly url: string; readonly credentialId?: string; readonly defaultBranch?: string; readonly remoteName: string };
+export type SubpolarProject = { readonly id: string; readonly ownerId: string; readonly name: string; readonly description: string; readonly workspace: string; readonly instructions: string; readonly repository?: SubpolarProjectRepository; readonly defaultAgentId?: string; readonly settings: Record<string, unknown>; readonly createdAt: string };
+export type SubpolarGitCredential = { readonly id: string; readonly ownerId: string; readonly name: string; readonly provider: 'github' | 'gitlab' | 'gitea' | 'generic'; readonly username?: string; readonly createdAt: string; readonly updatedAt: string };
+export type SubpolarGitStatus = { readonly branch: string; readonly clean: boolean; readonly entries: readonly { readonly path: string; readonly status: string; readonly staged: boolean; readonly unstaged: boolean; readonly added: boolean; readonly modified: boolean; readonly deleted: boolean; readonly untracked: boolean }[] };
 export type AgentCapabilityAssignment = { readonly capabilityId: string; readonly enabled: boolean };
 export type AgentPermissionPolicy = { readonly capabilityId: string; readonly policy: "allow" | "ask" | "deny" };
 export type SubpolarCapability = { readonly capabilityId: string; readonly name: string; readonly description: string; readonly source: string; readonly capabilities: readonly unknown[] | Record<string, unknown>; readonly defaultPolicy: "allow" | "ask" | "deny"; readonly integrationId?: string; readonly integrationName?: string; readonly integrationType?: string; readonly nativeName?: string; readonly displayName?: string };
@@ -116,8 +119,16 @@ export function projects(): Promise<{ readonly projects: readonly SubpolarProjec
 }
 
 export function createProject(name: string): Promise<{ readonly project: SubpolarProject }> {
-  return subpolarRequest("/v1/projects", { method: "POST", body: JSON.stringify({ name }) });
+  return subpolarRequest("/v1/projects", { method: "POST", body: JSON.stringify({ name, workspaceMode: 'create' }) });
 }
+
+export type SubpolarProjectCreateInput = { readonly name: string; readonly description?: string; readonly instructions?: string; readonly workspaceMode: 'create' | 'existing' | 'clone'; readonly workspacePath?: string; readonly repository?: SubpolarProjectRepository };
+export function createProjectFromInput(input: SubpolarProjectCreateInput): Promise<{ readonly project: SubpolarProject }> { return subpolarRequest('/v1/projects', { method: 'POST', body: JSON.stringify(input) }); }
+export function updateProject(projectId: string, input: Partial<SubpolarProjectCreateInput> & { readonly defaultAgentId?: string }): Promise<{ readonly project: SubpolarProject }> { return subpolarRequest(`/v1/projects/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify(input) }); }
+export function gitCredentials(): Promise<{ readonly credentials: readonly SubpolarGitCredential[] }> { return subpolarRequest('/v1/git/credentials'); }
+export function createGitCredential(input: { readonly name: string; readonly provider: SubpolarGitCredential['provider']; readonly username?: string; readonly token?: string; readonly password?: string; readonly privateKey?: string; readonly passphrase?: string }): Promise<{ readonly credential: SubpolarGitCredential }> { return subpolarRequest('/v1/git/credentials', { method: 'POST', body: JSON.stringify(input) }); }
+export function gitStatus(projectId: string): Promise<SubpolarGitStatus> { return subpolarRequest(`/v1/projects/${encodeURIComponent(projectId)}/git/status`); }
+export function gitDiff(projectId: string, path?: string): Promise<{ readonly diff: string }> { return subpolarRequest(`/v1/projects/${encodeURIComponent(projectId)}/git/diff${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`); }
 
 export function agents(projectId?: string): Promise<{ readonly agents: readonly SubpolarAgent[] }> {
   return subpolarRequest(`/v1/agents${projectId === undefined ? "" : `?projectId=${encodeURIComponent(projectId)}`}`);

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createGateway, createGatewayPersistenceAdapter, type GatewayProtocolEvent } from "./index";
 import { type ChatProvider, type ProviderContent, type ProviderMessage } from "chat-provider-interface";
@@ -16,6 +17,8 @@ import {
   type IntegrationInput,
   type SkillInput,
   type PromptCommandInput,
+  type ProjectInput,
+  type GitCredentialInput,
 } from "data-layer";
 import { assembleHarnessContext, type HarnessApprovalPolicy, type HarnessContextAssembler } from "harness";
 import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
@@ -23,6 +26,7 @@ import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
 import { IntegrationManager } from "./integrations";
+import { cloneRepository, createEmptyWorkspace, createNativeGitTools, gitBranches, gitDiff, gitStatus, validateExistingWorkspace } from "./git";
 import {
   beginDeviceOAuth,
   beginProviderOAuth,
@@ -40,6 +44,7 @@ export type ApiGatewayServerOptions = {
   readonly staticRoot?: string;
   readonly maxRequestBytes?: number;
   readonly dataDir?: string;
+  readonly workspaceRoot?: string;
   readonly shutdownTimeoutMs?: number;
   readonly toolDefinitions?: readonly ToolDefinition[];
   readonly toolPolicyOverrides?: readonly ToolPolicyInput[];
@@ -281,12 +286,12 @@ function authenticated(
   return { principal, token };
 }
 
-function sessionRecord(sessionId: string, projectId: string | undefined, model: string): SessionRecord {
+function sessionRecord(sessionId: string, projectId: string | undefined, workspace: string | undefined, model: string): SessionRecord {
   const timestamp = new Date().toISOString();
   return {
     schemaVersion: 1,
     id: sessionId,
-    workspaceId: projectId ?? "default",
+    workspaceId: workspace ?? projectId ?? "default",
     status: "active",
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -322,11 +327,12 @@ function providerContentText(content: ProviderContent): string {
   return content.map(part => "text" in part ? part.text : JSON.stringify(part)).join("\n");
 }
 
-function agentSkillInstructions(agent: { readonly instructions: string }, skills: readonly { readonly id: string; readonly name: string; readonly instructions: string }[], clientSystemMessages: readonly ProviderContent[] = []): string {
+function agentSkillInstructions(agent: { readonly instructions: string }, skills: readonly { readonly id: string; readonly name: string; readonly instructions: string }[], clientSystemMessages: readonly ProviderContent[] = [], projectInstructions = ""): string {
   const agentInstructions = `<agent-instructions>\n${agent.instructions}\n</agent-instructions>`;
   const skillInstructions = skills.map(skill => `<skill id="${promptAttribute(skill.id)}" name="${promptAttribute(skill.name)}">\n${skill.instructions}\n</skill>`).join("\n");
   const clientInstructions = clientSystemMessages.length === 0 ? "" : `\n<client-system-instructions>\n${clientSystemMessages.map(providerContentText).join("\n")}\n</client-system-instructions>`;
-  return `${agentInstructions}\n<skills>\n${skillInstructions}\n</skills>${clientInstructions}`;
+  const project = projectInstructions.trim() === "" ? "" : `\n<project-instructions>\n${projectInstructions}\n</project-instructions>`;
+  return `${agentInstructions}${project}\n<skills>\n${skillInstructions}\n</skills>${clientInstructions}`;
 }
 
 export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGatewayServer {
@@ -334,7 +340,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   if (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1) throw new TypeError("maxRequestBytes must be positive");
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
   if (!Number.isFinite(shutdownTimeoutMs) || shutdownTimeoutMs <= 0) throw new TypeError("shutdownTimeoutMs must be positive");
-   const dataDir = options.dataDir ?? process.env.SUBPOLAR_DATA_DIR ?? resolve(process.cwd(), ".subpolar");
+  const dataDir = options.dataDir ?? process.env.SUBPOLAR_DATA_DIR ?? resolve(process.cwd(), ".subpolar");
+  const workspaceRoot = options.workspaceRoot ?? process.env.SUBPOLAR_WORKSPACE_ROOT ?? join(dataDir, "workspaces");
   const databasePath = join(dataDir, "state.db");
   const sessions = new SQLiteSessionRepository(databasePath);
   const identity = new SQLiteIdentityRepository(databasePath);
@@ -369,8 +376,16 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     return () => activeTurns.delete(controller);
   };
 
+  const toolDefinitionsFor = async (principal: AuthenticatedPrincipal, project: NonNullable<ReturnType<SQLiteIdentityRepository["getProject"]>> | null): Promise<readonly ToolDefinition[]> => {
+    const credential = project?.repository?.credentialId === undefined ? undefined : identity.getGitCredentialRuntime(principal.id, project.repository.credentialId);
+    const gitTools = project?.workspace === undefined || project.workspace === "" ? [] : createNativeGitTools(project.workspace, credential);
+    return [...(options.toolDefinitions ?? []), ...gitTools, ...(await integrations.toolsFor(principal.id))];
+  };
+
   const resolveEffectiveAgentConfiguration = async (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {
-    const toolDefinitions: readonly ToolDefinition[] = [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(principal.id))];
+    const project = projectId === undefined ? null : identity.getProject(principal.id, projectId);
+    if (projectId !== undefined && project === null) throw new OwnershipError("Project is not owned by the authenticated user");
+    const toolDefinitions = await toolDefinitionsFor(principal, project);
     const projectOverride = projectId === undefined ? null : identity.getAgentProjectOverride(principal.id, projectId, agent.id);
     const model = requestedModel !== "default" ? requestedModel : projectOverride?.model ?? agent.model;
     const effectiveCapabilities = (projectOverride?.capabilities ?? agent.capabilities).map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(principal.id, item.capabilityId) }));
@@ -390,14 +405,21 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const configuredEffort = requestedReasoning ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
     const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort as "low" | "medium" | "high" : undefined;
     const skills = identity.effectiveAgentSkills(principal.id, agent.id);
-    return { projectOverride, model, tools, reasoningEffort, skills };
+    return { projectOverride, model, tools, reasoningEffort, skills, project };
   };
 
-  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; reasoningEffort?: "low" | "medium" | "high"; contextAssembler?: HarnessContextAssembler }> => {
+  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; cwd?: string; reasoningEffort?: "low" | "medium" | "high"; contextAssembler?: HarnessContextAssembler }> => {
     const sessionId = input.sessionId ?? randomUUID();
-    const agent = input.agentId === undefined ? null : identity.getAgent(principal.id, input.agentId);
-    if (input.agentId !== undefined && agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
-    const effectiveAgent = agent === null ? null : await resolveEffectiveAgentConfiguration(principal, agent, sessionId, input.projectId, input.model, input.reasoningEffort, input.permissionMode);
+    const ownedSession = identity.listSessions(principal.id).find(item => item.sessionId === sessionId);
+    if (ownedSession?.projectId !== undefined && input.projectId !== undefined && ownedSession.projectId !== input.projectId) throw new OwnershipError("Session is assigned to another project");
+    const projectId = input.projectId ?? ownedSession?.projectId;
+    const project = projectId === undefined ? null : identity.getProject(principal.id, projectId);
+    if (projectId !== undefined && project === null) throw new OwnershipError("Project is not owned by the authenticated user");
+    const selectedAgentId = input.agentId ?? ownedSession?.agentId ?? project?.defaultAgentId;
+    const agent = selectedAgentId === undefined ? null : identity.getAgent(principal.id, selectedAgentId);
+    if (selectedAgentId !== undefined && agent === null) throw new OwnershipError("Agent is not owned by the authenticated user");
+    if (agent !== null && projectId !== undefined && agent.projectId !== projectId) throw new OwnershipError("Agent is not assigned to this project");
+    const effectiveAgent = agent === null ? null : await resolveEffectiveAgentConfiguration(principal, agent, sessionId, projectId, input.model, input.reasoningEffort, input.permissionMode);
     const selectedModel = effectiveAgent?.model ?? agent?.model;
     const effectiveModel = selectedModel ?? (options.provider === undefined ? identity.providerConnection()?.model ?? input.model : input.model);
     const explicitReasoning = input.reasoningEffort;
@@ -405,28 +427,30 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     if (existing !== null) {
       identity.assertSessionOwner(principal.id, sessionId);
     } else {
-      identity.claimSession(principal.id, sessionId, input.projectId, input.agentId);
-      await sessions.createSession(sessionRecord(sessionId, input.projectId, effectiveModel));
+      identity.claimSession(principal.id, sessionId, projectId, selectedAgentId);
+      await sessions.createSession(sessionRecord(sessionId, projectId, project?.workspace, effectiveModel));
     }
     if (agent !== null) {
       const tools = effectiveAgent?.tools ?? [];
       const reasoningEffort = effectiveAgent?.reasoningEffort;
       const clientSystemMessages = input.messages.filter(message => message.role === "system").map(message => message.content);
-      if (agent.instructions.trim() || (effectiveAgent?.skills.length ?? 0) > 0 || clientSystemMessages.length > 0) {
+      if (agent.instructions.trim() || project?.instructions.trim() || (effectiveAgent?.skills.length ?? 0) > 0 || clientSystemMessages.length > 0) {
         const contextAssembler: HarnessContextAssembler = async context => {
-          if ((effectiveAgent?.skills.length ?? 0) === 0 && clientSystemMessages.length === 0) return [{ role: "system", content: agent.instructions }, ...context.messages];
+          if ((effectiveAgent?.skills.length ?? 0) === 0 && clientSystemMessages.length === 0 && project?.instructions.trim() === "") return [{ role: "system", content: agent.instructions }, ...context.messages];
           // Client-provided system messages are preserved as data inside the server-owned
           // structured section. They must not bypass Agent instructions or assigned Skills.
           const messages = context.messages.filter(message => message.role !== "system");
           return assembleHarnessContext({ ...context, messages }, {
-            sources: [{ kind: "instructions", content: agentSkillInstructions(agent, effectiveAgent?.skills ?? [], clientSystemMessages) }],
+            sources: [{ kind: "instructions", content: agentSkillInstructions(agent, effectiveAgent?.skills ?? [], clientSystemMessages, project?.instructions ?? "") }],
           }).messages;
         };
-        return { input: { ...input, model: effectiveModel }, sessionId, tools, contextAssembler, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+        return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), contextAssembler, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
       }
-      return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+      return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
     }
-    return { input: { ...input, model: effectiveModel }, sessionId, tools: [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(principal.id))], ...(explicitReasoning === undefined ? {} : { reasoningEffort: explicitReasoning }) };
+    const projectTools = await toolDefinitionsFor(principal, project);
+    const contextAssembler = project?.instructions.trim() === "" ? undefined : (async context => assembleHarnessContext({ ...context, messages: context.messages.filter(message => message.role !== "system") }, { sources: [{ kind: "instructions", content: `<project-instructions>\n${project.instructions}\n</project-instructions>` }] }).messages);
+    return { input: { ...input, model: effectiveModel }, sessionId, tools: projectTools, ...(project?.workspace ? { cwd: project.workspace } : {}), ...(contextAssembler === undefined ? {} : { contextAssembler }), ...(explicitReasoning === undefined ? {} : { reasoningEffort: explicitReasoning }) };
   };
 
   const executeTurn = async (
@@ -437,6 +461,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     turnApprovalPolicy?: HarnessApprovalPolicy,
   ): Promise<unknown> => {
     const prepared = await prepareTurn(principal, input);
+    if (prepared.cwd !== undefined) await gateway.setSessionCwd(prepared.sessionId, prepared.cwd);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
     const runtime = connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
@@ -448,6 +473,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       toolDefinitions: prepared.tools,
       toolPolicyOverrides: prepared.tools.length === 0 ? options.toolPolicyOverrides ?? [] : [],
       sessionId: prepared.sessionId,
+      ...(prepared.cwd === undefined ? {} : { cwd: prepared.cwd }),
       requestId: prepared.input.requestId ?? randomUUID(),
       ...(prepared.reasoningEffort === undefined ? {} : { options: { reasoningEffort: prepared.reasoningEffort } }),
       signal,
@@ -636,7 +662,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       if (url.pathname === "/v1/capabilities" && request.method === "GET") {
         const auth = authenticated(request, identity);
         if (auth instanceof Response) return auth;
-        const definitions = [...(options.toolDefinitions ?? []), ...(await integrations.toolsFor(auth.principal.id))];
+        const definitions = [...(options.toolDefinitions ?? []), ...createNativeGitTools(workspaceRoot), ...(await integrations.toolsFor(auth.principal.id))];
         return json({ capabilities: definitions.map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow", ...(definition.integrationId === undefined ? {} : { integrationId: definition.integrationId }), ...(definition.integrationName === undefined ? {} : { integrationName: definition.integrationName }), ...(definition.integrationType === undefined ? {} : { integrationType: definition.integrationType }), ...(definition.nativeName === undefined ? {} : { nativeName: definition.nativeName }), ...(definition.displayName === undefined ? {} : { displayName: definition.displayName }) })) });
       }
 
@@ -720,7 +746,11 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         try {
           const value = await body(request, maxRequestBytes);
           if (!Array.isArray(value.templates) || value.templates.some(template => typeof template !== "string")) throw new Error("templates are invalid");
-          return json(identity.createInitialAgents(auth.principal.id, value.templates), 201);
+          const existingProjects = identity.listProjects(auth.principal.id);
+          const workspace = existingProjects.length === 0 ? await createEmptyWorkspace(workspaceRoot, randomUUID()) : existingProjects[0]?.workspace ?? "";
+          const result = identity.createInitialAgents(auth.principal.id, value.templates, workspace);
+          if (result.project.workspace !== workspace && workspace !== "") identity.updateProject(auth.principal.id, result.project.id, { workspace });
+          return json({ ...result, project: identity.getProject(auth.principal.id, result.project.id) }, 201);
         } catch { return json({ error: "invalid_templates" }, 400); }
       }
 
@@ -791,8 +821,70 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (auth instanceof Response) return auth;
         if (request.method === "GET") return json({ projects: identity.listProjects(auth.principal.id) });
         if (request.method === "POST") {
-          try { const value = await body(request, maxRequestBytes); return json({ project: identity.createProject(auth.principal.id, String(value.name ?? "")) }, 201); } catch { return json({ error: "invalid_project" }, 400); }
+          let workspace = "";
+          let projectId = "";
+          try {
+            const value = await body(request, maxRequestBytes);
+            const mode = value.workspaceMode === undefined ? "create" : String(value.workspaceMode);
+            if (mode !== "create" && mode !== "existing" && mode !== "clone") throw new Error("workspace mode is invalid");
+            projectId = randomUUID();
+            const repositoryValue = value.repository;
+            const repository = repositoryValue === undefined ? undefined : (() => {
+              if (typeof repositoryValue !== "object" || repositoryValue === null || Array.isArray(repositoryValue)) throw new Error("repository is invalid");
+              const item = repositoryValue as Record<string, unknown>;
+              return { url: String(item.url ?? ""), credentialId: item.credentialId === undefined ? undefined : String(item.credentialId), defaultBranch: item.defaultBranch === undefined ? undefined : String(item.defaultBranch), remoteName: String(item.remoteName ?? "origin") };
+            })();
+            if (mode === "existing") workspace = await validateExistingWorkspace(workspaceRoot, String(value.workspacePath ?? ""));
+            else workspace = await createEmptyWorkspace(workspaceRoot, projectId);
+            const credential = repository?.credentialId === undefined ? undefined : identity.getGitCredentialRuntime(auth.principal.id, repository.credentialId);
+            if (mode === "clone") {
+              if (repository === undefined) throw new Error("clone repository is required");
+              await cloneRepository(workspace, repository, credential);
+            }
+            const projectInput: ProjectInput = { id: projectId, name: String(value.name ?? ""), description: value.description === undefined ? undefined : String(value.description), instructions: value.instructions === undefined ? undefined : String(value.instructions), workspace, repository, defaultAgentId: value.defaultAgentId === undefined ? undefined : String(value.defaultAgentId), settings: value.settings as Record<string, unknown> | undefined };
+            return json({ project: identity.createProject(auth.principal.id, projectInput) }, 201);
+          } catch { if (projectId && workspace && workspace.startsWith(resolve(workspaceRoot))) await rm(workspace, { recursive: true, force: true }).catch(() => undefined); return json({ error: "invalid_project" }, 400); }
         }
+        return json({ error: "method_not_allowed" }, 405);
+      }
+
+      const gitCredentialPath = /^\/v1\/git\/credentials(?:\/([^/]+))?$/.exec(url.pathname);
+      if (gitCredentialPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const credentialId = gitCredentialPath[1] === undefined ? undefined : decodeURIComponent(gitCredentialPath[1]);
+        if (request.method === "GET" && credentialId === undefined) return json({ credentials: identity.listGitCredentials(auth.principal.id) });
+        if (request.method === "POST" && credentialId === undefined) {
+          try { return json({ credential: identity.createGitCredential(auth.principal.id, await body(request, maxRequestBytes) as GitCredentialInput) }, 201); } catch { return json({ error: "invalid_git_credential" }, 400); }
+        }
+        if (request.method === "DELETE" && credentialId !== undefined) {
+          try { identity.deleteGitCredential(auth.principal.id, credentialId); return json({ deleted: true }); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "credential_in_use" }, error instanceof OwnershipError ? 403 : 409); }
+        }
+        return json({ error: "method_not_allowed" }, 405);
+      }
+
+      const projectGitPath = /^\/v1\/projects\/([^/]+)\/git\/(status|diff|branches)$/.exec(url.pathname);
+      if (projectGitPath !== null && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        if (auth instanceof Response) return auth;
+        const project = identity.getProject(auth.principal.id, decodeURIComponent(projectGitPath[1]!));
+        if (project === null) return json({ error: "not_found" }, 404);
+        if (!project.workspace) return json({ error: "workspace_unavailable" }, 400);
+        try {
+          if (projectGitPath[2] === "status") return json(await gitStatus(project.workspace));
+          if (projectGitPath[2] === "branches") return json({ branches: await gitBranches(project.workspace) });
+          return json({ diff: await gitDiff(project.workspace, url.searchParams.get("path") ?? undefined, url.searchParams.get("staged") === "true") });
+        } catch { return json({ error: "git_unavailable" }, 400); }
+      }
+
+      const projectPath = /^\/v1\/projects\/([^/]+)$/.exec(url.pathname);
+      if (projectPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const projectId = decodeURIComponent(projectPath[1]!);
+        if (request.method === "GET") { const project = identity.getProject(auth.principal.id, projectId); return project === null ? json({ error: "not_found" }, 404) : json({ project }); }
+        if (request.method === "PATCH") { try { const patch = await body(request, maxRequestBytes) as Partial<ProjectInput>; if (Object.hasOwn(patch, "workspace")) throw new Error("workspace is immutable"); if (patch.repository?.credentialId !== undefined) identity.getGitCredentialRuntime(auth.principal.id, patch.repository.credentialId); return json({ project: identity.updateProject(auth.principal.id, projectId, patch) }); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_project" }, error instanceof OwnershipError ? 403 : 400); } }
+        if (request.method === "DELETE") { try { identity.deleteProject(auth.principal.id, projectId); return json({ deleted: true }); } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "not_found" }, error instanceof OwnershipError ? 403 : 404); } }
         return json({ error: "method_not_allowed" }, 405);
       }
 

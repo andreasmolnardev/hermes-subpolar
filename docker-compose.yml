@@ -21,6 +21,7 @@ services:
     environment:
       SUBPOLAR_HOST: 0.0.0.0
       SUBPOLAR_DATA_DIR: /opt/data
+      SUBPOLAR_WORKSPACE_ROOT: /opt/data/workspaces
     command: ['bun', 'packages/api-gateway/src/server.ts']
     healthcheck:
       test: ['CMD', 'bun', '-e', "fetch('http://127.0.0.1:8080/api/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]

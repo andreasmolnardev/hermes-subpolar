@@ -18,6 +18,10 @@ export type SubpolarSkillInput = { readonly name: string; readonly description: 
 export type SubpolarPromptCommand = { readonly id: string; readonly ownerId: string; readonly name: string; readonly description: string; readonly prompt: string; readonly enabled: boolean; readonly createdAt: string; readonly updatedAt: string };
 export type SubpolarPromptCommandInput = { readonly name: string; readonly description: string; readonly prompt: string; readonly enabled: boolean };
 export type SubpolarSession = { readonly sessionId: string; readonly ownerId: string; readonly projectId?: string; readonly agentId?: string; readonly createdAt: string };
+export type SubpolarAutomationSchedule = { readonly kind: 'cron'; readonly expression: string; readonly timezone: string } | { readonly kind: 'once'; readonly at: string; readonly timezone: string };
+export type SubpolarAutomation = { readonly id: string; readonly ownerId: string; readonly name: string; readonly enabled: boolean; readonly schedule: SubpolarAutomationSchedule; readonly prompt: string; readonly agentId: string; readonly projectId?: string; readonly model?: string; readonly permissionMode: 'read-only' | 'pre-approved' | 'fail'; readonly metadata: Record<string, unknown>; readonly lastRunAt?: string; readonly nextRunAt?: string; readonly createdAt: string; readonly updatedAt: string };
+export type SubpolarAutomationRun = { readonly id: string; readonly automationId: string; readonly ownerId: string; readonly status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'needs_attention'; readonly scheduledFor: string; readonly startedAt?: string; readonly completedAt?: string; readonly sessionId: string; readonly error?: string; readonly triggerMetadata: Record<string, unknown> };
+export type SubpolarAutomationInput = { readonly name: string; readonly enabled?: boolean; readonly schedule: SubpolarAutomationSchedule; readonly prompt: string; readonly agentId: string; readonly projectId?: string | null; readonly model?: string | null; readonly permissionMode: 'read-only' | 'pre-approved' | 'fail'; readonly metadata?: Record<string, unknown> };
 export type SubpolarMessage = { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string | readonly Record<string, unknown>[]; readonly sequence?: number };
 export type SubpolarSetupStatus = { readonly complete: boolean; readonly providerConfigured: boolean };
 export type SubpolarModelDefaults = { readonly conversation: string; readonly internal: string; readonly voice: string; readonly image: string };
@@ -263,4 +267,28 @@ export function sessions(): Promise<{ readonly sessions: readonly SubpolarSessio
 
 export function sessionTranscript(sessionId: string): Promise<{ readonly session: unknown; readonly messages: readonly SubpolarMessage[] }> {
   return subpolarRequest(`/v1/sessions/${encodeURIComponent(sessionId)}`);
+}
+
+export function automations(projectId?: string): Promise<{ readonly automations: readonly SubpolarAutomation[] }> {
+  return subpolarRequest(`/v1/automations${projectId === undefined ? '' : `?projectId=${encodeURIComponent(projectId)}`}`);
+}
+
+export function createAutomation(input: SubpolarAutomationInput): Promise<{ readonly automation: SubpolarAutomation }> {
+  return subpolarRequest('/v1/automations', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateAutomation(automationId: string, input: Partial<SubpolarAutomationInput>): Promise<{ readonly automation: SubpolarAutomation }> {
+  return subpolarRequest(`/v1/automations/${encodeURIComponent(automationId)}`, { method: 'PATCH', body: JSON.stringify(input) });
+}
+
+export function deleteAutomation(automationId: string): Promise<{ readonly deleted: true }> {
+  return subpolarRequest(`/v1/automations/${encodeURIComponent(automationId)}`, { method: 'DELETE' });
+}
+
+export function automationRuns(automationId: string): Promise<{ readonly runs: readonly SubpolarAutomationRun[] }> {
+  return subpolarRequest(`/v1/automations/${encodeURIComponent(automationId)}/runs`);
+}
+
+export function triggerAutomation(automationId: string): Promise<{ readonly run: SubpolarAutomationRun }> {
+  return subpolarRequest(`/v1/automations/${encodeURIComponent(automationId)}/run`, { method: 'POST', body: JSON.stringify({}) });
 }

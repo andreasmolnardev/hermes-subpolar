@@ -28,8 +28,12 @@ import {
   agents,
   availableModels,
   capabilities,
+  automations,
+  automationRuns,
   createAgent,
+  createAutomation,
   createProjectFromInput,
+  deleteAutomation,
   gitCredentials,
   gitDiff,
   gitStatus,
@@ -41,8 +45,11 @@ import {
   sessionTranscript,
   sessions,
   updateAgent,
+  updateAutomation,
   type SubpolarAgent,
   type SubpolarAgentUpdate,
+  type SubpolarAutomation,
+  type SubpolarAutomationRun,
   type SubpolarCapability,
   type SubpolarGitCredential,
   type SubpolarGitStatus,
@@ -76,11 +83,6 @@ const ICONS: Record<IconName, ComponentType<{ size?: number; className?: string 
   palette: Palette
 }
 const ICON_OPTIONS = Object.keys(ICONS) as IconName[]
-const AUTOMATIONS = [
-  { id: 'issues', name: 'New issues', description: 'Triage and summarize new project issues.' },
-  { id: 'prs', name: 'Review PRs', description: 'Review pull requests on a schedule.' }
-]
-
 function randomId() {
   return typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
@@ -241,6 +243,7 @@ function CollectionSidebar({
   kind,
   title,
   items,
+  projects = [],
   selected,
   basePath,
   onExpand
@@ -248,10 +251,17 @@ function CollectionSidebar({
   kind: 'agents' | 'automations'
   title: string
   items: readonly { id: string; name: string; icon?: string }[]
+  projects?: readonly SubpolarProject[]
   selected: string
   basePath: string
   onExpand: () => void
 }) {
+  const groups = kind === 'automations'
+    ? [
+        { label: 'Global', items: items.filter(item => !(item as SubpolarAutomation).projectId) },
+        ...projects.map(project => ({ label: project.name, items: items.filter(item => (item as SubpolarAutomation).projectId === project.id) }))
+      ].filter(group => group.items.length > 0)
+    : [{ label: 'Default', items }]
   return (
     <aside className="hidden w-56 shrink-0 flex-col border-r border-[color-mix(in_srgb,var(--midground-base)_16%,transparent)] bg-[var(--color-card,var(--background-base))] sm:flex">
       <div className="flex h-16 items-center gap-2 border-b border-white/10 px-3">
@@ -265,17 +275,8 @@ function CollectionSidebar({
         <span className="font-semibold text-[var(--color-card-foreground,var(--midground-base))]">{title}</span>
       </div>
       <div className="p-3">
-        <p className="mb-2 text-[10px] uppercase tracking-widest text-[#718b82]">Default</p>
-        {items.map(item => (
-          <Link
-            key={item.id}
-            to={`${basePath}/${encodeURIComponent(item.id)}`}
-            className={`${selected === item.id ? 'bg-[#2a5558] text-white' : 'text-[#b3c4bb] hover:bg-white/5'} mb-1 flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-sm`}
-          >
-            {kind === 'agents' ? agentIcon(item as SubpolarAgent) : <Zap size={16} />}
-            <span className="truncate">{item.name}</span>
-          </Link>
-        ))}
+        {groups.map(group => <div key={group.label} className="mb-4 last:mb-0"><p className="mb-2 text-[10px] uppercase tracking-widest text-[#718b82]">{group.label}</p>{group.items.map(item => <Link key={item.id} to={`${basePath}/${encodeURIComponent(item.id)}`} className={`${selected === item.id ? 'bg-[#2a5558] text-white' : 'text-[#b3c4bb] hover:bg-white/5'} mb-1 flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-sm`}>{kind === 'agents' ? agentIcon(item as SubpolarAgent) : <Zap size={16} />}<span className="truncate">{item.name}</span></Link>)}</div>)}
+        {groups.length === 0 && <p className="text-xs text-[#829b92]">No automations yet.</p>}
       </div>
     </aside>
   )
@@ -284,14 +285,24 @@ function CollectionSidebar({
 function Gallery({
   view,
   agents: agentList,
+  automations: automationList,
+  projects,
   createTo
 }: {
   view: 'agents' | 'automations'
   agents: readonly SubpolarAgent[]
+  automations: readonly SubpolarAutomation[]
+  projects: readonly SubpolarProject[]
   createTo: string
 }) {
   const isAgents = view === 'agents'
-  const cards = isAgents ? agentList : AUTOMATIONS
+  const cards = isAgents ? agentList : automationList
+  const groups = isAgents
+    ? [{ label: 'Default', items: cards }]
+    : [
+        { label: 'Global', items: automationList.filter(automation => automation.projectId === undefined) },
+        ...projects.map(project => ({ label: project.name, items: automationList.filter(automation => automation.projectId === project.id) }))
+      ].filter(group => group.items.length > 0)
   return (
     <section className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-8">
       <div className="mb-8 flex items-end justify-between">
@@ -304,37 +315,65 @@ function Gallery({
           <Plus className="mr-1 inline" size={15} /> Create
         </Link>
       </div>
-      <p className="mb-3 text-xs uppercase tracking-widest text-[#829b92]">Default</p>
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {cards.map(item => (
-          <Link
-            key={item.id}
-            to={`/${isAgents ? 'agents' : 'automations'}/${encodeURIComponent(item.id)}`}
-            className="group min-h-36 rounded-xl border border-white/10 bg-[#102627] p-5 text-left transition hover:-translate-y-0.5 hover:border-[#70d7cc]/50"
-          >
-            <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#1d4142] text-[#70d7cc]">
-              {isAgents ? agentIcon(item as SubpolarAgent) : <CalendarClock size={20} />}
-            </div>
-            <h2 className="font-semibold group-hover:text-[#a9ddd5]">{item.name}</h2>
-            <p className="mt-1 text-xs leading-5 text-[#829b92]">
-              {'instructions' in item ? item.instructions || 'Custom workspace agent' : item.description}
-            </p>
-          </Link>
-        ))}
-      </div>
+      {groups.map(group => <div key={group.label} className="mb-8 last:mb-0"><p className="mb-3 text-xs uppercase tracking-widest text-[#829b92]">{group.label}</p><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{group.items.map(item => <Link key={item.id} to={`/${isAgents ? 'agents' : 'automations'}/${encodeURIComponent(item.id)}`} className="group min-h-36 rounded-xl border border-white/10 bg-[#102627] p-5 text-left transition hover:-translate-y-0.5 hover:border-[#70d7cc]/50"><div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#1d4142] text-[#70d7cc]">{isAgents ? agentIcon(item as SubpolarAgent) : <CalendarClock size={20} />}</div><h2 className="font-semibold group-hover:text-[#a9ddd5]">{item.name}</h2><p className="mt-1 text-xs leading-5 text-[#829b92]">{'instructions' in item ? item.instructions || 'Custom workspace agent' : item.prompt || 'Scheduled Agent run'}</p></Link>)}</div></div>)}
       {cards.length === 0 && (
         <div className="rounded-xl border border-dashed border-white/15 p-10 text-center text-sm text-[#829b92]">
-          No {view} in this project yet.
+          No {isAgents ? 'agents' : 'automations'} yet.
         </div>
       )}
     </section>
   )
 }
 
-function Detail({ kind, name, agent, inventory = [], skillInventory = [] }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent; inventory?: readonly SubpolarCapability[]; skillInventory?: readonly SubpolarSkill[] }) {
+function AutomationDetail({ automation, agentList, projectList, onSaved, onDelete }: { automation: SubpolarAutomation; agentList: readonly SubpolarAgent[]; projectList: readonly SubpolarProject[]; onSaved: (automation: SubpolarAutomation) => void; onDelete: () => void }) {
+  const [draft, setDraft] = useState(automation)
+  const [runs, setRuns] = useState<readonly SubpolarAutomationRun[]>([])
+  const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [expression, setExpression] = useState(automation.schedule.kind === 'cron' ? automation.schedule.expression : '')
+  useEffect(() => {
+    setDraft(automation)
+    setExpression(automation.schedule.kind === 'cron' ? automation.schedule.expression : '')
+    void automationRuns(automation.id).then(result => setRuns(result.runs)).catch(() => setRuns([]))
+  }, [automation])
+  const save = async () => {
+    setBusy(true)
+    try {
+      const result = await updateAutomation(automation.id, {
+        name: draft.name,
+        enabled: draft.enabled,
+        prompt: draft.prompt,
+        agentId: draft.agentId,
+        projectId: draft.projectId ?? null,
+        model: draft.model ?? null,
+        permissionMode: draft.permissionMode,
+        schedule: { kind: 'cron', expression: expression.trim(), timezone: draft.schedule.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone }
+      })
+      setDraft(result.automation)
+      onSaved(result.automation)
+      setSaved(true)
+      window.setTimeout(() => setSaved(false), 1800)
+      void automationRuns(automation.id).then(result => setRuns(result.runs)).catch(() => undefined)
+    } finally { setBusy(false) }
+  }
+  return <main className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-8"><div className="mx-auto max-w-4xl">
+    <div className="mb-8 flex items-center justify-between gap-3"><div className="flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#1d4142] text-[#70d7cc]"><CalendarClock /></div><div><p className="text-xs uppercase tracking-widest text-[#70d7cc]">Scheduled automation</p><h1 className="text-2xl font-semibold">{draft.name}</h1></div></div><button className="rounded border border-red-300/30 px-3 py-2 text-xs text-red-200" onClick={() => { if (window.confirm('Delete this automation?')) void deleteAutomation(automation.id).then(onDelete) }}>Delete</button></div>
+    {saved && <p className="mb-4 text-sm text-[#70d7cc]">Saved</p>}
+    <div className="grid gap-5">
+      <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Automation</h2><div className="grid gap-3 sm:grid-cols-2"><input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Name" /><label className="flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} /> Enabled</label></div></section>
+      <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Schedule</h2><div className="grid gap-3 sm:grid-cols-2"><input value={expression} onChange={event => setExpression(event.target.value)} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2 font-mono" placeholder="0 8 * * *" /><input value={draft.schedule.timezone} onChange={event => setDraft({ ...draft, schedule: { kind: 'cron', expression, timezone: event.target.value } })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Europe/Berlin" /></div><p className="mt-2 text-xs text-[#829b92]">Five-field cron: minute hour day-of-month month day-of-week. Examples: <button className="underline" onClick={() => setExpression('0 8 * * *')}>daily at 08:00</button>, <button className="underline" onClick={() => setExpression('0 9 * * 1')}>Mondays at 09:00</button>, <button className="underline" onClick={() => setExpression('0 */6 * * *')}>every 6 hours</button>.</p></section>
+      <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Execution</h2><div className="grid gap-3 sm:grid-cols-2"><select value={draft.agentId} onChange={event => setDraft({ ...draft, agentId: event.target.value })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="">Choose agent</option>{agentList.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select><select value={draft.projectId ?? ''} onChange={event => setDraft({ ...draft, projectId: event.target.value || undefined })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="">Global (no project)</option>{projectList.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select><input value={draft.model ?? ''} onChange={event => setDraft({ ...draft, model: event.target.value || undefined })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2" placeholder="Agent model default" /><select value={draft.permissionMode} onChange={event => setDraft({ ...draft, permissionMode: event.target.value as SubpolarAutomation['permissionMode'] })} className="rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2"><option value="read-only">Read-only</option><option value="pre-approved">Pre-approved configured permissions</option><option value="fail">Fail when approval is required</option></select></div><textarea value={draft.prompt} onChange={event => setDraft({ ...draft, prompt: event.target.value })} className="mt-3 min-h-40 w-full rounded-lg border border-white/10 bg-[#091d1e] p-3" placeholder="Prompt sent to the Agent" /></section>
+      <button disabled={busy} onClick={() => void save()} className="rounded-lg bg-[#a9ddd5] px-4 py-2 text-sm font-semibold text-[#102627] disabled:opacity-50">{busy ? 'Saving…' : 'Save automation'}</button>
+      <section className="rounded-xl border border-white/10 bg-[#102627] p-5"><h2 className="mb-4 text-xs uppercase tracking-widest text-[#70d7cc]">Run history</h2>{runs.length === 0 ? <p className="text-sm text-[#829b92]">No runs yet.</p> : <div className="space-y-2">{runs.map(run => <div key={run.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 p-3 text-sm"><span className="capitalize">{run.status.replace('_', ' ')}</span><span className="text-xs text-[#829b92]">{new Date(run.scheduledFor).toLocaleString()}</span>{run.sessionId && <Link className="text-xs text-[#70d7cc] underline" to={`/chat/${encodeURIComponent(run.sessionId)}`}>Open session</Link>}{run.error && <p className="basis-full text-xs text-red-200">{run.error}</p>}</div>)}</div>}</section>
+    </div>
+  </div></main>
+}
+
+function Detail({ kind, name, agent, automation, automationAgents = [], projects = [], onAutomationSaved, onAutomationDelete, inventory = [], skillInventory = [] }: { kind: 'agent' | 'automation'; name: string; agent?: SubpolarAgent; automation?: SubpolarAutomation; automationAgents?: readonly SubpolarAgent[]; projects?: readonly SubpolarProject[]; onAutomationSaved?: (automation: SubpolarAutomation) => void; onAutomationDelete?: () => void; inventory?: readonly SubpolarCapability[]; skillInventory?: readonly SubpolarSkill[] }) {
   const [draft, setDraft] = useState(agent)
   const [saved, setSaved] = useState(false)
   useEffect(() => setDraft(agent), [agent?.id])
+  if (kind === 'automation' && automation !== undefined && onAutomationSaved !== undefined && onAutomationDelete !== undefined) return <AutomationDetail automation={automation} agentList={automationAgents} projectList={projects} onSaved={onAutomationSaved} onDelete={onAutomationDelete} />
   if (kind === 'agent' && draft !== undefined) {
     const rows = [...inventory.filter(item => !draft.capabilities.some(capability => capability.capabilityId === item.capabilityId)), ...draft.capabilities.map(item => { const meta = inventory.find(candidate => candidate.capabilityId === item.capabilityId); return { ...meta, ...item, name: meta?.name ?? item.capabilityId, description: meta?.description ?? '', source: meta?.source ?? 'other', capabilities: meta?.capabilities ?? [], defaultPolicy: meta?.defaultPolicy ?? 'deny' as const } })]
     const enabled = new Set(draft.capabilities.filter(item => item.enabled).map(item => item.capabilityId))
@@ -715,7 +754,7 @@ type WorkspaceRoute = {
   agentId?: string
   automationId?: string
   sessionId?: string
-  create: 'project' | 'agent' | null
+  create: 'project' | 'agent' | 'automation' | null
 }
 
 function routeSegment(value: string | undefined): string | undefined {
@@ -746,7 +785,7 @@ function workspaceRoute(pathname: string): WorkspaceRoute {
     return { view: 'projects', projectId: routeSegment(parts[1]), create: null }
   }
   if (section === 'agents') return { view: 'agents', agentId: routeSegment(parts[1]), create: null }
-  if (section === 'automations') return { view: 'automations', automationId: routeSegment(parts[1]), create: null }
+  if (section === 'automations') return { view: 'automations', automationId: parts[1] === 'new' ? undefined : routeSegment(parts[1]), create: parts[1] === 'new' ? 'automation' : null }
   return { view: section === 'apps' ? 'apps' : 'chat', create: null }
 }
 
@@ -755,6 +794,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   const routerNavigate = useNavigate()
   const [projectList, setProjectList] = useState<readonly SubpolarProject[]>([]),
     [agentList, setAgentList] = useState<readonly SubpolarAgent[]>([]),
+    [automationList, setAutomationList] = useState<readonly SubpolarAutomation[]>([]),
     [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([]),
     [capabilityInventory, setCapabilityInventory] = useState<readonly SubpolarCapability[]>([])
   const [skillInventory, setSkillInventory] = useState<readonly SubpolarSkill[]>([])
@@ -781,7 +821,14 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     [newDefaultBranch, setNewDefaultBranch] = useState(''),
     [newCredentialId, setNewCredentialId] = useState(''),
     [newInstructions, setNewInstructions] = useState(''),
-    [newIcon, setNewIcon] = useState<IconName | ''>('')
+    [newIcon, setNewIcon] = useState<IconName | ''>(''),
+    [newSchedule, setNewSchedule] = useState('0 8 * * *'),
+    [newTimezone, setNewTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
+    [newAutomationPrompt, setNewAutomationPrompt] = useState(''),
+    [newAutomationAgentId, setNewAutomationAgentId] = useState(''),
+    [newAutomationProjectId, setNewAutomationProjectId] = useState(''),
+    [newAutomationModel, setNewAutomationModel] = useState(''),
+    [newAutomationPermission, setNewAutomationPermission] = useState<SubpolarAutomation['permissionMode']>('fail')
   const route = useMemo(() => workspaceRoute(location.pathname), [location.pathname])
   const query = useMemo(() => new URLSearchParams(location.search), [location.search])
   const queryProjectId = query.get('projectId') ?? undefined
@@ -832,6 +879,13 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     setNewCredentialId('')
     setNewInstructions('')
     setNewIcon('')
+    setNewSchedule('0 8 * * *')
+    setNewTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    setNewAutomationPrompt('')
+    setNewAutomationAgentId(agentList[0]?.id ?? '')
+    setNewAutomationProjectId(selectedProject)
+    setNewAutomationModel('')
+    setNewAutomationPermission('fail')
   }, [modal])
   async function refreshSessions() {
     try {
@@ -841,10 +895,11 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     }
   }
   useEffect(() => {
-    void Promise.all([projects(), sessions()])
-      .then(([projectResult, sessionResult]) => {
+    void Promise.all([projects(), sessions(), automations()])
+      .then(([projectResult, sessionResult, automationResult]) => {
         setProjectList(projectResult.projects)
         setSessionList(sessionResult.sessions)
+        setAutomationList(automationResult.automations)
       })
       .catch(() => setError('Could not load workspace.'))
   }, [])
@@ -872,14 +927,14 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
       .catch(() => undefined)
   }, [])
   useEffect(() => {
-    const scope =
+    const scope = view === 'automations' ? undefined :
       route.projectId ??
       queryProjectId ??
       (route.agentId === undefined && selectedProject ? selectedProject : undefined)
     void agents(scope)
       .then(result => setAgentList(result.agents))
       .catch(() => setAgentList([]))
-  }, [route.agentId, route.projectId, queryProjectId, selectedProject])
+  }, [route.agentId, route.projectId, queryProjectId, selectedProject, view])
   useEffect(() => {
     if (selectedSession === null) {
       setMessages([])
@@ -990,6 +1045,11 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
         setAgentList(agents => [...agents, result.agent])
         setSidebarCollapsed(true)
         routerNavigate(`/agents/${encodeURIComponent(result.agent.id)}`)
+      } else if (modal === 'automation' && newAutomationAgentId) {
+        const result = await createAutomation({ name: newName.trim(), enabled: true, schedule: { kind: 'cron', expression: newSchedule, timezone: newTimezone }, prompt: newAutomationPrompt, agentId: newAutomationAgentId, projectId: newAutomationProjectId || null, model: newAutomationModel || null, permissionMode: newAutomationPermission })
+        setAutomationList(automations => [...automations, result.automation])
+        setSidebarCollapsed(true)
+        routerNavigate(`/automations/${encodeURIComponent(result.automation.id)}`)
       }
       setNewName('')
       setNewDescription('')
@@ -1006,6 +1066,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   }
 
   const activeAgent = useMemo(() => agentList.find(agent => agent.id === selectedAgent), [agentList, selectedAgent])
+  const activeAutomation = useMemo(() => automationList.find(automation => automation.id === selectedAutomation), [automationList, selectedAutomation])
   const detailOpen = (view === 'agents' && selectedAgent) || (view === 'automations' && selectedAutomation)
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--background-base)] text-[var(--midground-base)]">
@@ -1026,7 +1087,8 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
         <CollectionSidebar
           kind={view as 'agents' | 'automations'}
           title={view === 'agents' ? 'Agents' : 'Scheduled'}
-          items={view === 'agents' ? agentList : AUTOMATIONS}
+          items={view === 'agents' ? agentList : automationList}
+          projects={projectList}
           selected={view === 'agents' ? selectedAgent : selectedAutomation}
           basePath={view === 'agents' ? '/agents' : '/automations'}
           onExpand={() => setSidebarCollapsed(false)}
@@ -1053,7 +1115,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
                     : view === 'agents'
                       ? (activeAgent?.name ?? 'Agents')
                       : view === 'automations'
-                        ? (AUTOMATIONS.find(automation => automation.id === selectedAutomation)?.name ??
+                        ? (activeAutomation?.name ??
                           'Scheduled tasks')
                         : view === 'projects'
                           ? 'Projects'
@@ -1133,9 +1195,14 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
             name={
               view === 'agents'
                 ? (activeAgent?.name ?? 'Agent')
-                : (AUTOMATIONS.find(automation => automation.id === selectedAutomation)?.name ?? 'Automation')
+                : (activeAutomation?.name ?? 'Automation')
             }
             agent={activeAgent}
+            automation={activeAutomation}
+            automationAgents={agentList}
+            projects={projectList}
+            onAutomationSaved={updated => setAutomationList(items => items.map(item => item.id === updated.id ? updated : item))}
+            onAutomationDelete={() => { setAutomationList(items => items.filter(item => item.id !== selectedAutomation)); routerNavigate('/automations') }}
             inventory={capabilityInventory}
             skillInventory={skillInventory}
           />
@@ -1143,12 +1210,14 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
           <Gallery
             view={view}
             agents={agentList}
+            automations={automationList}
+            projects={projectList}
             createTo={
               view === 'agents'
                 ? selectedProject
                   ? `/projects/${encodeURIComponent(selectedProject)}/agents/new`
                   : '/projects/new?next=agent'
-                : '/automations/issues'
+                : '/automations/new'
             }
           />
         )}
@@ -1215,8 +1284,18 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
                 </label>
               </>
             )}
+            {modal === 'automation' && (
+              <>
+                <label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Schedule<input required value={newSchedule} onChange={event => setNewSchedule(event.target.value)} placeholder="0 8 * * *" className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 font-mono text-sm normal-case tracking-normal" /><span className="mt-1 block normal-case tracking-normal">Daily 08:00: <code>0 8 * * *</code></span></label>
+                <label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Timezone<input required value={newTimezone} onChange={event => setNewTimezone(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label>
+                <div className="mb-4 grid gap-3 sm:grid-cols-2"><label className="block text-xs uppercase tracking-widest text-[#829b92]">Agent<select required value={newAutomationAgentId} onChange={event => setNewAutomationAgentId(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal"><option value="">Choose agent</option>{agentList.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="block text-xs uppercase tracking-widest text-[#829b92]">Project<select value={newAutomationProjectId} onChange={event => setNewAutomationProjectId(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal"><option value="">Global</option>{projectList.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label></div>
+                <label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Permission mode<select value={newAutomationPermission} onChange={event => setNewAutomationPermission(event.target.value as SubpolarAutomation['permissionMode'])} className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal"><option value="read-only">Read-only</option><option value="pre-approved">Pre-approved configured permissions</option><option value="fail">Fail when approval is required</option></select></label>
+                <label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Model override<input value={newAutomationModel} onChange={event => setNewAutomationModel(event.target.value)} placeholder="Agent default" className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label>
+                <label className="mb-5 block text-xs uppercase tracking-widest text-[#829b92]">Prompt<textarea required value={newAutomationPrompt} onChange={event => setNewAutomationPrompt(event.target.value)} rows={5} className="mt-2 w-full resize-none rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label>
+              </>
+            )}
             <button
-              disabled={!newName.trim() || (modal === 'agent' && (!selectedProject || !newIcon)) || (modal === 'project' && ((newWorkspaceMode === 'existing' && !newWorkspacePath.trim()) || (newWorkspaceMode === 'clone' && !newRepositoryUrl.trim())))}
+              disabled={!newName.trim() || (modal === 'agent' && (!selectedProject || !newIcon)) || (modal === 'automation' && (!newAutomationAgentId || !newAutomationPrompt.trim() || !newSchedule.trim())) || (modal === 'project' && ((newWorkspaceMode === 'existing' && !newWorkspacePath.trim()) || (newWorkspaceMode === 'clone' && !newRepositoryUrl.trim())))}
               className="w-full rounded-lg bg-[#a9ddd5] px-4 py-2.5 font-semibold text-[#102627] disabled:opacity-40"
             >
               Create

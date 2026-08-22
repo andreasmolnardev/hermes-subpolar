@@ -21,6 +21,8 @@ import {
   type VoiceSettingsInput,
   type ProjectInput,
   type GitCredentialInput,
+  type AutomationInput,
+  type AutomationPermissionMode,
 } from "data-layer";
 import { assembleHarnessContext, type HarnessApprovalPolicy, type HarnessContextAssembler } from "harness";
 import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
@@ -38,6 +40,7 @@ import {
   resolveAwsCredential,
   resolveGcpCredential
 } from "./provider-auth";
+import { AutomationRunError, AutomationScheduler, nextAutomationRun, normalizeAutomationSchedule } from "./automation";
 
 export type ApiGatewayServerOptions = {
   readonly provider?: ChatProvider;
@@ -51,6 +54,7 @@ export type ApiGatewayServerOptions = {
   readonly toolDefinitions?: readonly ToolDefinition[];
   readonly toolPolicyOverrides?: readonly ToolPolicyInput[];
   readonly approvalPolicy?: HarnessApprovalPolicy;
+  readonly automationPollMs?: number;
 };
 
 export type ApiGatewayServer = ReturnType<typeof Bun.serve> & {
@@ -260,6 +264,34 @@ function parsePromptCommandInput(value: unknown, partial = false): PromptCommand
     ...(record.prompt === undefined ? {} : { prompt: record.prompt }),
     ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
   } as PromptCommandInput | Partial<PromptCommandInput>;
+}
+
+function parseAutomationInput(value: unknown, partial = false): Omit<AutomationInput, "nextRunAt"> | Partial<Omit<AutomationInput, "nextRunAt">> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("automation must be an object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["name", "enabled", "schedule", "prompt", "agentId", "projectId", "model", "permissionMode", "metadata"]);
+  const unsupported = Object.keys(record).find(key => !allowed.has(key));
+  if (unsupported !== undefined) throw new TypeError("automation field is unsupported");
+  if (!partial && (typeof record.name !== "string" || typeof record.prompt !== "string" || typeof record.agentId !== "string" || record.schedule === undefined)) throw new TypeError("automation name, prompt, agent, and schedule are required");
+  if (record.name !== undefined && (typeof record.name !== "string" || record.name.length > 128)) throw new TypeError("automation name is invalid");
+  if (record.prompt !== undefined && (typeof record.prompt !== "string" || record.prompt.length > 100_000 || record.prompt.trim().length === 0)) throw new TypeError("automation prompt is invalid");
+  if (record.agentId !== undefined && (typeof record.agentId !== "string" || record.agentId.length === 0)) throw new TypeError("automation agent is invalid");
+  if (record.projectId !== undefined && record.projectId !== null && (typeof record.projectId !== "string" || record.projectId.length === 0)) throw new TypeError("automation project is invalid");
+  if (record.model !== undefined && record.model !== null && (typeof record.model !== "string" || record.model.length > 256)) throw new TypeError("automation model is invalid");
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") throw new TypeError("automation enabled state is invalid");
+  if (record.permissionMode !== undefined && !["read-only", "pre-approved", "fail"].includes(String(record.permissionMode))) throw new TypeError("automation permission mode is invalid");
+  if (record.metadata !== undefined && (typeof record.metadata !== "object" || record.metadata === null || Array.isArray(record.metadata))) throw new TypeError("automation metadata is invalid");
+  return {
+    ...(record.name === undefined ? {} : { name: record.name }),
+    ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
+    ...(record.schedule === undefined ? {} : { schedule: normalizeAutomationSchedule(record.schedule) }),
+    ...(record.prompt === undefined ? {} : { prompt: record.prompt }),
+    ...(record.agentId === undefined ? {} : { agentId: record.agentId }),
+    ...(record.projectId === undefined ? {} : { projectId: record.projectId === null ? null : record.projectId }),
+    ...(record.model === undefined ? {} : { model: record.model }),
+    ...(record.permissionMode === undefined ? {} : { permissionMode: record.permissionMode as AutomationPermissionMode }),
+    ...(record.metadata === undefined ? {} : { metadata: record.metadata as Record<string, unknown> }),
+  } as Omit<AutomationInput, "nextRunAt"> | Partial<Omit<AutomationInput, "nextRunAt">>;
 }
 
 async function body(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
@@ -519,6 +551,38 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       ...(prepared.contextAssembler === undefined ? {} : { contextAssembler: prepared.contextAssembler }),
     }, options.provider ?? createProvider(runtime as NonNullable<typeof runtime>, { resolveCredential: handle => identity.resolveCredentialHandle(handle) }));
   };
+
+  const executeAutomation = async (automation: NonNullable<ReturnType<SQLiteIdentityRepository["getAutomation"]>>, run: NonNullable<ReturnType<SQLiteIdentityRepository["getAutomationRun"]>>, signal: AbortSignal): Promise<void> => {
+    const approvalRequired = { value: false };
+    const approvalPolicy: HarnessApprovalPolicy = async () => {
+      approvalRequired.value = true;
+      throw new AutomationRunError("needs_attention", "Permission required: automation execution cannot wait for interactive approval");
+    };
+    try {
+      await executeTurn(
+        { id: automation.ownerId, username: identity.getUser(automation.ownerId)?.username ?? "automation" },
+        {
+          model: automation.model ?? "default",
+          messages: [{ role: "user", content: automation.prompt }],
+          sessionId: run.sessionId,
+          agentId: automation.agentId,
+          ...(automation.projectId === undefined ? {} : { projectId: automation.projectId }),
+          requestId: `automation:${run.id}`,
+          ...(automation.permissionMode === "read-only" ? { permissionMode: "read-only" as const } : automation.permissionMode === "fail" ? { permissionMode: "ask" as const } : {}),
+        },
+        signal,
+        () => undefined,
+        approvalPolicy,
+      );
+      if (approvalRequired.value) throw new AutomationRunError("needs_attention", "Permission required: automation execution cannot wait for interactive approval");
+    } catch (error) {
+      if (error instanceof AutomationRunError) throw error;
+      if (approvalRequired.value) throw new AutomationRunError("needs_attention", "Permission required: automation execution cannot wait for interactive approval");
+      throw error;
+    }
+  };
+
+  const automationScheduler = new AutomationScheduler(identity, executeAutomation, options.automationPollMs ?? 30_000);
 
   const server = Bun.serve<WebSocketData>({
     hostname: options.hostname ?? "127.0.0.1",
@@ -829,6 +893,64 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           if (result.project.workspace !== workspace && workspace !== "") identity.updateProject(auth.principal.id, result.project.id, { workspace });
           return json({ ...result, project: identity.getProject(auth.principal.id, result.project.id) }, 201);
         } catch { return json({ error: "invalid_templates" }, 400); }
+      }
+
+      if (url.pathname === "/v1/automations") {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        if (request.method === "GET") return json({ automations: identity.listAutomations(auth.principal.id, url.searchParams.get("projectId") ?? undefined) });
+        if (request.method === "POST") {
+          try {
+            const value = await body(request, maxRequestBytes);
+            const input = parseAutomationInput(value) as AutomationInput;
+            const schedule = input.schedule;
+            const nextRunAt = input.enabled === false ? null : nextAutomationRun(schedule);
+            return json({ automation: identity.createAutomation(auth.principal.id, { ...input, nextRunAt }) }, 201);
+          } catch (error) {
+            return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_automation" }, error instanceof OwnershipError ? 403 : 400);
+          }
+        }
+        return json({ error: "method_not_allowed" }, 405, { allow: "GET, POST" });
+      }
+
+      const automationPath = /^\/v1\/automations\/([^/]+)(?:\/(runs|run))?$/.exec(url.pathname);
+      if (automationPath !== null) {
+        const auth = authenticated(request, identity, request.method !== "GET");
+        if (auth instanceof Response) return auth;
+        const automationId = decodeURIComponent(automationPath[1] as string);
+        const action = automationPath[2];
+        if (action === "runs") {
+          if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405, { allow: "GET" });
+          if (identity.getAutomation(auth.principal.id, automationId) === null) return json({ error: "not_found" }, 404);
+          return json({ runs: identity.listAutomationRuns(auth.principal.id, automationId) });
+        }
+        if (action === "run") {
+          if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405, { allow: "POST" });
+          try {
+            const run = identity.triggerAutomation(auth.principal.id, automationId, { source: "api" });
+            const automation = identity.getAutomation(auth.principal.id, automationId);
+            if (automation !== null) void automationScheduler.dispatch(run, automation);
+            return json({ run }, 202);
+          } catch (error) { return json({ error: error instanceof OwnershipError ? "not_found" : "automation_run_failed" }, error instanceof OwnershipError ? 404 : 400); }
+        }
+        if (request.method === "GET") {
+          const automation = identity.getAutomation(auth.principal.id, automationId);
+          return automation === null ? json({ error: "not_found" }, 404) : json({ automation });
+        }
+        if (request.method === "DELETE") {
+          try { identity.deleteAutomation(auth.principal.id, automationId); return json({ deleted: true }); }
+          catch (error) { return json({ error: error instanceof OwnershipError ? "not_found" : "delete_failed" }, error instanceof OwnershipError ? 404 : 400); }
+        }
+        if (request.method !== "PATCH") return json({ error: "method_not_allowed" }, 405, { allow: "GET, PATCH, DELETE" });
+        try {
+          const existing = identity.getAutomation(auth.principal.id, automationId);
+          if (existing === null) return json({ error: "not_found" }, 404);
+          const patch = parseAutomationInput(await body(request, maxRequestBytes), true) as Partial<AutomationInput>;
+          const schedule = patch.schedule ?? existing.schedule;
+          const enabled = patch.enabled ?? existing.enabled;
+          const nextRunAt = enabled ? nextAutomationRun(schedule, new Date()) : null;
+          return json({ automation: identity.updateAutomation(auth.principal.id, automationId, { ...patch, nextRunAt }) });
+        } catch (error) { return json({ error: error instanceof OwnershipError ? "forbidden" : "invalid_automation" }, error instanceof OwnershipError ? 403 : 400); }
       }
 
       if (url.pathname === "/v1/skills") {
@@ -1164,6 +1286,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     },
   });
 
+  automationScheduler.start();
+
   const waitForDrain = (): Promise<void> => new Promise(resolve => {
     const deadline = Date.now() + shutdownTimeoutMs;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1180,6 +1304,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const shutdown = (): Promise<void> => {
     if (shutdownPromise !== undefined) return shutdownPromise;
     shutdownPromise = (async () => {
+      await automationScheduler.stop();
       void Promise.resolve(server.stop(false)).catch(() => undefined);
       for (const controller of activeTurns) controller.abort();
       await waitForDrain();

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
 	createSubpolarPiRuntime,
+	executeSubpolarPiRun,
 	hydratePiSession,
 	PiEventProjector,
 	SubpolarPiCredentialStore,
@@ -166,5 +167,24 @@ describe("Subpolar Pi runtime seam", () => {
 
 		await store.read("openai");
 		expect(reads).toBe(1);
+	});
+
+	test("the execution entry point hydrates approved history before one Pi turn", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage("continued")]);
+			const result = await executeSubpolarPiRun({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				history: [{ role: "user", content: "previous context" }],
+				userMessage: "continue",
+			});
+
+			expect(result.message).toMatchObject({ role: "assistant" });
+			expect(result.events.at(-1)).toEqual({ type: "run.completed", runId: "run-1" });
+		});
 	});
 });

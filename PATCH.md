@@ -28,6 +28,9 @@
 - Hardened descriptor narrowing in `tool-resolver` so the Pi adapter and the
   resolver agree on the executable-handle invariant under the Pi-compatible
   TypeScript settings.
+- Added the harness execution entry point that hydrates approved history and
+  performs exactly one Pi-backed turn, giving gateway/automation callers one
+  shared migration boundary.
 
 ## Repository Residue Cleanup
 

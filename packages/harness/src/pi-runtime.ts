@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, type Model, type Provider } from "@earendil-works/pi-ai";
 import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { ProviderMessage } from "chat-provider-interface";
 import { PiEventProjector, type SubpolarPiEvent, type SubpolarPiEventSink } from "./pi-events";
 import { SubpolarResourceLoader, type SubpolarPiResourceOptions } from "./pi-resources";
 import { toPiToolDefinition, type SubpolarPiRunContext, type SubpolarPiTool } from "./pi-tools";
@@ -33,6 +34,16 @@ export interface SubpolarPiRuntime {
 	prompt(message: string): Promise<void>;
 	subscribe(listener: AgentSessionEventListener): () => void;
 	close(): void;
+}
+
+export interface ExecuteSubpolarPiRunOptions extends CreateSubpolarPiRuntimeOptions {
+	readonly history?: readonly ProviderMessage[];
+	readonly userMessage: string;
+}
+
+export interface SubpolarPiRunResult {
+	readonly message: AgentSession["messages"][number] | undefined;
+	readonly events: readonly SubpolarPiEvent[];
 }
 
 export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOptions): Promise<SubpolarPiRuntime> {
@@ -76,4 +87,17 @@ export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOp
 		subscribe: (listener) => session.subscribe(listener),
 		close: () => unsubscribe(),
 	};
+}
+
+/** Execute one application-owned Pi turn after hydrating the approved history. */
+export async function executeSubpolarPiRun(options: ExecuteSubpolarPiRunOptions): Promise<SubpolarPiRunResult> {
+	const runtime = await createSubpolarPiRuntime(options);
+	const { hydratePiSession } = await import("./pi-messages");
+	hydratePiSession(runtime.session, options.history ?? [], options.model);
+	try {
+		await runtime.prompt(options.userMessage);
+		return { message: runtime.session.messages.at(-1), events: [...runtime.events] };
+	} finally {
+		runtime.close();
+	}
 }

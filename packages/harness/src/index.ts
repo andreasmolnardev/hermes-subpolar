@@ -58,8 +58,13 @@ import {
 
 export { PiEventProjector } from "./pi-events";
 export type { SubpolarPiEvent, SubpolarPiEventSink } from "./pi-events";
-export { createSubpolarPiRuntime } from "./pi-runtime";
-export type { CreateSubpolarPiRuntimeOptions, SubpolarPiRuntime } from "./pi-runtime";
+export { createSubpolarPiRuntime, executeSubpolarPiRun } from "./pi-runtime";
+export type {
+  CreateSubpolarPiRuntimeOptions,
+  ExecuteSubpolarPiRunOptions,
+  SubpolarPiRunResult,
+  SubpolarPiRuntime
+} from "./pi-runtime";
 export { SubpolarResourceLoader } from "./pi-resources";
 export type { SubpolarPiResourceOptions } from "./pi-resources";
 export { toPiResolvedTool, toPiToolDefinition } from "./pi-tools";

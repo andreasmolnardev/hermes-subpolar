@@ -336,6 +336,10 @@ function GitCredentialsSettings() {
   return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Git</h2><p className="setup-help mt-1 text-sm">Configure named HTTPS tokens or SSH keys. Secrets stay server-side and are never sent to the Agent.</p></div></div>{error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}<section className="setup-option mt-5 rounded-xl p-4"><div className="grid gap-3 sm:grid-cols-2"><input aria-label="Git credential name" placeholder="Name" value={form.name} onChange={event => update('name', event.target.value)} className="setup-input" /><select aria-label="Git provider" value={form.provider} onChange={event => update('provider', event.target.value)} className="setup-input"><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="gitea">Gitea</option><option value="generic">Generic Git</option></select><input aria-label="Git username" placeholder="Username (optional)" value={form.username} onChange={event => update('username', event.target.value)} className="setup-input" /><input aria-label="Git token" type="password" placeholder="HTTPS token or password" value={form.token} onChange={event => update('token', event.target.value)} className="setup-input" /><textarea aria-label="Git private key" placeholder="SSH private key (optional)" value={form.privateKey} onChange={event => update('privateKey', event.target.value)} rows={5} className="setup-input sm:col-span-2" /><input aria-label="Git passphrase" type="password" placeholder="SSH key passphrase (optional)" value={form.passphrase} onChange={event => update('passphrase', event.target.value)} className="setup-input" /></div><button type="button" className="setup-primary mt-4" disabled={!form.name.trim() || (!form.token && !form.privateKey)} onClick={save}>Save Git credential</button></section>{items.length > 0 && <div className="mt-5 grid gap-2">{items.map(item => <p key={item.id} className="setup-option rounded-xl p-4 text-sm">{item.name} <span className="setup-help">· {item.provider}{item.username ? ` · ${item.username}` : ''}</span></p>)}</div>}</div>
 }
 
+function IntegrationTypeTabs({ type }: { type: 'mcp' | 'openapi' | 'git' }) {
+  return <nav className="mt-5 flex gap-2" aria-label="Integration types"><NavLink to="/settings/agent/integrations?type=mcp" className={`setup-step ${type === 'mcp' ? 'setup-step-active' : ''}`}>MCP</NavLink><NavLink to="/settings/agent/integrations?type=openapi" className={`setup-step ${type === 'openapi' ? 'setup-step-active' : ''}`}>OpenAPI</NavLink><NavLink to="/settings/agent/integrations?type=git" className={`setup-step ${type === 'git' ? 'setup-step-active' : ''}`}>Git</NavLink></nav>
+}
+
 function IntegrationsSettings() {
   const location = useLocation()
   const requestedType = new URLSearchParams(location.search).get('type')
@@ -346,7 +350,7 @@ function IntegrationsSettings() {
   const [error, setError] = useState<string | null>(null)
   const refresh = () => integrations().then(result => setItems(result.integrations)).catch(() => setError('Could not load integrations.'))
   useEffect(() => { void refresh() }, [])
-  if (type === 'git') return <GitCredentialsSettings />
+  if (type === 'git') return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual discovered capabilities.</p></div></div><IntegrationTypeTabs type={type} /><GitCredentialsSettings /></div>
   const integrationType = type === 'git' ? 'mcp' : type
   const formFor = (item?: SubpolarIntegration): IntegrationFormState => {
     const config = item?.config ?? {}

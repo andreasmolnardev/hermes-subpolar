@@ -9,3 +9,11 @@ The vendored source currently has one compatibility patch:
 
 When refreshing Pi, re-evaluate this patch against the new generated catalog
 and remove it once upstream has resolved the mismatch.
+
+The pinned source also has two application-consumer compatibility patches:
+
+* `packages/pi-ai/src/api/openai-codex-responses.ts` casts the SSE body at the
+  fetch boundary because Bun and DOM `BodyInit` declarations disagree on the
+  accepted byte-array type.
+* `packages/pi-ai/src/utils/headers.ts` iterates `Headers` through its runtime
+  iterable contract because the Bun declaration does not expose `entries()`.

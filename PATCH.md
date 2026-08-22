@@ -31,6 +31,12 @@
 - Added the harness execution entry point that hydrates approved history and
   performs exactly one Pi-backed turn, giving gateway/automation callers one
   shared migration boundary.
+- Added an optional `api-gateway` Pi executor seam. It receives the normalized
+  request and projected event sink, while the legacy provider path remains the
+  default until gateway parity is complete.
+- Kept the staged gateway/Pi source graph type-safe across Bun and DOM fetch
+  declarations, including executable-handle narrowing and two documented
+  upstream Pi fetch/Headers compatibility patches.
 
 ## Repository Residue Cleanup
 

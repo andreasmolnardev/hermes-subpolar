@@ -9,6 +9,7 @@ export const PACKAGE_NAMES = [
   "tool-runtime",
   "tool-resolver",
   "chat-provider-interface",
+  "voice-provider-interface",
   "data-layer"
 ];
 
@@ -25,13 +26,16 @@ export const ALLOWED_DEPENDENCIES = {
     "harness",
     "tool-resolver",
     "chat-provider-interface",
+    "voice-provider-interface",
     "data-layer",
-    "shared"
+    "shared",
+    "tool-runtime"
   ]),
   harness: new Set(["tool-resolver", "chat-provider-interface"]),
   "tool-runtime": new Set(["tool-resolver"]),
   "tool-resolver": new Set(["data-layer"]),
   "chat-provider-interface": new Set(),
+  "voice-provider-interface": new Set(),
   "data-layer": new Set(),
   shared: new Set()
 };

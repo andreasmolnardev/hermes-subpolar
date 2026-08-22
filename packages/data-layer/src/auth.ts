@@ -295,6 +295,58 @@ export type ModelDefaults = {
   readonly image: string;
 };
 
+export type VoiceSpeechSettings = {
+  readonly provider: string;
+  readonly model: string;
+  readonly language: string;
+  readonly endpoint: string;
+  readonly configured: boolean;
+};
+
+export type VoiceSynthesisSettings = {
+  readonly provider: string;
+  readonly model: string;
+  readonly voice: string;
+  readonly speed: number;
+  readonly endpoint: string;
+  readonly autoPlay: boolean;
+  readonly configured: boolean;
+};
+
+export type VoiceSettings = {
+  readonly stt: VoiceSpeechSettings;
+  readonly tts: VoiceSynthesisSettings;
+};
+
+export type VoiceSettingsInput = {
+  readonly stt: VoiceSpeechSettingsInput;
+  readonly tts: VoiceSynthesisSettingsInput;
+};
+
+export type VoiceSpeechSettingsInput = {
+  readonly provider: string;
+  readonly model: string;
+  readonly language: string;
+  readonly endpoint: string;
+  readonly apiKey?: string;
+};
+
+export type VoiceSynthesisSettingsInput = {
+  readonly provider: string;
+  readonly model: string;
+  readonly voice: string;
+  readonly speed: number;
+  readonly endpoint: string;
+  readonly autoPlay: boolean;
+  readonly apiKey?: string;
+};
+
+export type VoiceProviderRuntime = {
+  readonly settings: VoiceSettings;
+  readonly sttApiKey?: string;
+  readonly ttsApiKey?: string;
+};
+
 export class AuthenticationError extends Error {
   constructor(message = "Authentication required") {
     super(message);
@@ -507,6 +559,13 @@ CREATE TABLE IF NOT EXISTS user_model_defaults (
   image TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS user_voice_settings (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  stt_json TEXT NOT NULL,
+  tts_json TEXT NOT NULL,
+  secrets_ciphertext TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS integrations (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -567,6 +626,7 @@ const CREDENTIAL_TAG_BYTES = 16;
 const CREDENTIAL_KEY_FILE = "provider-credentials.key";
 const CREDENTIAL_AAD = Buffer.from("hermes.provider-credential.v1");
 const INTEGRATION_CREDENTIAL_AAD = Buffer.from("hermes.integration-credential.v1");
+const VOICE_CREDENTIAL_AAD = Buffer.from("hermes.voice-credential.v1");
 
 type ProviderRow = {
   provider: string;
@@ -653,6 +713,8 @@ function decryptJson(value: string, key: Buffer, aad: Buffer): Record<string, un
 
 function encryptIntegrationSecrets(secrets: Record<string, unknown>, key: Buffer): string { return encryptJson(secrets, key, INTEGRATION_CREDENTIAL_AAD); }
 function decryptIntegrationSecrets(value: string, key: Buffer): Record<string, unknown> { return decryptJson(value, key, INTEGRATION_CREDENTIAL_AAD); }
+function encryptVoiceSecrets(secrets: Record<string, unknown>, key: Buffer): string { return encryptJson(secrets, key, VOICE_CREDENTIAL_AAD); }
+function decryptVoiceSecrets(value: string, key: Buffer): Record<string, unknown> { return decryptJson(value, key, VOICE_CREDENTIAL_AAD); }
 
 function providerSlug(value: unknown): string {
   if (typeof value !== "string") throw new Error("provider is invalid");
@@ -707,6 +769,61 @@ function modelDefaults(value: Record<keyof ModelDefaults, unknown>): ModelDefaul
     internal: requiredModel(value.internal),
     voice: requiredModel(value.voice),
     image: requiredModel(value.image),
+  };
+}
+
+function voiceProvider(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 128) throw new Error("voice provider is invalid");
+  return value.trim().toLowerCase();
+}
+
+function voiceModel(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) throw new Error("voice model is invalid");
+  return value.trim();
+}
+
+function voiceEndpoint(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 2048) throw new Error("voice endpoint is invalid");
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error("voice endpoint is invalid"); }
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname))) throw new Error("voice endpoint must use HTTPS");
+  if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") throw new Error("voice endpoint must not contain credentials or query state");
+  return parsed.toString();
+}
+
+function voiceLanguage(value: unknown): string {
+  if (typeof value !== "string" || value.length > 64) throw new Error("voice language is invalid");
+  return value.trim() || "auto";
+}
+
+function voiceSpeed(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0.25 || value > 4) throw new Error("voice speed is invalid");
+  return value;
+}
+
+function voiceApiKey(value: unknown): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || value.length > 4096) throw new Error("voice credential is invalid");
+  return value;
+}
+
+function voiceSettings(value: { readonly stt: Record<string, unknown>; readonly tts: Record<string, unknown>; secrets?: Record<string, unknown> }): { readonly settings: VoiceSettings; readonly secrets: Record<string, unknown> } {
+  const sttProvider = voiceProvider(value.stt.provider);
+  const sttModel = voiceModel(value.stt.model);
+  const sttEndpoint = voiceEndpoint(value.stt.endpoint);
+  const ttsProvider = voiceProvider(value.tts.provider);
+  const ttsModel = voiceModel(value.tts.model);
+  const ttsVoice = voiceModel(value.tts.voice);
+  const ttsEndpoint = voiceEndpoint(value.tts.endpoint);
+  const speed = voiceSpeed(value.tts.speed);
+  const sttApiKey = voiceApiKey(value.secrets?.sttApiKey);
+  const ttsApiKey = voiceApiKey(value.secrets?.ttsApiKey);
+  return {
+    settings: {
+      stt: { provider: sttProvider, model: sttModel, language: voiceLanguage(value.stt.language), endpoint: sttEndpoint, configured: sttProvider !== "none" },
+      tts: { provider: ttsProvider, model: ttsModel, voice: ttsVoice, speed, endpoint: ttsEndpoint, autoPlay: value.tts.autoPlay === true, configured: ttsProvider !== "none" },
+    },
+    secrets: { ...(sttApiKey === undefined ? {} : { sttApiKey }), ...(ttsApiKey === undefined ? {} : { ttsApiKey }) },
   };
 }
 
@@ -1667,6 +1784,62 @@ export class SQLiteIdentityRepository {
       [userId, defaults.conversation, defaults.internal, defaults.voice, defaults.image, now()],
     );
     return defaults;
+  }
+
+  voiceSettings(userId: string): VoiceSettings {
+    const row = this.db.query<{ stt_json: string; tts_json: string }, [string]>(
+      "SELECT stt_json, tts_json FROM user_voice_settings WHERE user_id = ?",
+    ).get(userId);
+    if (row === null) return {
+      stt: { provider: "none", model: "default", language: "auto", endpoint: "https://example.invalid/stt", configured: false },
+      tts: { provider: "none", model: "default", voice: "default", speed: 1, endpoint: "https://example.invalid/tts", autoPlay: false, configured: false },
+    };
+    try {
+      return voiceSettings({ stt: JSON.parse(row.stt_json) as Record<string, unknown>, tts: JSON.parse(row.tts_json) as Record<string, unknown> }).settings;
+    } catch {
+      throw new Error("voice settings are unavailable");
+    }
+  }
+
+  voiceProviderRuntime(userId: string): VoiceProviderRuntime {
+    const row = this.db.query<{ stt_json: string; tts_json: string; secrets_ciphertext: string }, [string]>(
+      "SELECT stt_json, tts_json, secrets_ciphertext FROM user_voice_settings WHERE user_id = ?",
+    ).get(userId);
+    if (row === null) throw new Error("voice provider is not configured");
+    let normalized: { readonly settings: VoiceSettings; readonly secrets: Record<string, unknown> };
+    try {
+      normalized = voiceSettings({ stt: JSON.parse(row.stt_json) as Record<string, unknown>, tts: JSON.parse(row.tts_json) as Record<string, unknown>, secrets: decryptVoiceSecrets(row.secrets_ciphertext, this.key()) });
+    } catch {
+      throw new Error("voice settings are unavailable");
+    }
+    const sttApiKey = normalized.secrets.sttApiKey;
+    const ttsApiKey = normalized.secrets.ttsApiKey;
+    return {
+      settings: normalized.settings,
+      ...(typeof sttApiKey === "string" ? { sttApiKey } : {}),
+      ...(typeof ttsApiKey === "string" ? { ttsApiKey } : {}),
+    };
+  }
+
+  setVoiceSettings(userId: string, value: VoiceSettingsInput): VoiceSettings {
+    const existing = this.db.query<{ secrets_ciphertext: string }, [string]>(
+      "SELECT secrets_ciphertext FROM user_voice_settings WHERE user_id = ?",
+    ).get(userId);
+    const existingSecrets = existing === null ? {} : decryptVoiceSecrets(existing.secrets_ciphertext, this.key());
+    const normalized = voiceSettings({
+      stt: value.stt as Record<string, unknown>,
+      tts: value.tts as Record<string, unknown>,
+      secrets: {
+        ...existingSecrets,
+        ...(value.stt.apiKey === undefined || value.stt.apiKey === "" ? {} : { sttApiKey: value.stt.apiKey }),
+        ...(value.tts.apiKey === undefined || value.tts.apiKey === "" ? {} : { ttsApiKey: value.tts.apiKey }),
+      },
+    });
+    this.db.run(
+      "INSERT INTO user_voice_settings (user_id, stt_json, tts_json, secrets_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET stt_json = excluded.stt_json, tts_json = excluded.tts_json, secrets_ciphertext = excluded.secrets_ciphertext, updated_at = excluded.updated_at",
+      [userId, JSON.stringify(normalized.settings.stt), JSON.stringify(normalized.settings.tts), encryptVoiceSecrets(normalized.secrets, this.key(true)), now()],
+    );
+    return normalized.settings;
   }
 
   configureProvider(provider: string, baseUrl: string, apiKey: string, model: string): void {

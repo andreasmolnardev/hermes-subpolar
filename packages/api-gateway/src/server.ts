@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createGateway, createGatewayPersistenceAdapter, type GatewayProtocolEvent } from "./index";
 import { type ChatProvider, type ProviderContent, type ProviderMessage } from "chat-provider-interface";
+import { createHttpSpeechToTextProvider, createHttpTextToSpeechProvider, VoiceProviderError } from "voice-provider-interface";
 import {
   AuthenticationError,
   IdempotencyConflictError,
@@ -17,6 +18,7 @@ import {
   type IntegrationInput,
   type SkillInput,
   type PromptCommandInput,
+  type VoiceSettingsInput,
   type ProjectInput,
   type GitCredentialInput,
   type AutomationInput,
@@ -300,6 +302,21 @@ async function body(request: Request, maxBytes: number): Promise<Record<string, 
   const parsed: unknown = JSON.parse(text);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new TypeError("request body must be an object");
   return parsed as Record<string, unknown>;
+}
+
+async function audioBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null && Number(contentLength) > maxBytes) throw new TypeError("request body is too large");
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > maxBytes) throw new TypeError("request body is too large");
+  if (bytes.byteLength === 0) throw new TypeError("audio body is empty");
+  return bytes;
+}
+
+function audioResponse(audio: Uint8Array, mimeType: string): Response {
+  const copy = new ArrayBuffer(audio.byteLength);
+  new Uint8Array(copy).set(audio);
+  return new Response(new Blob([copy], { type: mimeType }), { status: 200, headers: { "cache-control": "no-store" } });
 }
 
 function authenticated(
@@ -649,6 +666,65 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             image: value.image,
           }));
         } catch { return json({ error: "invalid_model_defaults" }, 400); }
+      }
+
+      if (url.pathname === "/v1/settings/voice" && request.method === "GET") {
+        const auth = authenticated(request, identity);
+        return auth instanceof Response ? auth : json(identity.voiceSettings(auth.principal.id));
+      }
+
+      if (url.pathname === "/v1/settings/voice" && request.method === "PUT") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const value = await body(request, maxRequestBytes);
+          const stt = value.stt;
+          const tts = value.tts;
+          if (typeof stt !== "object" || stt === null || Array.isArray(stt) || typeof tts !== "object" || tts === null || Array.isArray(tts)) throw new TypeError("voice settings are invalid");
+          return json(identity.setVoiceSettings(auth.principal.id, {
+            stt: stt as Record<string, unknown>,
+            tts: tts as Record<string, unknown>,
+          } as unknown as VoiceSettingsInput));
+        } catch { return json({ error: "invalid_voice_settings" }, 400); }
+      }
+
+      if (url.pathname === "/v1/voice/transcribe" && request.method === "POST") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const runtime = identity.voiceProviderRuntime(auth.principal.id);
+          if (runtime.settings.stt.provider === "none") throw new Error("voice provider is not configured");
+          const audio = await audioBody(request, maxRequestBytes);
+          const text = await createHttpSpeechToTextProvider({ endpoint: runtime.settings.stt.endpoint, ...(runtime.sttApiKey === undefined ? {} : { apiKey: runtime.sttApiKey }) }).transcribe({
+            audio,
+            mimeType: request.headers.get("content-type")?.split(";", 1)[0] ?? "audio/webm",
+            model: runtime.settings.stt.model,
+            language: runtime.settings.stt.language,
+          });
+          return json({ text });
+        } catch (error) {
+          return json({ error: error instanceof VoiceProviderError ? "voice_provider_failed" : "voice_not_configured" }, error instanceof VoiceProviderError ? 502 : 400);
+        }
+      }
+
+      if (url.pathname === "/v1/voice/synthesize" && request.method === "POST") {
+        const auth = authenticated(request, identity, true);
+        if (auth instanceof Response) return auth;
+        try {
+          const value = await body(request, maxRequestBytes);
+          if (typeof value.text !== "string" || value.text.trim() === "") throw new TypeError("speech text is invalid");
+          const runtime = identity.voiceProviderRuntime(auth.principal.id);
+          if (runtime.settings.tts.provider === "none") throw new Error("voice provider is not configured");
+          const result = await createHttpTextToSpeechProvider({ endpoint: runtime.settings.tts.endpoint, ...(runtime.ttsApiKey === undefined ? {} : { apiKey: runtime.ttsApiKey }) }).synthesize({
+            text: value.text,
+            model: runtime.settings.tts.model,
+            voice: runtime.settings.tts.voice,
+            speed: runtime.settings.tts.speed,
+          });
+          return audioResponse(result.audio, result.mimeType);
+        } catch (error) {
+          return json({ error: error instanceof VoiceProviderError ? "voice_provider_failed" : "voice_not_configured" }, error instanceof VoiceProviderError ? 502 : 400);
+        }
       }
 
       if ((url.pathname === "/v1/setup/providers" || url.pathname === "/v1/providers") && request.method === "GET") {

@@ -1,0 +1,10 @@
+{
+  "name": "@earendil-works/pi-client",
+  "private": true,
+  "version": "0.84.2",
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./unix": "./src/unix.ts", "./*": "./src/*.ts" },
+  "dependencies": { "@earendil-works/pi-protocol": "0.84.2" },
+  "devDependencies": { "@types/node": "24.12.4", "typescript": "5.9.3" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit", "test": "bun test test", "check": "bun run typecheck && bun run test" }
+}

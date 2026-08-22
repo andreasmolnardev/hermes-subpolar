@@ -1,5 +1,19 @@
 # Subpolar Migration Record
 
+## Embedded Pi Runtime
+
+- Vendored the pinned Pi `0.84.2` runtime closure from commit
+  `c49906ec77788625aacbdc53ebca6fbe65bd20f5` under `packages/pi-*`:
+  agent core, AI, client, coding-agent, protocol, telemetry, and TUI.
+- Preserved Pi's upstream package names and added workspace-local source
+  exports, Pi-compatible TypeScript settings, dependency metadata, and
+  entrypoint smoke tests.
+- Added `scripts/pi/sync-pi.sh`, `PINNED_COMMIT`, and local-patch notes so
+  future upstream refreshes replace only the vendored source surface.
+- Imported the matching generated model catalog from the pinned `pi-ai`
+  release artifact; Subpolar still owns provider credentials and execution
+  policy, which are added in the harness adapter batches.
+
 ## Repository Residue Cleanup
 
 - Rebranded active package, browser, and container metadata from the upstream

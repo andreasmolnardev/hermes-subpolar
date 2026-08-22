@@ -10,14 +10,28 @@ export const PACKAGE_NAMES = [
   "tool-resolver",
   "chat-provider-interface",
   "voice-provider-interface",
-  "data-layer"
+  "data-layer",
+  "pi-agent",
+  "pi-ai",
+  "pi-client",
+  "pi-coding-agent",
+  "pi-protocol",
+  "pi-telemetry",
+  "pi-tui"
 ];
 
 export const SUPPORT_PACKAGE_NAMES = ["shared"];
 const PACKAGE_DIRECTORIES = [...PACKAGE_NAMES, ...SUPPORT_PACKAGE_NAMES];
 const PACKAGE_IMPORTS = new Map([
   ...PACKAGE_NAMES.map(name => [name, name]),
-  ["@hermes/shared", "shared"]
+  ["@hermes/shared", "shared"],
+  ["@earendil-works/pi-agent-core", "pi-agent"],
+  ["@earendil-works/pi-ai", "pi-ai"],
+  ["@earendil-works/pi-client", "pi-client"],
+  ["@earendil-works/pi-coding-agent", "pi-coding-agent"],
+  ["@earendil-works/pi-protocol", "pi-protocol"],
+  ["@earendil-works/pi-telemetry", "pi-telemetry"],
+  ["@earendil-works/pi-tui", "pi-tui"]
 ]);
 
 export const ALLOWED_DEPENDENCIES = {
@@ -37,7 +51,14 @@ export const ALLOWED_DEPENDENCIES = {
   "chat-provider-interface": new Set(),
   "voice-provider-interface": new Set(),
   "data-layer": new Set(),
-  shared: new Set()
+  shared: new Set(),
+  "pi-agent": new Set(["pi-ai", "pi-telemetry"]),
+  "pi-ai": new Set(["pi-telemetry"]),
+  "pi-client": new Set(["pi-protocol"]),
+  "pi-coding-agent": new Set(["pi-agent", "pi-ai", "pi-client", "pi-protocol", "pi-tui"]),
+  "pi-protocol": new Set(),
+  "pi-telemetry": new Set(),
+  "pi-tui": new Set()
 };
 ALLOWED_DEPENDENCIES["web-ui"].add("shared");
 
@@ -48,8 +69,18 @@ const importPatterns = [
   /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g
 ];
 const sourceExtensions = /\.(?:[cm]?tsx?|jsx?)$/;
-const serverBuiltinImports = /^(?:node:|bun:|deno:|fs$|path$|os$|url$|crypto$|stream$|util$|child_process$|cluster$|net$|tls$|http$|https$)/;
+const serverBuiltinImports = /^(?:node:|bun:|deno:|fs(?:\/|$)|path(?:\/|$)|os(?:\/|$)|url(?:\/|$)|crypto(?:\/|$)|stream(?:\/|$)|util(?:\/|$)|child_process(?:\/|$)|cluster(?:\/|$)|net(?:\/|$)|tls(?:\/|$)|http(?:\/|$)|https(?:\/|$)|timers(?:\/|$)|assert(?:\/|$)|events(?:\/|$)|module(?:\/|$)|string_decoder(?:\/|$)|worker_threads(?:\/|$)|readline(?:\/|$))/;
 const browserBuiltinImports = /^(?:node:|bun:|deno:|fs$|path$|os$|url$|crypto$|stream$|util$|child_process$|cluster$|net$|tls$|http$|https$|sqlite|better-sqlite3)/;
+export const EXPECTED_MANIFEST_NAMES = new Map([
+  ["shared", "@hermes/shared"],
+  ["pi-agent", "@earendil-works/pi-agent-core"],
+  ["pi-ai", "@earendil-works/pi-ai"],
+  ["pi-client", "@earendil-works/pi-client"],
+  ["pi-coding-agent", "@earendil-works/pi-coding-agent"],
+  ["pi-protocol", "@earendil-works/pi-protocol"],
+  ["pi-telemetry", "@earendil-works/pi-telemetry"],
+  ["pi-tui", "@earendil-works/pi-tui"]
+]);
 
 async function readPackage(packagesRoot, name) {
   const path = join(packagesRoot, name, "package.json");
@@ -134,7 +165,7 @@ export async function check({ root = fileURLToPath(new URL("..", import.meta.url
     const manifest = await readPackage(packagesRoot, name);
     manifests.set(name, manifest);
     checkBunScripts(join(packagesRoot, name, "package.json"), manifest, root);
-    const expectedManifestName = name === "shared" ? "@hermes/shared" : name;
+    const expectedManifestName = EXPECTED_MANIFEST_NAMES.get(name) ?? name;
     if (manifest.name !== expectedManifestName) {
       throw new Error(`${name}: manifest name must be ${expectedManifestName}`);
     }

@@ -14,6 +14,7 @@
     "test:boundaries": "bun test scripts/check-package-boundaries.test.mjs",
     "check:runtime": "bun run --filter './packages/*' check",
     "check:monorepo": "bun run check:boundaries && bun run test:boundaries && bun run check:runtime",
+    "sync:pi": "bash scripts/pi/sync-pi.sh",
     "typecheck:runtime": "bun run --filter './packages/*' typecheck",
     "test": "bun run --filter './packages/*' test",
     "build:web": "bun run --filter web-ui build",

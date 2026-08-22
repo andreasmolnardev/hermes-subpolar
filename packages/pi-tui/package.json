@@ -1,0 +1,10 @@
+{
+  "name": "@earendil-works/pi-tui",
+  "private": true,
+  "version": "0.84.2",
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./*": "./src/*.ts" },
+  "dependencies": { "get-east-asian-width": "1.6.0", "marked": "18.0.5" },
+  "devDependencies": { "@types/node": "24.12.4", "typescript": "5.9.3" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit", "test": "bun test test", "check": "bun run typecheck && bun run test" }
+}

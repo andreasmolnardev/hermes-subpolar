@@ -551,7 +551,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           agentId: automation.agentId,
           ...(automation.projectId === undefined ? {} : { projectId: automation.projectId }),
           requestId: `automation:${run.id}`,
-          ...(automation.permissionMode === "read-only" ? { permissionMode: "read-only" as const } : {}),
+          ...(automation.permissionMode === "read-only" ? { permissionMode: "read-only" as const } : automation.permissionMode === "fail" ? { permissionMode: "ask" as const } : {}),
         },
         signal,
         () => undefined,

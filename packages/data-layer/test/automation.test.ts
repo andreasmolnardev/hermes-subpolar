@@ -32,6 +32,11 @@ test("automation occurrences are claimed atomically and survive repository reope
     assert.ok(first);
     assert.equal(duplicate, null);
     assert.equal(identity.listAutomationRuns(session.principal.id, automation.id).length, 1);
+    identity.updateAutomationRun(first!.id, "running");
+    identity.recoverAutomationRuns();
+    const recovered = identity.getAutomationRun(session.principal.id, automation.id, first!.id);
+    assert.equal(recovered?.status, "failed");
+    assert.match(recovered?.error ?? "", /Server restarted/);
   } finally {
     identity.close();
   }

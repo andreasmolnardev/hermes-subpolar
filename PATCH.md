@@ -10,6 +10,9 @@
   restart recovery, immediate triggers, and execution through the existing
   Agent, Project, Tool Resolver, and Harness path. Interactive approval is
   captured as `needs_attention`; it is never silently allowed.
+- Scheduled entries are grouped into Global and project sections. Restart
+  semantics are explicit: definitions/history survive, while interrupted
+  executions are marked failed because Harness runs are not resumable.
 - The scheduler is single-instance today; the deployment assumption and
   predictable restart/missed-run behavior are documented in
   `docs/automations.md`.

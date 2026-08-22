@@ -13,16 +13,20 @@ invocations are also accepted with `kind: "once"`.
 Automation permission modes are deliberately non-interactive:
 
 - `read-only` removes mutating capabilities through the normal Tool Resolver.
-- `pre-approved` uses the Agent's configured allow/deny policies.
-- `fail` uses those policies and records `needs_attention` if an `ask` policy
-  would require interactive approval.
+- `pre-approved` uses the Agent's configured allow/deny policies, while any
+  configured `ask` policy records `needs_attention`.
+- `fail` runs the normal resolver in `ask` mode for mutating capabilities, so
+  even a configured allow requires interactive approval and becomes
+  `needs_attention` for an automation.
 
 The scheduler claims a due occurrence in SQLite using a unique
 `(automation_id, scheduled_for)` key before dispatching it. This prevents a
 duplicate when scheduler ticks overlap and allows state to survive a process
-restart. On restart, queued or running rows from the previous process are
-marked failed, and a missed recurring schedule receives one catch-up claim;
-the next occurrence is then persisted. Failures do not crash the scheduler.
+restart. Automation definitions, schedules, and run history survive an
+application restart. An interrupted queued or running execution is not
+resumable, so it is marked failed with a restart error; a missed recurring
+schedule receives one catch-up claim and the next occurrence is then
+persisted. Failures do not crash the scheduler.
 
 The current deployment assumes a single API Gateway instance. SQLite claiming
 is safe within that instance; distributed deployments need an external

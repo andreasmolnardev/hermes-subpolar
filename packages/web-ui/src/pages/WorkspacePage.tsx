@@ -234,6 +234,7 @@ function CollectionSidebar({
   kind,
   title,
   items,
+  projects = [],
   selected,
   basePath,
   onExpand
@@ -241,10 +242,17 @@ function CollectionSidebar({
   kind: 'agents' | 'automations'
   title: string
   items: readonly { id: string; name: string; icon?: string }[]
+  projects?: readonly SubpolarProject[]
   selected: string
   basePath: string
   onExpand: () => void
 }) {
+  const groups = kind === 'automations'
+    ? [
+        { label: 'Global', items: items.filter(item => !(item as SubpolarAutomation).projectId) },
+        ...projects.map(project => ({ label: project.name, items: items.filter(item => (item as SubpolarAutomation).projectId === project.id) }))
+      ].filter(group => group.items.length > 0)
+    : [{ label: 'Default', items }]
   return (
     <aside className="hidden w-56 shrink-0 flex-col border-r border-[color-mix(in_srgb,var(--midground-base)_16%,transparent)] bg-[var(--color-card,var(--background-base))] sm:flex">
       <div className="flex h-16 items-center gap-2 border-b border-white/10 px-3">
@@ -258,17 +266,8 @@ function CollectionSidebar({
         <span className="font-semibold text-[var(--color-card-foreground,var(--midground-base))]">{title}</span>
       </div>
       <div className="p-3">
-        <p className="mb-2 text-[10px] uppercase tracking-widest text-[#718b82]">Default</p>
-        {items.map(item => (
-          <Link
-            key={item.id}
-            to={`${basePath}/${encodeURIComponent(item.id)}`}
-            className={`${selected === item.id ? 'bg-[#2a5558] text-white' : 'text-[#b3c4bb] hover:bg-white/5'} mb-1 flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-sm`}
-          >
-            {kind === 'agents' ? agentIcon(item as SubpolarAgent) : <Zap size={16} />}
-            <span className="truncate">{item.name}</span>
-          </Link>
-        ))}
+        {groups.map(group => <div key={group.label} className="mb-4 last:mb-0"><p className="mb-2 text-[10px] uppercase tracking-widest text-[#718b82]">{group.label}</p>{group.items.map(item => <Link key={item.id} to={`${basePath}/${encodeURIComponent(item.id)}`} className={`${selected === item.id ? 'bg-[#2a5558] text-white' : 'text-[#b3c4bb] hover:bg-white/5'} mb-1 flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-sm`}>{kind === 'agents' ? agentIcon(item as SubpolarAgent) : <Zap size={16} />}<span className="truncate">{item.name}</span></Link>)}</div>)}
+        {groups.length === 0 && <p className="text-xs text-[#829b92]">No automations yet.</p>}
       </div>
     </aside>
   )
@@ -278,15 +277,23 @@ function Gallery({
   view,
   agents: agentList,
   automations: automationList,
+  projects,
   createTo
 }: {
   view: 'agents' | 'automations'
   agents: readonly SubpolarAgent[]
   automations: readonly SubpolarAutomation[]
+  projects: readonly SubpolarProject[]
   createTo: string
 }) {
   const isAgents = view === 'agents'
   const cards = isAgents ? agentList : automationList
+  const groups = isAgents
+    ? [{ label: 'Default', items: cards }]
+    : [
+        { label: 'Global', items: automationList.filter(automation => automation.projectId === undefined) },
+        ...projects.map(project => ({ label: project.name, items: automationList.filter(automation => automation.projectId === project.id) }))
+      ].filter(group => group.items.length > 0)
   return (
     <section className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-8">
       <div className="mb-8 flex items-end justify-between">
@@ -299,27 +306,10 @@ function Gallery({
           <Plus className="mr-1 inline" size={15} /> Create
         </Link>
       </div>
-      <p className="mb-3 text-xs uppercase tracking-widest text-[#829b92]">Default</p>
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {cards.map(item => (
-          <Link
-            key={item.id}
-            to={`/${isAgents ? 'agents' : 'automations'}/${encodeURIComponent(item.id)}`}
-            className="group min-h-36 rounded-xl border border-white/10 bg-[#102627] p-5 text-left transition hover:-translate-y-0.5 hover:border-[#70d7cc]/50"
-          >
-            <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#1d4142] text-[#70d7cc]">
-              {isAgents ? agentIcon(item as SubpolarAgent) : <CalendarClock size={20} />}
-            </div>
-            <h2 className="font-semibold group-hover:text-[#a9ddd5]">{item.name}</h2>
-            <p className="mt-1 text-xs leading-5 text-[#829b92]">
-              {'instructions' in item ? item.instructions || 'Custom workspace agent' : item.prompt || 'Scheduled Agent run'}
-            </p>
-          </Link>
-        ))}
-      </div>
+      {groups.map(group => <div key={group.label} className="mb-8 last:mb-0"><p className="mb-3 text-xs uppercase tracking-widest text-[#829b92]">{group.label}</p><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{group.items.map(item => <Link key={item.id} to={`/${isAgents ? 'agents' : 'automations'}/${encodeURIComponent(item.id)}`} className="group min-h-36 rounded-xl border border-white/10 bg-[#102627] p-5 text-left transition hover:-translate-y-0.5 hover:border-[#70d7cc]/50"><div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#1d4142] text-[#70d7cc]">{isAgents ? agentIcon(item as SubpolarAgent) : <CalendarClock size={20} />}</div><h2 className="font-semibold group-hover:text-[#a9ddd5]">{item.name}</h2><p className="mt-1 text-xs leading-5 text-[#829b92]">{'instructions' in item ? item.instructions || 'Custom workspace agent' : item.prompt || 'Scheduled Agent run'}</p></Link>)}</div></div>)}
       {cards.length === 0 && (
         <div className="rounded-xl border border-dashed border-white/15 p-10 text-center text-sm text-[#829b92]">
-          No {view} in this project yet.
+          No {isAgents ? 'agents' : 'automations'} yet.
         </div>
       )}
     </section>
@@ -1078,6 +1068,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
           kind={view as 'agents' | 'automations'}
           title={view === 'agents' ? 'Agents' : 'Scheduled'}
           items={view === 'agents' ? agentList : automationList}
+          projects={projectList}
           selected={view === 'agents' ? selectedAgent : selectedAutomation}
           basePath={view === 'agents' ? '/agents' : '/automations'}
           onExpand={() => setSidebarCollapsed(false)}
@@ -1199,6 +1190,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
             view={view}
             agents={agentList}
             automations={automationList}
+            projects={projectList}
             createTo={
               view === 'agents'
                 ? selectedProject

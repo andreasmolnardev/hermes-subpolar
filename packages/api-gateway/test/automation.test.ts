@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "bun:test";
 import { startApiGatewayServer } from "../src/server.ts";
+import { AutomationRunError, AutomationScheduler, nextAutomationRun, normalizeAutomationSchedule } from "../src/automation.ts";
+import { SQLiteIdentityRepository } from "data-layer";
+import { createToolHandle } from "tool-resolver";
 
 function cookies(response: Response): string {
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
@@ -83,6 +86,111 @@ test("automations are CRUD-managed, run through the normal gateway, and persist 
     assert.equal(transcript.status, 200);
     const deleted = await fetch(`${server.url}v1/automations/${automation.id}`, { method: "DELETE", headers });
     assert.deepEqual(await deleted.json(), { deleted: true });
+  } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("scheduler catches up recurring work and isolates needs-attention and failed runs", async () => {
+  const identity = new SQLiteIdentityRepository(":memory:");
+  try {
+    const owner = await identity.bootstrap("scheduler-owner", "correct horse");
+    const project = identity.createProject(owner.principal.id, { name: "Scheduler project" });
+    const agent = identity.createAgent(owner.principal.id, project.id, "runner", "Run scheduled work.");
+    const overdue = new Date(Date.now() - 120_000).toISOString();
+    const recurring = identity.createAutomation(owner.principal.id, { name: "Recurring", schedule: { kind: "cron", expression: "* * * * *", timezone: "UTC" }, prompt: "catch up", agentId: agent.id, projectId: project.id, permissionMode: "pre-approved", nextRunAt: overdue });
+    const attention = identity.createAutomation(owner.principal.id, { name: "Needs approval", schedule: { kind: "once", at: overdue, timezone: "UTC" }, prompt: "ask", agentId: agent.id, projectId: project.id, permissionMode: "fail", nextRunAt: overdue });
+    const failed = identity.createAutomation(owner.principal.id, { name: "Provider failure", schedule: { kind: "once", at: overdue, timezone: "UTC" }, prompt: "fail", agentId: agent.id, projectId: project.id, permissionMode: "pre-approved", nextRunAt: overdue });
+    const scheduler = new AutomationScheduler(identity, async automation => {
+      if (automation.id === attention.id) throw new AutomationRunError("needs_attention", "Permission required");
+      if (automation.id === failed.id) throw new Error("Provider unavailable");
+    }, 100);
+    scheduler.start();
+    try {
+      await eventually(async () => {
+        const runs = [
+          ...identity.listAutomationRuns(owner.principal.id, attention.id),
+          ...identity.listAutomationRuns(owner.principal.id, failed.id),
+          ...identity.listAutomationRuns(owner.principal.id, recurring.id)
+        ];
+        return runs.length === 3 && runs.every(run => run.status !== "queued" && run.status !== "running") ? runs : undefined;
+      });
+      assert.equal(identity.listAutomationRuns(owner.principal.id, attention.id)[0]?.status, "needs_attention");
+      assert.equal(identity.listAutomationRuns(owner.principal.id, failed.id)[0]?.status, "failed");
+      const updatedRecurring = identity.getAutomation(owner.principal.id, recurring.id);
+      assert.equal(updatedRecurring?.enabled, true);
+      assert.notEqual(updatedRecurring?.nextRunAt, overdue);
+    } finally {
+      await scheduler.stop();
+    }
+  } finally {
+    identity.close();
+  }
+});
+
+test("cron schedules normalize explicit timezones and find the next occurrence", () => {
+  const schedule = normalizeAutomationSchedule({ kind: "cron", expression: "0 8 * * 1", timezone: "UTC" });
+  assert.deepEqual(schedule, { kind: "cron", expression: "0 8 * * 1", timezone: "UTC" });
+  assert.equal(nextAutomationRun(schedule, new Date("2026-08-21T08:01:00.000Z")), "2026-08-24T08:00:00.000Z");
+});
+
+test("fail-mode automation marks interactive approval as needs_attention", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "subpolar-automation-permission-"));
+  let executed = false;
+  const server = startApiGatewayServer({
+    port: 0,
+    dataDir,
+    automationPollMs: 100,
+    toolDefinitions: [{ name: "write", capabilityId: "test.write", description: "Write data", inputSchema: { type: "object" }, source: "test", capabilities: { mutating: true }, executable: { handle: createToolHandle(async () => { executed = true; return "written"; }) } }],
+    provider: {
+      async complete(request) {
+        if (request.messages.some(message => message.role === "tool")) return { message: { role: "assistant", content: "tool finished" }, finishReason: "stop" };
+        const prompt = request.messages.find(message => message.role === "user")?.content;
+        return prompt === "Write now" || prompt === "Write pre-approved"
+          ? { message: { role: "assistant", content: "", toolCalls: [{ id: "write-call", name: "write", arguments: "{}" }] }, finishReason: "tool_calls" }
+          : { message: { role: "assistant", content: "read-only finished" }, finishReason: "stop" };
+      }
+    }
+  });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ username: "permission-owner", password: "correct horse" }) });
+    const cookie = cookies(bootstrap);
+    const headers = { "content-type": "application/json", cookie, "x-csrf-token": csrf(cookie), origin };
+    const project = await fetch(`${server.url}v1/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Permission project" }) });
+    const projectId = (await project.json() as { project: { id: string } }).project.id;
+    const agent = await fetch(`${server.url}v1/agents`, { method: "POST", headers, body: JSON.stringify({ projectId, name: "writer", instructions: "Write data.", icon: "bot" }) });
+    const agentId = (await agent.json() as { agent: { id: string } }).agent.id;
+    await fetch(`${server.url}v1/agents/${agentId}`, { method: "PATCH", headers, body: JSON.stringify({ capabilities: [{ capabilityId: "test.write", enabled: true }], permissions: [{ capabilityId: "test.write", policy: "allow" }] }) });
+    const create = await fetch(`${server.url}v1/automations`, { method: "POST", headers, body: JSON.stringify({ name: "Safe writer", schedule: { kind: "once", at: new Date(Date.now() + 60_000).toISOString(), timezone: "UTC" }, prompt: "Write now", agentId, projectId, permissionMode: "fail" }) });
+    const automation = (await create.json() as { automation: { id: string } }).automation;
+    await fetch(`${server.url}v1/automations/${automation.id}/run`, { method: "POST", headers });
+    const run = await eventually(async () => {
+      const response = await fetch(`${server.url}v1/automations/${automation.id}/runs`, { headers: { cookie } });
+      const runs = (await response.json() as { runs: readonly { status: string; error?: string }[] }).runs;
+      return runs[0]?.status === "needs_attention" ? runs[0] : undefined;
+    });
+    assert.match(run.error ?? "", /Permission required/);
+    assert.equal(executed, false);
+    const approved = await fetch(`${server.url}v1/automations`, { method: "POST", headers, body: JSON.stringify({ name: "Configured writer", schedule: { kind: "once", at: new Date(Date.now() + 60_000).toISOString(), timezone: "UTC" }, prompt: "Write pre-approved", agentId, projectId, permissionMode: "pre-approved" }) });
+    const approvedAutomation = (await approved.json() as { automation: { id: string } }).automation;
+    await fetch(`${server.url}v1/automations/${approvedAutomation.id}/run`, { method: "POST", headers });
+    await eventually(async () => {
+      const response = await fetch(`${server.url}v1/automations/${approvedAutomation.id}/runs`, { headers: { cookie } });
+      const runs = (await response.json() as { runs: readonly { status: string }[] }).runs;
+      return runs[0]?.status === "completed" ? runs[0] : undefined;
+    });
+    assert.equal(executed, true);
+    const readOnly = await fetch(`${server.url}v1/automations`, { method: "POST", headers, body: JSON.stringify({ name: "Read-only writer", schedule: { kind: "once", at: new Date(Date.now() + 60_000).toISOString(), timezone: "UTC" }, prompt: "Write read-only", agentId, projectId, permissionMode: "read-only" }) });
+    const readOnlyAutomation = (await readOnly.json() as { automation: { id: string } }).automation;
+    await fetch(`${server.url}v1/automations/${readOnlyAutomation.id}/run`, { method: "POST", headers });
+    await eventually(async () => {
+      const response = await fetch(`${server.url}v1/automations/${readOnlyAutomation.id}/runs`, { headers: { cookie } });
+      const runs = (await response.json() as { runs: readonly { status: string }[] }).runs;
+      return runs[0]?.status === "completed" ? runs[0] : undefined;
+    });
+    assert.equal(executed, true);
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });

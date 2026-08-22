@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import { createToolHandle, type ToolDefinition } from "tool-resolver";
+import { createToolHandle, type JsonSchema, type ToolDefinition } from "tool-resolver";
 import type { GitCredentialInput, ProjectRepositoryConfig } from "data-layer";
 
 type GitStatusEntry = {
@@ -72,6 +72,15 @@ export async function validateExistingWorkspace(root: string, requested: string)
   return canonicalWorkspace;
 }
 
+/** Re-check a persisted workspace immediately before using it. */
+export async function validateRuntimeWorkspace(root: string, workspace: string): Promise<string> {
+  const canonicalRoot = await realpath(root);
+  const canonicalWorkspace = await realpath(workspace);
+  const info = await stat(canonicalWorkspace);
+  if (!info.isDirectory() || !inside(canonicalRoot, canonicalWorkspace)) throw new Error("workspace path is outside configured roots");
+  return canonicalWorkspace;
+}
+
 async function runGit(args: readonly string[], cwd: string, credential: GitCredentialInput | undefined, signal?: AbortSignal): Promise<{ readonly stdout: string; readonly stderr: string; readonly code: number }> {
   const executable = Bun.which("git");
   if (executable === null) throw new Error("git is not installed on the server");
@@ -80,24 +89,30 @@ async function runGit(args: readonly string[], cwd: string, credential: GitCrede
   let sshKey: string | undefined;
   try {
     const env: Record<string, string> = { ...process.env as Record<string, string>, GIT_TERMINAL_PROMPT: "0" };
-    if (credential?.token !== undefined || credential?.password !== undefined) {
+    if (credential?.token !== undefined || credential?.password !== undefined || credential?.passphrase !== undefined) {
       askpass = join(temp, "askpass");
-      await writeFile(askpass, "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s' \"$GIT_USERNAME\" ;; *) printf '%s' \"$GIT_PASSWORD\" ;; esac\n", { mode: 0o700 });
+      await writeFile(askpass, "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s' \"$GIT_USERNAME\" ;; *Password*) printf '%s' \"$GIT_PASSWORD\" ;; *) printf '%s' \"$SSH_PASSPHRASE\" ;; esac\n", { mode: 0o700 });
       await chmod(askpass, 0o700);
       env.GIT_ASKPASS = askpass;
       env.GIT_USERNAME = credential.username ?? "git";
       env.GIT_PASSWORD = credential.token ?? credential.password ?? "";
+      env.SSH_PASSPHRASE = credential.passphrase ?? "";
     }
     if (credential?.privateKey !== undefined) {
       sshKey = join(temp, "id_git");
       await writeFile(sshKey, credential.privateKey, { mode: 0o600 });
       await chmod(sshKey, 0o600);
       env.GIT_SSH_COMMAND = `ssh -i ${sshKey} -o IdentitiesOnly=yes`;
+      if (credential.passphrase !== undefined && askpass !== undefined) {
+        env.SSH_ASKPASS = askpass;
+        env.SSH_ASKPASS_REQUIRE = "force";
+        env.DISPLAY = env.DISPLAY ?? ":0";
+      }
     }
     const child = Bun.spawn([executable, ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
     const abort = () => child.kill();
     signal?.addEventListener("abort", abort, { once: true });
-    const [stdout, stderr, code] = await Promise.all([child.stdout.text(), child.stderr.text(), child.exited]);
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     signal?.removeEventListener("abort", abort);
     if (signal?.aborted) throw new Error("git operation was cancelled");
     return { stdout, stderr, code };
@@ -192,18 +207,19 @@ function jsonInput(args: unknown): Record<string, unknown> {
   return args as Record<string, unknown>;
 }
 
-export function createNativeGitTools(workspace: string, credential?: GitCredentialInput): readonly ToolDefinition[] {
-  const tool = (name: string, description: string, inputSchema: Record<string, unknown>, policy: "allow" | "ask", mutating: boolean, execute: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>): ToolDefinition => ({
-    name, capabilityId: name, description, inputSchema, source: "git", capabilities: { mutating }, policy, executable: { handle: createToolHandle((input: unknown, signal?: AbortSignal) => execute(jsonInput(input), signal)) },
+export function createNativeGitTools(workspace: string, credential?: GitCredentialInput, workspaceRoot?: string, remoteName = "origin"): readonly ToolDefinition[] {
+  const activeWorkspace = async (): Promise<string> => workspaceRoot === undefined ? workspace : validateRuntimeWorkspace(workspaceRoot, workspace);
+  const tool = (name: string, description: string, inputSchema: JsonSchema, policy: "allow" | "ask", mutating: boolean, execute: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>): ToolDefinition => ({
+    name, capabilityId: name, description, inputSchema, source: "git", capabilities: { mutating }, policy, executable: { handle: createToolHandle((...args: readonly unknown[]) => execute(jsonInput(args[0]), args[1] instanceof AbortSignal ? args[1] : undefined)) },
   });
   return [
-    tool("git.status", "Show changed files and staged or unstaged state.", { type: "object", properties: {} }, "allow", false, async (_input, signal) => gitStatus(workspace, signal)),
-    tool("git.diff", "Show the diff for the current workspace or one changed file.", { type: "object", properties: { path: { type: "string" }, staged: { type: "boolean" } } }, "allow", false, async (input, signal) => gitDiff(workspace, input.path, input.staged === true, signal)),
-    tool("git.log", "Show recent commits.", { type: "object", properties: {} }, "allow", false, async () => gitLog(workspace)),
-    tool("git.branch.list", "List local branches.", { type: "object", properties: {} }, "allow", false, async () => gitBranches(workspace)),
-    tool("git.branch.create", "Create and switch to a local branch.", { type: "object", required: ["name"], properties: { name: { type: "string" } } }, "ask", true, async input => gitBranchCreate(workspace, String(input.name ?? ""))),
-    tool("git.commit", "Commit staged changes.", { type: "object", required: ["message"], properties: { message: { type: "string" } } }, "ask", true, async input => gitCommit(workspace, String(input.message ?? ""))),
-    tool("git.push", "Push commits to the configured remote.", { type: "object", properties: { remote: { type: "string" }, branch: { type: "string" } } }, "ask", true, async input => gitPush(workspace, String(input.remote ?? "origin"), input.branch === undefined ? undefined : String(input.branch), credential)),
-    tool("git.pull", "Fast-forward pull from the configured remote.", { type: "object", properties: { remote: { type: "string" }, branch: { type: "string" } } }, "ask", true, async input => gitPull(workspace, String(input.remote ?? "origin"), input.branch === undefined ? undefined : String(input.branch), credential)),
+    tool("git.status", "Show changed files and staged or unstaged state.", { type: "object", properties: {} }, "allow", false, async (_input, signal) => gitStatus(await activeWorkspace(), signal)),
+    tool("git.diff", "Show the diff for the current workspace or one changed file.", { type: "object", properties: { path: { type: "string" }, staged: { type: "boolean" } } }, "allow", false, async (input, signal) => gitDiff(await activeWorkspace(), typeof input.path === "string" ? input.path : undefined, input.staged === true, signal)),
+    tool("git.log", "Show recent commits.", { type: "object", properties: {} }, "allow", false, async () => gitLog(await activeWorkspace())),
+    tool("git.branch.list", "List local branches.", { type: "object", properties: {} }, "allow", false, async () => gitBranches(await activeWorkspace())),
+    tool("git.branch.create", "Create and switch to a local branch.", { type: "object", required: ["name"], properties: { name: { type: "string" } } }, "ask", true, async input => gitBranchCreate(await activeWorkspace(), String(input.name ?? ""))),
+    tool("git.commit", "Commit staged changes.", { type: "object", required: ["message"], properties: { message: { type: "string" } } }, "ask", true, async input => gitCommit(await activeWorkspace(), String(input.message ?? ""))),
+    tool("git.push", "Push commits to the configured remote.", { type: "object", properties: { remote: { type: "string" }, branch: { type: "string" } } }, "ask", true, async input => gitPush(await activeWorkspace(), String(input.remote ?? remoteName), input.branch === undefined ? undefined : String(input.branch), credential)),
+    tool("git.pull", "Fast-forward pull from the configured remote.", { type: "object", properties: { remote: { type: "string" }, branch: { type: "string" } } }, "ask", true, async input => gitPull(await activeWorkspace(), String(input.remote ?? remoteName), input.branch === undefined ? undefined : String(input.branch), credential)),
   ];
 }

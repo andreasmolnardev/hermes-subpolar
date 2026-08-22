@@ -26,7 +26,7 @@ import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
 import { IntegrationManager } from "./integrations";
-import { cloneRepository, createEmptyWorkspace, createNativeGitTools, gitBranches, gitDiff, gitStatus, validateExistingWorkspace } from "./git";
+import { cloneRepository, createEmptyWorkspace, createNativeGitTools, gitBranches, gitDiff, gitStatus, validateExistingWorkspace, validateRuntimeWorkspace } from "./git";
 import {
   beginDeviceOAuth,
   beginProviderOAuth,
@@ -378,7 +378,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
 
   const toolDefinitionsFor = async (principal: AuthenticatedPrincipal, project: NonNullable<ReturnType<SQLiteIdentityRepository["getProject"]>> | null): Promise<readonly ToolDefinition[]> => {
     const credential = project?.repository?.credentialId === undefined ? undefined : identity.getGitCredentialRuntime(principal.id, project.repository.credentialId);
-    const gitTools = project?.workspace === undefined || project.workspace === "" ? [] : createNativeGitTools(project.workspace, credential);
+    const gitTools = project?.workspace === undefined || project.workspace === "" ? [] : createNativeGitTools(project.workspace, credential, workspaceRoot, project.repository?.remoteName ?? "origin");
     return [...(options.toolDefinitions ?? []), ...gitTools, ...(await integrations.toolsFor(principal.id))];
   };
 
@@ -449,7 +449,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
     }
     const projectTools = await toolDefinitionsFor(principal, project);
-    const contextAssembler = project?.instructions.trim() === "" ? undefined : (async context => assembleHarnessContext({ ...context, messages: context.messages.filter(message => message.role !== "system") }, { sources: [{ kind: "instructions", content: `<project-instructions>\n${project.instructions}\n</project-instructions>` }] }).messages);
+    const contextAssembler: HarnessContextAssembler | undefined = project === null || project.instructions.trim() === "" ? undefined : (async context => assembleHarnessContext({ ...context, messages: context.messages.filter(message => message.role !== "system") }, { sources: [{ kind: "instructions", content: `<project-instructions>\n${project.instructions}\n</project-instructions>` }] }).messages);
     return { input: { ...input, model: effectiveModel }, sessionId, tools: projectTools, ...(project?.workspace ? { cwd: project.workspace } : {}), ...(contextAssembler === undefined ? {} : { contextAssembler }), ...(explicitReasoning === undefined ? {} : { reasoningEffort: explicitReasoning }) };
   };
 
@@ -461,7 +461,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     turnApprovalPolicy?: HarnessApprovalPolicy,
   ): Promise<unknown> => {
     const prepared = await prepareTurn(principal, input);
-    if (prepared.cwd !== undefined) await gateway.setSessionCwd(prepared.sessionId, prepared.cwd);
+    const runtimeCwd = prepared.cwd === undefined ? undefined : await validateRuntimeWorkspace(workspaceRoot, prepared.cwd);
+    if (runtimeCwd !== undefined) await gateway.setSessionCwd(prepared.sessionId, runtimeCwd);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
     const runtime = connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
@@ -473,7 +474,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       toolDefinitions: prepared.tools,
       toolPolicyOverrides: prepared.tools.length === 0 ? options.toolPolicyOverrides ?? [] : [],
       sessionId: prepared.sessionId,
-      ...(prepared.cwd === undefined ? {} : { cwd: prepared.cwd }),
+      ...(runtimeCwd === undefined ? {} : { cwd: runtimeCwd }),
       requestId: prepared.input.requestId ?? randomUUID(),
       ...(prepared.reasoningEffort === undefined ? {} : { options: { reasoningEffort: prepared.reasoningEffort } }),
       signal,
@@ -662,7 +663,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       if (url.pathname === "/v1/capabilities" && request.method === "GET") {
         const auth = authenticated(request, identity);
         if (auth instanceof Response) return auth;
-        const definitions = [...(options.toolDefinitions ?? []), ...createNativeGitTools(workspaceRoot), ...(await integrations.toolsFor(auth.principal.id))];
+        const definitions = [...(options.toolDefinitions ?? []), ...createNativeGitTools(workspaceRoot, undefined, workspaceRoot), ...(await integrations.toolsFor(auth.principal.id))];
         return json({ capabilities: definitions.map(definition => ({ capabilityId: definition.capabilityId ?? definition.name, name: definition.name, description: definition.description, source: definition.source, capabilities: definition.capabilities ?? [], defaultPolicy: definition.policy === "ask" || definition.policy === "deny" ? definition.policy : "allow", ...(definition.integrationId === undefined ? {} : { integrationId: definition.integrationId }), ...(definition.integrationName === undefined ? {} : { integrationName: definition.integrationName }), ...(definition.integrationType === undefined ? {} : { integrationType: definition.integrationType }), ...(definition.nativeName === undefined ? {} : { nativeName: definition.nativeName }), ...(definition.displayName === undefined ? {} : { displayName: definition.displayName }) })) });
       }
 
@@ -832,7 +833,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             const repository = repositoryValue === undefined ? undefined : (() => {
               if (typeof repositoryValue !== "object" || repositoryValue === null || Array.isArray(repositoryValue)) throw new Error("repository is invalid");
               const item = repositoryValue as Record<string, unknown>;
-              return { url: String(item.url ?? ""), credentialId: item.credentialId === undefined ? undefined : String(item.credentialId), defaultBranch: item.defaultBranch === undefined ? undefined : String(item.defaultBranch), remoteName: String(item.remoteName ?? "origin") };
+              return { url: String(item.url ?? ""), remoteName: String(item.remoteName ?? "origin"), ...(item.credentialId === undefined ? {} : { credentialId: String(item.credentialId) }), ...(item.defaultBranch === undefined ? {} : { defaultBranch: String(item.defaultBranch) }) };
             })();
             if (mode === "existing") workspace = await validateExistingWorkspace(workspaceRoot, String(value.workspacePath ?? ""));
             else workspace = await createEmptyWorkspace(workspaceRoot, projectId);
@@ -841,7 +842,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
               if (repository === undefined) throw new Error("clone repository is required");
               await cloneRepository(workspace, repository, credential);
             }
-            const projectInput: ProjectInput = { id: projectId, name: String(value.name ?? ""), description: value.description === undefined ? undefined : String(value.description), instructions: value.instructions === undefined ? undefined : String(value.instructions), workspace, repository, defaultAgentId: value.defaultAgentId === undefined ? undefined : String(value.defaultAgentId), settings: value.settings as Record<string, unknown> | undefined };
+            const projectInput: ProjectInput = { id: projectId, name: String(value.name ?? ""), workspace, ...(value.description === undefined ? {} : { description: String(value.description) }), ...(value.instructions === undefined ? {} : { instructions: String(value.instructions) }), ...(repository === undefined ? {} : { repository }), ...(value.defaultAgentId === undefined ? {} : { defaultAgentId: String(value.defaultAgentId) }), ...(value.settings === undefined ? {} : { settings: value.settings as Record<string, unknown> }) };
             return json({ project: identity.createProject(auth.principal.id, projectInput) }, 201);
           } catch { if (projectId && workspace && workspace.startsWith(resolve(workspaceRoot))) await rm(workspace, { recursive: true, force: true }).catch(() => undefined); return json({ error: "invalid_project" }, 400); }
         }
@@ -871,9 +872,10 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         if (project === null) return json({ error: "not_found" }, 404);
         if (!project.workspace) return json({ error: "workspace_unavailable" }, 400);
         try {
-          if (projectGitPath[2] === "status") return json(await gitStatus(project.workspace));
-          if (projectGitPath[2] === "branches") return json({ branches: await gitBranches(project.workspace) });
-          return json({ diff: await gitDiff(project.workspace, url.searchParams.get("path") ?? undefined, url.searchParams.get("staged") === "true") });
+          const workspace = await validateRuntimeWorkspace(workspaceRoot, project.workspace);
+          if (projectGitPath[2] === "status") return json(await gitStatus(workspace));
+          if (projectGitPath[2] === "branches") return json({ branches: await gitBranches(workspace) });
+          return json({ diff: await gitDiff(workspace, url.searchParams.get("path") ?? undefined, url.searchParams.get("staged") === "true") });
         } catch { return json({ error: "git_unavailable" }, 400); }
       }
 

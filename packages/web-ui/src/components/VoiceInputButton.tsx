@@ -4,7 +4,7 @@ import { transcribeVoice } from '@/lib/subpolar-api'
 
 export type VoiceInputState = 'idle' | 'requesting' | 'recording' | 'transcribing' | 'error'
 
-export function VoiceInputButton({ draft, setDraft, disabled }: { draft: string; setDraft: (value: string) => void; disabled: boolean }) {
+export function VoiceInputButton({ draft, setDraft, disabled, configured = true }: { draft: string; setDraft: (value: string) => void; disabled: boolean; configured?: boolean }) {
   const [state, setState] = useState<VoiceInputState>('idle')
   const [error, setError] = useState<string | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -74,11 +74,11 @@ export function VoiceInputButton({ draft, setDraft, disabled }: { draft: string;
     <div className="flex items-center gap-1">
       <button
         type="button"
-        aria-label={recording ? 'Stop recording' : busy ? 'Transcribing recording' : 'Record voice message'}
+        aria-label={!configured ? 'Configure speech-to-text in Voice settings' : recording ? 'Stop recording' : busy ? 'Transcribing recording' : 'Record voice message'}
         aria-pressed={recording}
-        title={recording ? 'Stop recording' : 'Record voice message'}
+        title={!configured ? 'Configure speech-to-text in User Settings → Voice' : recording ? 'Stop recording' : 'Record voice message'}
         onClick={() => (recording ? stop() : void start())}
-        disabled={disabled || busy}
+        disabled={!configured || disabled || busy}
         className={`rounded-full p-2.5 ${recording ? 'bg-red-500 text-white' : 'text-[var(--color-muted-foreground,var(--midground-base))] hover:bg-white/10'} disabled:opacity-40`}
       >
         {busy ? <LoaderCircle className="animate-spin" size={16} /> : recording ? <Square size={16} /> : <Mic size={16} />}

@@ -207,11 +207,11 @@ function VoiceSettings() {
       {error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}
       <section className="setup-option mt-6 rounded-xl p-4">
         <div className="flex items-start justify-between gap-3">
-          <div><h3 className="font-medium">Speech-to-Text</h3><p className="setup-help mt-1 text-sm">Transcriptions are inserted into the composer for editing before sending.</p></div>
+          <div><h3 className="font-medium">Speech-to-Text</h3><p className="setup-help mt-1 text-sm">Transcriptions are inserted into the composer for editing before sending. The endpoint must use the OpenAI-compatible multipart speech API.</p></div>
           {saved?.stt.configured && <span className="text-xs text-[#70d7cc]">Configured</span>}
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="setup-label">Provider<select value={form.stt.provider} onChange={event => setStt('provider', event.target.value)} className="setup-input mt-2 w-full"><option value="none">Disabled</option><option value="http">HTTP speech provider</option><option value="openai-compatible">OpenAI-compatible speech API</option></select></label>
+          <label className="setup-label">Provider<select value={form.stt.provider} onChange={event => setStt('provider', event.target.value)} className="setup-input mt-2 w-full"><option value="none">Disabled</option><option value="openai-compatible">OpenAI-compatible speech API</option></select></label>
           <label className="setup-label">Model<input value={form.stt.model} onChange={event => setStt('model', event.target.value)} className="setup-input mt-2 w-full" /></label>
           <label className="setup-label">Language<input value={form.stt.language} onChange={event => setStt('language', event.target.value)} className="setup-input mt-2 w-full" placeholder="auto or en" /></label>
           <label className="setup-label">Endpoint URL<input value={form.stt.endpoint} onChange={event => setStt('endpoint', event.target.value)} className="setup-input mt-2 w-full" placeholder="https://provider.example/v1/audio/transcriptions" /></label>
@@ -220,11 +220,11 @@ function VoiceSettings() {
       </section>
       <section className="setup-option mt-4 rounded-xl p-4">
         <div className="flex items-start justify-between gap-3">
-          <div><h3 className="font-medium">Text-to-Speech</h3><p className="setup-help mt-1 text-sm">Use the response action to read any completed answer, or enable auto-play below.</p></div>
+          <div><h3 className="font-medium">Text-to-Speech</h3><p className="setup-help mt-1 text-sm">Use the response action to read any completed answer, or enable auto-play below. The endpoint must use the OpenAI-compatible JSON speech API.</p></div>
           {saved?.tts.configured && <span className="text-xs text-[#70d7cc]">Configured</span>}
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="setup-label">Provider<select value={form.tts.provider} onChange={event => setTts('provider', event.target.value)} className="setup-input mt-2 w-full"><option value="none">Disabled</option><option value="http">HTTP speech provider</option><option value="openai-compatible">OpenAI-compatible speech API</option></select></label>
+          <label className="setup-label">Provider<select value={form.tts.provider} onChange={event => setTts('provider', event.target.value)} className="setup-input mt-2 w-full"><option value="none">Disabled</option><option value="openai-compatible">OpenAI-compatible speech API</option></select></label>
           <label className="setup-label">Model<input value={form.tts.model} onChange={event => setTts('model', event.target.value)} className="setup-input mt-2 w-full" /></label>
           <label className="setup-label">Voice<input value={form.tts.voice} onChange={event => setTts('voice', event.target.value)} className="setup-input mt-2 w-full" /></label>
           <label className="setup-label">Speed (0.25–4)<input type="number" min="0.25" max="4" step="0.05" value={form.tts.speed} onChange={event => setTts('speed', Number(event.target.value))} className="setup-input mt-2 w-full" /></label>

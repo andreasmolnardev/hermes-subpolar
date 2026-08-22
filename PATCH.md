@@ -7,7 +7,12 @@
   editable composer, and releases media tracks immediately. Text-to-Speech supports
   per-response playback and an opt-in auto-play setting. Voice API credentials are
   encrypted server-side, audio is forwarded temporarily, and dedicated STT/TTS
-  interfaces remain separate from chat model providers.
+  interfaces remain separate from chat model providers. The microphone action is
+  disabled until STT is configured, and the settings UI identifies the supported
+  OpenAI-compatible speech wire formats.
+- Stabilized injected HTTP MCP request bodies, isolated integration-test fetchers,
+  and restored synthetic Git diffs for untracked files so the gateway/runtime
+  regression suites remain deterministic under Bun.
 - Added owner-configurable MCP and OpenAPI Integrations. MCP supports HTTP /
   Streamable HTTP and stdio discovery, OpenAPI definitions can be supplied by
   URL or content, and normalized capabilities flow through the existing Agent

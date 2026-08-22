@@ -686,7 +686,7 @@ function Chat({
               </select>
               <ChevronDown className="pointer-events-none absolute right-0" size={12} />
             </div>
-            <VoiceInputButton draft={draft} setDraft={setDraft} disabled={streaming} />
+            <VoiceInputButton draft={draft} setDraft={setDraft} disabled={streaming} configured={voice.stt.configured} />
             <button
               onClick={streaming ? onCancel : onSend}
               disabled={!streaming && !draft.trim()}

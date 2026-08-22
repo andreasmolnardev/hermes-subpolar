@@ -23,17 +23,20 @@ class FakeRecorder {
 
 const mountedRoots: Root[] = []
 const trackStop = vi.fn()
+const getUserMedia = vi.fn()
 
-function Harness() {
+function Harness({ configured = true }: { configured?: boolean }) {
   const [draft, setDraft] = useState('Existing')
-  return <><VoiceInputButton draft={draft} setDraft={setDraft} disabled={false} /><output>{draft}</output></>
+  return <><VoiceInputButton draft={draft} setDraft={setDraft} disabled={false} configured={configured} /><output>{draft}</output></>
 }
 
 beforeEach(() => {
   transcribeVoice.mockResolvedValue({ text: 'dictated text' })
   trackStop.mockReset()
+  getUserMedia.mockReset()
+  getUserMedia.mockResolvedValue({ getTracks: () => [{ stop: trackStop }] })
   FakeRecorder.current = null
-  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop: trackStop }] }) } })
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } })
   vi.stubGlobal('MediaRecorder', FakeRecorder)
 })
 
@@ -60,5 +63,18 @@ describe('VoiceInputButton', () => {
     await act(async () => button?.click())
     expect(await container.querySelector('output')?.textContent).toBe('Existing dictated text')
     expect(trackStop).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not request the microphone when speech-to-text is not configured', async () => {
+    const container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    mountedRoots.push(root)
+    await act(async () => root.render(<Harness configured={false} />))
+    const button = container.querySelector('button')
+    expect(button?.getAttribute('aria-label')).toBe('Configure speech-to-text in Voice settings')
+    expect(button).toHaveProperty('disabled', true)
+    await act(async () => button?.click())
+    expect(getUserMedia).not.toHaveBeenCalled()
   })
 })

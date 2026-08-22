@@ -83,7 +83,8 @@ export class IntegrationManager {
   private readonly transports = new Map<IntegrationKey, McpTransport>();
   private readonly cacheExpiry = new Map<IntegrationKey, string>();
   private readonly protocols = new Map<IntegrationKey, McpProtocol>();
-  constructor(private readonly identity: SQLiteIdentityRepository) {}
+  private readonly fetch: typeof fetch;
+  constructor(private readonly identity: SQLiteIdentityRepository, fetcher: typeof fetch = globalThis.fetch) { this.fetch = fetcher; }
   private key(ownerId: string, integrationId: string): IntegrationKey { return `${ownerId}:${integrationId}`; }
 
   /** Resolves IDs written by the pre-integration-ID implementation without rewriting agent data blindly. */
@@ -108,7 +109,7 @@ export class IntegrationManager {
     const params = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: clientId });
     const clientSecret = stringValue(runtime.secrets.clientSecret); if (clientSecret !== undefined) params.set("client_secret", clientSecret);
     let response: Response;
-    try { response = await fetch(safeUrl(tokenUrl, "OAuth token URL"), { method: "POST", headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: params, redirect: "error" }); }
+    try { response = await this.fetch(safeUrl(tokenUrl, "OAuth token URL"), { method: "POST", headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: params, redirect: "error" }); }
     catch { this.identity.updateIntegrationStatus(ownerId, integrationId, "authentication_required", "Authentication required"); throw new AuthenticationError("OAuth refresh failed"); }
     if (!response.ok) { this.identity.updateIntegrationStatus(ownerId, integrationId, "authentication_required", "Authentication required"); throw new AuthenticationError("OAuth refresh failed"); }
     const payload = record(await response.json()); const accessToken = stringValue(payload.access_token); if (accessToken === undefined) { this.identity.updateIntegrationStatus(ownerId, integrationId, "authentication_required", "Authentication required"); throw new AuthenticationError("OAuth refresh failed"); }
@@ -142,7 +143,7 @@ export class IntegrationManager {
     const config = record(runtime.integration.config); const transportName = stringValue(config.transport);
     const makeTransport = async (): Promise<McpTransport> => {
       const current = await this.runtimeFor(ownerId, integrationId); const currentConfig = record(current.integration.config);
-      return currentConfig.transport === "stdio" ? createMcpStdioTransport({ command: stringValue(currentConfig.command) ?? "", args: Array.isArray(currentConfig.arguments) ? currentConfig.arguments.filter((item): item is string => typeof item === "string") : [], env: record(current.secrets.environment ?? current.secrets.env) as Record<string, string> }) : createMcpHttpTransport({ endpoint: stringValue(currentConfig.endpoint) ?? "", headers: integrationHeaders(current) });
+      return currentConfig.transport === "stdio" ? createMcpStdioTransport({ command: stringValue(currentConfig.command) ?? "", args: Array.isArray(currentConfig.arguments) ? currentConfig.arguments.filter((item): item is string => typeof item === "string") : [], env: record(current.secrets.environment ?? current.secrets.env) as Record<string, string> }) : createMcpHttpTransport({ endpoint: stringValue(currentConfig.endpoint) ?? "", headers: integrationHeaders(current), fetch: this.fetch });
     };
     const transport = await makeTransport(); let protocol: McpProtocol = "modern"; let discovery: unknown;
     try {
@@ -175,11 +176,11 @@ export class IntegrationManager {
 
   private async cachedMcp(ownerId: string, integration: IntegrationRecord): Promise<readonly ToolDefinition[]> {
     const key = this.key(ownerId, integration.id); const runtime = this.identity.getIntegrationRuntimeConfig(ownerId, integration.id); if (runtime === null) return Promise.resolve([]);
-    const transport = this.transports.get(key) ?? createMcpHttpTransport({ endpoint: stringValue(record(runtime.integration.config).endpoint) ?? "", headers: integrationHeaders(runtime) });
+    const transport = this.transports.get(key) ?? createMcpHttpTransport({ endpoint: stringValue(record(runtime.integration.config).endpoint) ?? "", headers: integrationHeaders(runtime), fetch: this.fetch });
     const tools: McpTool[] = integration.capabilities.map(capability => ({ name: capability.nativeName ?? capability.name, description: capability.description, inputSchema: capability.inputSchema as never }));
     const protocol: McpProtocol = record(runtime.integration.config).transport === "stdio" ? "legacy" : "modern";
     try {
-      return await createMcpToolDefinitions({ serverName: integration.name, transport, protocol, discoveredTools: tools, capabilityPrefix: `integration:${integration.id}:mcp:`, integrationId: integration.id, integrationName: integration.name, integrationType: integration.type, policy: "ask", ...(this.transports.has(key) ? {} : { transportFactory: async () => { const current = await this.runtimeFor(ownerId, integration.id); const config = record(current.integration.config); return createMcpHttpTransport({ endpoint: stringValue(config.endpoint) ?? "", headers: integrationHeaders(current) }); } }) });
+      return await createMcpToolDefinitions({ serverName: integration.name, transport, protocol, discoveredTools: tools, capabilityPrefix: `integration:${integration.id}:mcp:`, integrationId: integration.id, integrationName: integration.name, integrationType: integration.type, policy: "ask", ...(this.transports.has(key) ? {} : { transportFactory: async () => { const current = await this.runtimeFor(ownerId, integration.id); const config = record(current.integration.config); return createMcpHttpTransport({ endpoint: stringValue(config.endpoint) ?? "", headers: integrationHeaders(current), fetch: this.fetch }); } }) });
     } finally { if (!this.transports.has(key)) await transport.close?.(); }
   }
 
@@ -205,7 +206,7 @@ export class IntegrationManager {
   async revokeOAuth(ownerId: string, integrationId: string): Promise<IntegrationRecord> {
     const runtime = this.identity.getIntegrationRuntimeConfig(ownerId, integrationId); if (runtime === null) throw new AuthenticationError("Integration is not owned by the authenticated user");
     const auth = record(runtime.integration.config.auth); const token = stringValue(runtime.secrets.accessToken); const revocationUrl = stringValue(auth.revocationUrl);
-    if (token !== undefined && revocationUrl !== undefined) { try { await fetch(safeUrl(revocationUrl, "OAuth revocation URL"), { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }), redirect: "error" }); } catch { /* local revoke is authoritative */ } }
+    if (token !== undefined && revocationUrl !== undefined) { try { await this.fetch(safeUrl(revocationUrl, "OAuth revocation URL"), { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }), redirect: "error" }); } catch { /* local revoke is authoritative */ } }
     this.invalidate(ownerId, integrationId); this.identity.revokeIntegrationOAuth(ownerId, integrationId); return this.identity.updateIntegrationStatus(ownerId, integrationId, "authentication_required", "Authentication required");
   }
 
@@ -214,7 +215,7 @@ export class IntegrationManager {
     const runtime = this.identity.getIntegrationRuntimeConfig(ownerId, integrationId); if (runtime === null) throw new AuthenticationError("Integration is not owned by the authenticated user"); const auth = record(runtime.integration.config.auth);
     const tokenUrl = stringValue(auth.tokenUrl); const clientId = stringValue(auth.clientId); if (tokenUrl === undefined || clientId === undefined) throw new TypeError("OAuth configuration is invalid");
     const params = new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId, redirect_uri: redirectUri, code_verifier: oauthState.codeVerifier }); const clientSecret = stringValue(runtime.secrets.clientSecret); if (clientSecret !== undefined) params.set("client_secret", clientSecret);
-    const response = await fetch(safeUrl(tokenUrl, "OAuth token URL"), { method: "POST", headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: params, redirect: "error" }); if (!response.ok) throw new Error("OAuth token exchange failed");
+    const response = await this.fetch(safeUrl(tokenUrl, "OAuth token URL"), { method: "POST", headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: params, redirect: "error" }); if (!response.ok) throw new Error("OAuth token exchange failed");
     const payload = record(await response.json()); const accessToken = stringValue(payload.access_token); if (accessToken === undefined) throw new Error("OAuth token exchange failed");
     this.identity.saveIntegrationOAuthCredentials(ownerId, integrationId, { accessToken, ...(stringValue(payload.refresh_token) === undefined ? {} : { refreshToken: payload.refresh_token }), ...(stringValue(payload.token_type) === undefined ? {} : { tokenType: payload.token_type }), ...(typeof payload.expires_in === "number" ? { expiresAt: Date.now() + payload.expires_in * 1000 } : {}) });
     return this.discover(ownerId, integrationId);

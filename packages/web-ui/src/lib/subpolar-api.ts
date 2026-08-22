@@ -41,7 +41,7 @@ export async function subpolarRequest<T>(path: string, init: RequestInit = {}): 
   const headers = new Headers(init.headers);
   if (method !== "GET" && method !== "HEAD") {
     headers.set("x-csrf-token", csrfToken());
-    if (!headers.has("content-type") && init.body !== undefined) headers.set("content-type", "application/json");
+    if (!headers.has("content-type") && init.body !== undefined && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
   }
   const response = await fetch(path, { ...init, method, headers, credentials: "include" });
   if (!response.ok) {
@@ -82,6 +82,44 @@ export function modelDefaults(): Promise<SubpolarModelDefaults> {
 
 export function saveModelDefaults(defaults: SubpolarModelDefaults): Promise<SubpolarModelDefaults> {
   return subpolarRequest("/v1/settings/models", { method: "PUT", body: JSON.stringify(defaults) });
+}
+
+export type SubpolarVoiceSettings = {
+  readonly stt: { readonly provider: string; readonly model: string; readonly language: string; readonly endpoint: string; readonly configured: boolean };
+  readonly tts: { readonly provider: string; readonly model: string; readonly voice: string; readonly speed: number; readonly endpoint: string; readonly autoPlay: boolean; readonly configured: boolean };
+};
+export type SubpolarVoiceSettingsInput = {
+  readonly stt: { readonly provider: string; readonly model: string; readonly language: string; readonly endpoint: string; readonly apiKey?: string };
+  readonly tts: { readonly provider: string; readonly model: string; readonly voice: string; readonly speed: number; readonly endpoint: string; readonly autoPlay: boolean; readonly apiKey?: string };
+};
+
+export function voiceSettings(): Promise<SubpolarVoiceSettings> {
+  return subpolarRequest("/v1/settings/voice");
+}
+
+export function saveVoiceSettings(settings: SubpolarVoiceSettingsInput): Promise<SubpolarVoiceSettings> {
+  return subpolarRequest("/v1/settings/voice", { method: "PUT", body: JSON.stringify(settings) });
+}
+
+export async function transcribeVoice(audio: Blob): Promise<{ readonly text: string }> {
+  const headers = new Headers({ "content-type": audio.type || "audio/webm", "x-csrf-token": csrfToken() });
+  const response = await fetch("/v1/voice/transcribe", { method: "POST", headers, body: audio, credentials: "include" });
+  if (!response.ok) throw new SubpolarApiError(response.status, "Voice transcription failed");
+  return await response.json() as { readonly text: string };
+}
+
+export async function synthesizeVoice(text: string): Promise<Blob> {
+  const response = await subpolarRequestResponse("/v1/voice/synthesize", { method: "POST", body: JSON.stringify({ text }) });
+  if (!response.ok) throw new SubpolarApiError(response.status, "Voice synthesis failed");
+  return await response.blob();
+}
+
+async function subpolarRequestResponse(path: string, init: RequestInit = {}): Promise<Response> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+  if (method !== "GET" && method !== "HEAD") headers.set("x-csrf-token", csrfToken());
+  if (init.body !== undefined && !(init.body instanceof FormData) && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return await fetch(path, { ...init, method, headers, credentials: "include" });
 }
 
 export function setupProviders(): Promise<{ readonly providers: readonly ModelProviderDefinition[] }> {

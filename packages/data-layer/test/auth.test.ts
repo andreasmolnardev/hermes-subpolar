@@ -297,3 +297,23 @@ test("model defaults persist per user and use provider model on first load", asy
     repository.close();
   }
 });
+
+test("voice settings persist without exposing provider credentials", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    const settings = repository.setVoiceSettings(session.principal.id, {
+      stt: { provider: "http", model: "listen-v1", language: "en", endpoint: "https://voice.example.test/transcribe", apiKey: "stt-secret" },
+      tts: { provider: "openai-compatible", model: "speak-v1", voice: "alloy", speed: 1.15, endpoint: "https://voice.example.test/speech", autoPlay: true, apiKey: "tts-secret" },
+    });
+    assert.equal(settings.stt.configured, true);
+    assert.equal(settings.tts.autoPlay, true);
+    assert.equal("apiKey" in settings.stt, false);
+    assert.deepEqual(repository.voiceSettings(session.principal.id), settings);
+    const runtime = repository.voiceProviderRuntime(session.principal.id);
+    assert.equal(runtime.sttApiKey, "stt-secret");
+    assert.equal(runtime.ttsApiKey, "tts-secret");
+  } finally {
+    repository.close();
+  }
+});

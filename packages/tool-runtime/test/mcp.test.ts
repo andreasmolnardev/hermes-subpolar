@@ -79,7 +79,7 @@ test("MCP rejects sanitized tool collisions", async () => {
 });
 
 test("MCP validates response correlation and closes on cancellation", async () => {
-  const tools = await createMcpToolDefinitions({ serverName: "server", transport: { async request(request) { return { jsonrpc: "2.0", id: 99, result: request.method === "tools/list" ? { tools: [{ name: "search", inputSchema: { type: "object" } }] } : { content: [] } }; } } });
+  const tools = await createMcpToolDefinitions({ serverName: "server", transport: { async request(request) { return { jsonrpc: "2.0", id: request.method === "tools/list" ? request.id : 99, result: request.method === "tools/list" ? { tools: [{ name: "search", inputSchema: { type: "object" } }] } : { content: [] } }; } } });
   await assert.rejects(executeTool(tools[0]!, {}), /MCP request failed|correlation/);
   let closed = 0; const controller = new AbortController();
   const cancellable = await createMcpToolDefinitions({ serverName: "server", transport: { async request(request) { if (request.method === "tools/list") return { jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "search" }] } }; return new Promise(() => undefined); }, close: () => { closed++; } } });

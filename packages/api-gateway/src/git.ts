@@ -164,14 +164,21 @@ export async function gitDiff(workspace: string, path?: string, staged = false, 
   const safePath = safeRelativePath(path);
   const args = ["diff", ...(staged ? ["--cached"] : []), "--no-ext-diff", "--", ...(safePath === undefined ? [] : [safePath])];
   const output = await runGit(args, workspace, undefined, signal);
-  if (output.code === 0) return output.stdout;
-  if (safePath !== undefined && output.stderr.trim() === "") {
+  if (safePath !== undefined && !staged && (output.code !== 0 || output.stdout === "")) {
     const file = resolve(workspace, safePath);
-    if (inside(await realpath(workspace), await realpath(file))) {
-      const content = await readFile(file, "utf8");
-      return `diff --git a/${safePath} b/${safePath}\nnew file\n--- /dev/null\n+++ b/${safePath}\n@@ -0,0 +1,${content.split("\n").length}\n+${content.replaceAll("\n", "\n+")}`;
+    const tracked = await runGit(["ls-files", "--error-unmatch", "--", safePath], workspace, undefined, signal);
+    if (tracked.code !== 0 && output.stderr.trim() === "") {
+      try {
+        if (inside(await realpath(workspace), await realpath(file))) {
+          const content = await readFile(file, "utf8");
+          return `diff --git a/${safePath} b/${safePath}\nnew file\n--- /dev/null\n+++ b/${safePath}\n@@ -0,0 +1,${content.split("\n").length}\n+${content.replaceAll("\n", "\n+")}`;
+        }
+      } catch {
+        // A missing explicit path has no synthetic diff.
+      }
     }
   }
+  if (output.code === 0) return output.stdout;
   throw new Error(`git diff failed: ${output.stderr.trim().slice(0, 2000)}`);
 }
 

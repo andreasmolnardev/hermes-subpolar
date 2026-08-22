@@ -34,6 +34,7 @@ import {
   gitDiff,
   gitStatus,
   modelDefaults,
+  voiceSettings,
   promptCommands,
   projects,
   skills,
@@ -51,13 +52,16 @@ import {
   type SubpolarProject,
   type SubpolarSkill,
   type SubpolarSession,
-  type SubpolarUser
+  type SubpolarUser,
+  type SubpolarVoiceSettings
 } from '@/lib/subpolar-api'
 import { SubpolarWebSocketClient, type SubpolarSocketEvent } from '@/lib/subpolar-client'
 import { projectSubpolarActivity, subpolarEventType, type SubpolarActivityKind } from '@/lib/subpolar-events'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { AgentSkillPicker } from '@/components/AgentSkillPicker'
 import { PromptCommandComposer } from '@/components/PromptCommandComposer'
+import { VoiceInputButton } from '@/components/VoiceInputButton'
+import { VoiceOutputButton } from '@/components/VoiceOutputButton'
 
 type View = 'chat' | 'agents' | 'automations' | 'apps'
 type WorkspaceView = View | 'projects'
@@ -116,6 +120,11 @@ type PromptMessage = {
   readonly role: 'system' | 'user' | 'assistant'
   readonly content: SubpolarMessage['content']
   readonly sequence?: number
+}
+
+const DEFAULT_VOICE_SETTINGS: SubpolarVoiceSettings = {
+  stt: { provider: 'none', model: 'default', language: 'auto', endpoint: 'https://example.invalid/stt', configured: false },
+  tts: { provider: 'none', model: 'default', voice: 'default', speed: 1, endpoint: 'https://example.invalid/tts', autoPlay: false, configured: false }
 }
 
 function isPromptMessage(message: ChatMessage): message is PromptMessage {
@@ -544,7 +553,8 @@ function Chat({
   streaming,
   onSend,
   onCancel,
-  commandInventory
+  commandInventory,
+  voice
 }: {
   messages: readonly ChatMessage[]
   draft: string
@@ -566,9 +576,11 @@ function Chat({
   onSend: () => void
   onCancel: () => void
   commandInventory: readonly SubpolarPromptCommand[]
+  voice: SubpolarVoiceSettings
 }) {
   const control =
     'max-w-[11rem] appearance-none bg-transparent pr-5 text-xs font-medium text-[var(--color-muted-foreground,var(--midground-base))] outline-none disabled:opacity-50'
+  const latestAssistantIndex = messages.findLastIndex(message => message.role === 'assistant' && messageText(message).trim() !== '')
   return (
     <section className={`flex min-h-0 flex-1 flex-col ${messages.length === 0 ? 'justify-center' : ''}`}>
       {messages.length > 0 && (
@@ -585,6 +597,7 @@ function Chat({
               >
                 <div className="mb-1 text-[10px] uppercase tracking-widest opacity-60">{message.role}</div>
                 <div className="whitespace-pre-wrap">{messageText(message)}</div>
+                {message.role === 'assistant' && messageText(message).trim() !== '' && <VoiceOutputButton text={messageText(message)} settings={voice.tts} ready={!streaming && index === latestAssistantIndex} />}
               </article>
             ))}
           </div>
@@ -673,6 +686,7 @@ function Chat({
               </select>
               <ChevronDown className="pointer-events-none absolute right-0" size={12} />
             </div>
+            <VoiceInputButton draft={draft} setDraft={setDraft} disabled={streaming} configured={voice.stt.configured} />
             <button
               onClick={streaming ? onCancel : onSend}
               disabled={!streaming && !draft.trim()}
@@ -751,6 +765,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     [messages, setMessages] = useState<readonly ChatMessage[]>([]),
     [draft, setDraft] = useState(''),
     [model, setModel] = useState('default'),
+    [voice, setVoice] = useState<SubpolarVoiceSettings>(DEFAULT_VOICE_SETTINGS),
     [modelProviders, setModelProviders] = useState<readonly SubpolarModelProvider[]>([]),
     [effort, setEffort] = useState<'' | 'low' | 'medium' | 'high'>(''),
     [permission, setPermission] = useState('full'),
@@ -849,6 +864,11 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   useEffect(() => {
     void modelDefaults()
       .then(result => setModel(result.conversation))
+      .catch(() => undefined)
+  }, [])
+  useEffect(() => {
+    void voiceSettings()
+      .then(result => setVoice(result))
       .catch(() => undefined)
   }, [])
   useEffect(() => {
@@ -1093,6 +1113,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
               if (id) void clientRef.current?.cancel(id)
             }}
             commandInventory={commandInventory}
+            voice={voice}
           />
         ) : view === 'projects' ? (
           <ProjectOverview projects={projectList} selectedProject={selectedProject} />

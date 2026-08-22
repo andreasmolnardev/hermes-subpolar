@@ -72,10 +72,10 @@ export function createMcpHttpTransport(options: McpHttpTransportOptions): McpTra
       } : legacySessionId === undefined ? {} : { "mcp-session-id": legacySessionId }),
     };
     const body = { jsonrpc: "2.0", id: request.id, method: request.method, params: request.params ?? {} };
-    const response = await (options.fetch ?? fetch)(endpoint, {
+    const response = await (options.fetch ?? fetch)(new Request(endpoint, {
       method: "POST", headers, body: JSON.stringify(body), redirect: "error",
       ...(signal === undefined ? {} : { signal }),
-    });
+    }));
     if (response.redirected) throw new Error("MCP HTTP redirects are not allowed");
     if (!response.ok) throw new Error(`MCP HTTP request failed (${response.status})`);
     if (!modern) legacySessionId = response.headers.get("mcp-session-id") ?? legacySessionId;
@@ -93,7 +93,7 @@ export function createMcpHttpTransport(options: McpHttpTransportOptions): McpTra
           ...(request.name === undefined ? {} : { "mcp-name": request.name }),
         } : legacySessionId === undefined ? {} : { "mcp-session-id": legacySessionId }),
       };
-      const response = await (options.fetch ?? fetch)(endpoint, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", method: request.method, params: request.params ?? {} }), redirect: "error" });
+      const response = await (options.fetch ?? fetch)(new Request(endpoint, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", method: request.method, params: request.params ?? {} }), redirect: "error" }));
       if (response.redirected) throw new Error("MCP HTTP redirects are not allowed");
       if (!response.ok) throw new Error(`MCP HTTP notification failed (${response.status})`);
       if (!modern) legacySessionId = response.headers.get("mcp-session-id") ?? legacySessionId;

@@ -66,6 +66,22 @@ test("server authenticates users before dispatching owned chat turns", async () 
     });
     assert.equal(updatedDefaults.status, 200);
     assert.deepEqual(await updatedDefaults.json(), { conversation: "chat", internal: "tasks", voice: "voice", image: "image" });
+    const voiceUpdate = await fetch(`${server.url}v1/settings/voice`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin: new URL(server.url).origin },
+      body: JSON.stringify({
+        stt: { provider: "http", model: "listen-v1", language: "auto", endpoint: "https://voice.example.test/transcribe", apiKey: "stt-secret" },
+        tts: { provider: "http", model: "speak-v1", voice: "alloy", speed: 1, endpoint: "https://voice.example.test/speech", autoPlay: false, apiKey: "tts-secret" },
+      }),
+    });
+    assert.equal(voiceUpdate.status, 200);
+    const voicePayload = await voiceUpdate.json();
+    assert.deepEqual(voicePayload, {
+      stt: { provider: "http", model: "listen-v1", language: "auto", endpoint: "https://voice.example.test/transcribe", configured: true },
+      tts: { provider: "http", model: "speak-v1", voice: "alloy", speed: 1, endpoint: "https://voice.example.test/speech", autoPlay: false, configured: true },
+    });
+    const voiceReload = await fetch(`${server.url}v1/settings/voice`, { headers: { cookie: cookies } });
+    assert.deepEqual(await voiceReload.json(), voicePayload);
     const completion = await fetch(`${server.url}v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin: new URL(server.url).origin },

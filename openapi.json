@@ -97,6 +97,35 @@
         "responses": { "200": { "description": "Model defaults", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelDefaults" } } } }, "400": { "$ref": "#/components/responses/InvalidModelDefaults" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
       }
     },
+    "/v1/settings/voice": {
+      "get": {
+        "summary": "Return authenticated voice settings",
+        "security": [{ "sessionCookie": [] }],
+        "responses": { "200": { "description": "Voice settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceSettings" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      },
+      "put": {
+        "summary": "Save authenticated voice settings",
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": { "$ref": "#/components/requestBodies/VoiceSettings" },
+        "responses": { "200": { "description": "Voice settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceSettings" } } } }, "400": { "$ref": "#/components/responses/InvalidVoiceSettings" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
+      }
+    },
+    "/v1/voice/transcribe": {
+      "post": {
+        "summary": "Transcribe a temporary audio recording",
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": { "required": true, "content": { "audio/webm": {}, "audio/ogg": {}, "audio/wav": {} } },
+        "responses": { "200": { "description": "Transcription", "content": { "application/json": { "schema": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } } } }, "400": { "$ref": "#/components/responses/RequestFailed" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
+      }
+    },
+    "/v1/voice/synthesize": {
+      "post": {
+        "summary": "Synthesize temporary assistant audio",
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": { "$ref": "#/components/requestBodies/VoiceSynthesis" },
+        "responses": { "200": { "description": "Audio stream", "content": { "audio/mpeg": {}, "audio/ogg": {}, "audio/wav": {} } }, "400": { "$ref": "#/components/responses/RequestFailed" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/CsrfOrOriginRejected" } }
+      }
+    },
     "/v1/setup/providers": {
       "get": {
         "summary": "List provider catalog metadata",
@@ -367,6 +396,8 @@
       "PasswordChange": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PasswordChange" } } } },
       "ProviderSetup": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderSetup" } } } },
       "ModelDefaults": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelDefaults" } } } },
+      "VoiceSettings": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceSettingsInput" } } } },
+      "VoiceSynthesis": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VoiceSynthesis" } } } },
       "DeviceComplete": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceComplete" } } } },
       "InitialAgents": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InitialAgentsRequest" } } } },
       "ProjectCreate": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectCreate" } } } },
@@ -397,6 +428,7 @@
       "InvalidPassword": { "description": "Invalid password", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidProvider": { "description": "Invalid provider", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidModelDefaults": { "description": "Invalid model defaults", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "InvalidVoiceSettings": { "description": "Invalid voice settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "Configured": { "description": "Provider configured", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Configured" } } } },
       "InvalidTemplates": { "description": "Invalid templates", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "InvalidProject": { "description": "Invalid project", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
@@ -418,6 +450,12 @@
       "SessionCreated": { "type": "object", "required": ["user", "expiresAt"], "properties": { "user": { "$ref": "#/components/schemas/User" }, "expiresAt": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "SetupStatus": { "type": "object", "required": ["complete", "providerConfigured"], "properties": { "complete": { "type": "boolean" }, "providerConfigured": { "type": "boolean" } }, "additionalProperties": false },
       "ModelDefaults": { "type": "object", "required": ["conversation", "internal", "voice", "image"], "properties": { "conversation": { "type": "string", "minLength": 1, "maxLength": 256 }, "internal": { "type": "string", "minLength": 1, "maxLength": 256 }, "voice": { "type": "string", "minLength": 1, "maxLength": 256 }, "image": { "type": "string", "minLength": 1, "maxLength": 256 } }, "additionalProperties": false },
+      "VoiceSpeechSettings": { "type": "object", "required": ["provider", "model", "language", "endpoint", "configured"], "properties": { "provider": { "type": "string" }, "model": { "type": "string" }, "language": { "type": "string" }, "endpoint": { "type": "string", "format": "uri" }, "configured": { "type": "boolean" } }, "additionalProperties": false },
+      "VoiceSynthesisSettings": { "type": "object", "required": ["provider", "model", "voice", "speed", "endpoint", "autoPlay", "configured"], "properties": { "provider": { "type": "string" }, "model": { "type": "string" }, "voice": { "type": "string" }, "speed": { "type": "number", "minimum": 0.25, "maximum": 4 }, "endpoint": { "type": "string", "format": "uri" }, "autoPlay": { "type": "boolean" }, "configured": { "type": "boolean" } }, "additionalProperties": false },
+      "VoiceSettings": { "type": "object", "required": ["stt", "tts"], "properties": { "stt": { "$ref": "#/components/schemas/VoiceSpeechSettings" }, "tts": { "$ref": "#/components/schemas/VoiceSynthesisSettings" } }, "additionalProperties": false },
+      "VoiceSpeechSettingsInput": { "type": "object", "required": ["provider", "model", "language", "endpoint"], "properties": { "provider": { "type": "string" }, "model": { "type": "string" }, "language": { "type": "string" }, "endpoint": { "type": "string", "format": "uri" }, "apiKey": { "type": "string", "writeOnly": true } }, "additionalProperties": false },
+      "VoiceSettingsInput": { "type": "object", "required": ["stt", "tts"], "properties": { "stt": { "$ref": "#/components/schemas/VoiceSpeechSettingsInput" }, "tts": { "$ref": "#/components/schemas/VoiceSynthesisSettingsInput" } }, "additionalProperties": false },
+      "VoiceSynthesisSettingsInput": { "type": "object", "required": ["provider", "model", "voice", "speed", "endpoint", "autoPlay"], "properties": { "provider": { "type": "string" }, "model": { "type": "string" }, "voice": { "type": "string" }, "speed": { "type": "number", "minimum": 0.25, "maximum": 4 }, "endpoint": { "type": "string", "format": "uri" }, "autoPlay": { "type": "boolean" }, "apiKey": { "type": "string", "writeOnly": true } }, "additionalProperties": false },
       "Provider": { "type": "object", "required": ["id", "label", "description", "apiMode", "authType"], "properties": { "id": { "type": "string" }, "aliases": { "type": "array", "items": { "type": "string" } }, "label": { "type": "string" }, "description": { "type": "string" }, "apiMode": { "enum": ["chat_completions", "anthropic_messages", "codex_responses", "bedrock_converse"] }, "authType": { "enum": ["api_key", "oauth", "copilot", "aws_sdk", "gcp", "external_process"] }, "requiresCredential": { "type": "boolean" }, "baseUrl": { "type": "string", "format": "uri" }, "modelsUrl": { "type": "string", "format": "uri" }, "fallbackModels": { "type": "array", "items": { "type": "string" } }, "defaultHeaders": { "type": "object", "additionalProperties": { "type": "string" } }, "credentialHeader": { "enum": ["authorization", "x-api-key", "x-goog-api-key"] }, "oauth": { "type": "object", "additionalProperties": true }, "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } }, "request": { "type": "object", "additionalProperties": true } }, "additionalProperties": false },
       "ProviderCatalog": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/Provider" } } }, "additionalProperties": false },
       "ProviderSetup": { "type": "object", "required": ["providerId", "model"], "properties": { "providerId": { "type": "string" }, "baseUrl": { "type": "string", "format": "uri" }, "apiKey": { "type": "string" }, "model": { "type": "string" } }, "additionalProperties": true },

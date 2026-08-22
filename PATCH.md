@@ -40,6 +40,10 @@
 - Exposed the same optional Pi executor through the Bun API server options so
   an application-owned Pi runtime can be attached without making the legacy
   provider path implicit or global.
+- Added a provider bridge that exposes an existing Subpolar `ChatProvider` as a
+  Pi AI model/provider, translating messages, tools, usage, errors, and stream
+  deltas. This enables Pi-loop execution before the native credential/provider
+  catalog migration is switched on.
 
 ## Repository Residue Cleanup
 

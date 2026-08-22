@@ -79,6 +79,8 @@ export type { SubpolarPiResolvedToolExecutor } from "./pi-tools";
 export { SubpolarPiCredentialStore } from "./pi-credentials";
 export type { SubpolarCredentialBackend } from "./pi-credentials";
 export { hydratePiSession, toPiMessages } from "./pi-messages";
+export { createSubpolarPiProviderBridge } from "./pi-provider-bridge";
+export type { SubpolarPiProviderBridge, SubpolarPiProviderBridgeOptions } from "./pi-provider-bridge";
 
 export {
   MAX_RETRY_ATTEMPTS,

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
 	createSubpolarPiRuntime,
+	createSubpolarPiProviderBridge,
 	executeSubpolarPiRun,
 	hydratePiSession,
 	PiEventProjector,
@@ -186,5 +187,28 @@ describe("Subpolar Pi runtime seam", () => {
 			expect(result.message).toMatchObject({ role: "assistant" });
 			expect(result.events.at(-1)).toEqual({ type: "run.completed", runId: "run-1" });
 		});
+	});
+
+	test("the provider bridge preserves Pi streaming while using the existing provider contract", async () => {
+		const bridge = createSubpolarPiProviderBridge({
+			providerId: "subpolar-test",
+			modelId: "test-model",
+			chatProvider: {
+				async *stream(request) {
+					expect(request.messages[0]).toMatchObject({ role: "system" });
+					yield { type: "text-delta", text: "hello" };
+					yield { type: "finish", finishReason: "stop", usage: { inputTokens: 2, outputTokens: 1 } };
+				},
+			},
+		});
+		const stream = bridge.provider.streamSimple(bridge.model, {
+			systemPrompt: "policy",
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+		});
+		const events = [] as string[];
+		for await (const event of stream) events.push(event.type);
+		const result = await stream.result();
+		expect(events).toEqual(["start", "text_start", "text_delta", "done"]);
+		expect(result.content).toMatchObject([{ type: "text", text: "hello" }]);
 	});
 });

@@ -1,0 +1,13 @@
+{
+  "name": "voice-provider-interface",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test test",
+    "check": "bun run typecheck && bun run test"
+  },
+  "devDependencies": { "@types/bun": ">=1.3.0 <1.4.0" }
+}

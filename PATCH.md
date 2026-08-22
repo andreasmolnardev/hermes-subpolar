@@ -2,6 +2,12 @@
 
 ## Current State
 
+- Added optional provider-neutral Voice settings and runtime paths. Speech-to-Text
+  records only after an explicit microphone action, inserts transcription into the
+  editable composer, and releases media tracks immediately. Text-to-Speech supports
+  per-response playback and an opt-in auto-play setting. Voice API credentials are
+  encrypted server-side, audio is forwarded temporarily, and dedicated STT/TTS
+  interfaces remain separate from chat model providers.
 - Added owner-configurable MCP and OpenAPI Integrations. MCP supports HTTP /
   Streamable HTTP and stdio discovery, OpenAPI definitions can be supplied by
   URL or content, and normalized capabilities flow through the existing Agent

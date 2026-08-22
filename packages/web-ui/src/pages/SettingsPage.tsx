@@ -10,6 +10,8 @@ import {
   gitCredentials,
   modelDefaults,
   saveModelDefaults,
+  voiceSettings,
+  saveVoiceSettings,
   setupProviders,
   startIntegrationOAuth,
   testIntegration,
@@ -29,6 +31,8 @@ import {
   type SubpolarSkillInput,
   type SubpolarModelDefaults,
   type SubpolarModelProvider,
+  type SubpolarVoiceSettingsInput,
+  type SubpolarVoiceSettings,
   type SubpolarIntegration,
   type SubpolarGitCredential,
   type SubpolarUser
@@ -152,6 +156,85 @@ function ModelsSettings() {
         </p>
       ) : null}
     </>
+  )
+}
+
+type VoiceForm = SubpolarVoiceSettingsInput
+
+const EMPTY_VOICE_FORM: VoiceForm = {
+  stt: { provider: 'none', model: 'default', language: 'auto', endpoint: 'https://example.invalid/stt', apiKey: '' },
+  tts: { provider: 'none', model: 'default', voice: 'default', speed: 1, endpoint: 'https://example.invalid/tts', autoPlay: false, apiKey: '' }
+}
+
+function VoiceSettings() {
+  const [form, setForm] = useState<VoiceForm>(EMPTY_VOICE_FORM)
+  const [saved, setSaved] = useState<SubpolarVoiceSettings | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void voiceSettings()
+      .then(value => {
+        setSaved(value)
+        setForm({
+          stt: { provider: value.stt.provider, model: value.stt.model, language: value.stt.language, endpoint: value.stt.endpoint, apiKey: '' },
+          tts: { provider: value.tts.provider, model: value.tts.model, voice: value.tts.voice, speed: value.tts.speed, endpoint: value.tts.endpoint, autoPlay: value.tts.autoPlay, apiKey: '' }
+        })
+      })
+      .catch(() => setError('Could not load voice settings.'))
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    setError(null)
+    try {
+      const next = await saveVoiceSettings(form)
+      setSaved(next)
+      setForm(current => ({ ...current, stt: { ...current.stt, apiKey: '' }, tts: { ...current.tts, apiKey: '' } }))
+    } catch {
+      setError('Could not save voice settings. Check the endpoint URLs and values.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const setStt = (key: keyof VoiceForm['stt'], value: string) => setForm(current => ({ ...current, stt: { ...current.stt, [key]: value } }))
+  const setTts = (key: keyof VoiceForm['tts'], value: string | boolean | number) => setForm(current => ({ ...current, tts: { ...current.tts, [key]: value } }))
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">Voice</h2>
+      <p className="setup-help mt-1 text-sm">Voice is optional. Audio is sent to the configured provider only after you press the microphone or read-aloud action.</p>
+      {error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}
+      <section className="setup-option mt-6 rounded-xl p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div><h3 className="font-medium">Speech-to-Text</h3><p className="setup-help mt-1 text-sm">Transcriptions are inserted into the composer for editing before sending.</p></div>
+          {saved?.stt.configured && <span className="text-xs text-[#70d7cc]">Configured</span>}
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="setup-label">Provider<select value={form.stt.provider} onChange={event => setStt('provider', event.target.value)} className="setup-input mt-2 w-full"><option value="none">Disabled</option><option value="http">HTTP speech provider</option><option value="openai-compatible">OpenAI-compatible speech API</option></select></label>
+          <label className="setup-label">Model<input value={form.stt.model} onChange={event => setStt('model', event.target.value)} className="setup-input mt-2 w-full" /></label>
+          <label className="setup-label">Language<input value={form.stt.language} onChange={event => setStt('language', event.target.value)} className="setup-input mt-2 w-full" placeholder="auto or en" /></label>
+          <label className="setup-label">Endpoint URL<input value={form.stt.endpoint} onChange={event => setStt('endpoint', event.target.value)} className="setup-input mt-2 w-full" placeholder="https://provider.example/v1/audio/transcriptions" /></label>
+          <label className="setup-label sm:col-span-2">Provider API key<input type="password" value={form.stt.apiKey} onChange={event => setStt('apiKey', event.target.value)} className="setup-input mt-2 w-full" placeholder={saved?.stt.configured ? 'Stored securely; leave blank to keep it' : 'Optional for local providers'} /></label>
+        </div>
+      </section>
+      <section className="setup-option mt-4 rounded-xl p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div><h3 className="font-medium">Text-to-Speech</h3><p className="setup-help mt-1 text-sm">Use the response action to read any completed answer, or enable auto-play below.</p></div>
+          {saved?.tts.configured && <span className="text-xs text-[#70d7cc]">Configured</span>}
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="setup-label">Provider<select value={form.tts.provider} onChange={event => setTts('provider', event.target.value)} className="setup-input mt-2 w-full"><option value="none">Disabled</option><option value="http">HTTP speech provider</option><option value="openai-compatible">OpenAI-compatible speech API</option></select></label>
+          <label className="setup-label">Model<input value={form.tts.model} onChange={event => setTts('model', event.target.value)} className="setup-input mt-2 w-full" /></label>
+          <label className="setup-label">Voice<input value={form.tts.voice} onChange={event => setTts('voice', event.target.value)} className="setup-input mt-2 w-full" /></label>
+          <label className="setup-label">Speed (0.25–4)<input type="number" min="0.25" max="4" step="0.05" value={form.tts.speed} onChange={event => setTts('speed', Number(event.target.value))} className="setup-input mt-2 w-full" /></label>
+          <label className="setup-label sm:col-span-2">Endpoint URL<input value={form.tts.endpoint} onChange={event => setTts('endpoint', event.target.value)} className="setup-input mt-2 w-full" placeholder="https://provider.example/v1/audio/speech" /></label>
+          <label className="setup-label sm:col-span-2">Provider API key<input type="password" value={form.tts.apiKey} onChange={event => setTts('apiKey', event.target.value)} className="setup-input mt-2 w-full" placeholder={saved?.tts.configured ? 'Stored securely; leave blank to keep it' : 'Optional for local providers'} /></label>
+          <label className="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" checked={form.tts.autoPlay} onChange={event => setTts('autoPlay', event.target.checked)} /> Automatically read completed assistant responses</label>
+        </div>
+      </section>
+      <button type="button" onClick={() => void save()} disabled={saving} className="setup-primary mt-5 disabled:opacity-40">{saving ? 'Saving...' : 'Save Voice Settings'}</button>
+    </div>
   )
 }
 
@@ -350,7 +433,8 @@ function IntegrationsSettings() {
   const [error, setError] = useState<string | null>(null)
   const refresh = () => integrations().then(result => setItems(result.integrations)).catch(() => setError('Could not load integrations.'))
   useEffect(() => { void refresh() }, [])
-  if (type === 'git') return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual discovered capabilities.</p></div></div><IntegrationTypeTabs type={type} /><GitCredentialsSettings /></div>
+  const selectedType = type
+  if (selectedType === 'git') return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual capabilities.</p></div></div><IntegrationTypeTabs type={selectedType} /><GitCredentialsSettings /></div>
   const integrationType = type === 'git' ? 'mcp' : type
   const formFor = (item?: SubpolarIntegration): IntegrationFormState => {
     const config = item?.config ?? {}
@@ -581,6 +665,8 @@ export default function SettingsPage({ user, onLogout }: { user: SubpolarUser; o
             <IntegrationsSettings />
           ) : scope === 'user' && section.id === 'prompt-commands' ? (
             <PromptCommandsSettings />
+          ) : scope === 'user' && section.id === 'voice' ? (
+            <VoiceSettings />
           ) : (
             <>
               <h2 className="text-xl font-semibold">{section.label}</h2>

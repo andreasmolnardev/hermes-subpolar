@@ -13,7 +13,7 @@
 @source '../node_modules/@nous-research/ui/dist';
 
 /* ------------------------------------------------------------------ */
-/* Hermes Agent — Tokyo Night palette applied statically as the default
+/* Hermes Subpolar — Tokyo Night palette applied statically as the default
    dashboard theme. */
 /* ------------------------------------------------------------------ */
 
@@ -242,8 +242,7 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
   }
 }
 
-/* Nousnet's hermes-agent layout bumps `small` and `code` to readable
-   dashboard sizes. Keep in sync. */
+/* Subpolar's dashboard layout bumps `small` and `code` to readable sizes. */
 small { font-size: 1.0625rem; }
 code { font-size: 0.875rem; }
 

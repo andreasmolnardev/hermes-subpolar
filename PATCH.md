@@ -1,5 +1,12 @@
 # Subpolar Migration Record
 
+## Repository Residue Cleanup
+
+- Rebranded active package, browser, and container metadata from the upstream
+  Hermes Agent repository to Hermes Subpolar.
+- Removed committed Python-era bytecode, web-build lock, and test-duration
+  artifacts; test-duration output is now ignored.
+
 ## Persisted Automations
 
 - Replaced the placeholder Scheduled gallery with owner-scoped global and

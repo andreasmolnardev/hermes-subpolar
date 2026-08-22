@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Browser-based Hermes Agent dashboard.",
+  "description": "Browser-based Hermes Subpolar dashboard.",
   "browserDependencies": [
     "@nous-research/ui",
     "@radix-ui/react-select",

@@ -29,7 +29,10 @@ import {
   availableModels,
   capabilities,
   createAgent,
-  createProject,
+  createProjectFromInput,
+  gitCredentials,
+  gitDiff,
+  gitStatus,
   modelDefaults,
   promptCommands,
   projects,
@@ -40,6 +43,8 @@ import {
   type SubpolarAgent,
   type SubpolarAgentUpdate,
   type SubpolarCapability,
+  type SubpolarGitCredential,
+  type SubpolarGitStatus,
   type SubpolarMessage,
   type SubpolarModelProvider,
   type SubpolarPromptCommand,
@@ -452,6 +457,7 @@ function ProjectOverview({
             </Link>
           ))}
         </div>
+        {project !== undefined && <SourceControl project={project} />}
         {projectList.length === 0 && (
           <p className="rounded-xl border border-dashed border-white/15 p-10 text-center text-sm text-[#829b92]">
             No projects yet.
@@ -460,6 +466,16 @@ function ProjectOverview({
       </div>
     </main>
   )
+}
+
+function SourceControl({ project }: { project: SubpolarProject }) {
+  const [status, setStatus] = useState<SubpolarGitStatus | null>(null)
+  const [selectedPath, setSelectedPath] = useState<string | undefined>()
+  const [diff, setDiff] = useState('')
+  useEffect(() => { void gitStatus(project.id).then(setStatus).catch(() => setStatus(null)) }, [project.id])
+  useEffect(() => { if (selectedPath !== undefined) void gitDiff(project.id, selectedPath).then(result => setDiff(result.diff)).catch(() => setDiff('')) }, [project.id, selectedPath])
+  if (status === null) return null
+  return <section className="mt-6 rounded-xl border border-white/10 bg-[#102627] p-5"><div className="flex items-center justify-between"><div><p className="text-xs uppercase tracking-widest text-[#70d7cc]">Source control</p><p className="mt-1 text-sm text-[#829b92]">{status.branch} · {status.clean ? 'Working tree clean' : `${status.entries.length} changed file${status.entries.length === 1 ? '' : 's'}`}</p></div><FolderGit2 size={20} className="text-[#70d7cc]" /></div>{!status.clean && <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,14rem)_1fr]"><div className="space-y-1">{status.entries.map(entry => <button key={entry.path} onClick={() => setSelectedPath(entry.path)} className={`${selectedPath === entry.path ? 'bg-[#2a5558] text-white' : 'text-[#b3c4bb] hover:bg-white/5'} flex w-full items-center justify-between rounded px-2 py-2 text-left text-xs`}><span className="truncate">{entry.path}</span><span className={entry.deleted ? 'text-red-300' : entry.added ? 'text-[#70d7cc]' : 'text-amber-200'}>{entry.status}</span></button>)}</div><pre className="max-h-80 min-h-32 overflow-auto rounded bg-[#091d1e] p-3 text-xs leading-5 text-[#b8d2c8]">{diff || 'Select a changed file to view its diff.'}</pre></div>}</section>
 }
 
 function ProjectPrompt({
@@ -728,6 +744,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     [sessionList, setSessionList] = useState<readonly SubpolarSession[]>([]),
     [capabilityInventory, setCapabilityInventory] = useState<readonly SubpolarCapability[]>([])
   const [skillInventory, setSkillInventory] = useState<readonly SubpolarSkill[]>([])
+  const [gitCredentialList, setGitCredentialList] = useState<readonly SubpolarGitCredential[]>([])
   const [commandInventory, setCommandInventory] = useState<readonly SubpolarPromptCommand[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false),
     [mobileOpen, setMobileOpen] = useState(false),
@@ -741,6 +758,13 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     [error, setError] = useState<string | null>(null)
   const [permissionRequest, setPermissionRequest] = useState<{ requestId: string; callId: string; tool: string; arguments: string } | null>(null)
   const [newName, setNewName] = useState(''),
+    [newDescription, setNewDescription] = useState(''),
+    [newWorkspaceMode, setNewWorkspaceMode] = useState<'create' | 'existing' | 'clone'>('create'),
+    [newWorkspacePath, setNewWorkspacePath] = useState(''),
+    [newRepositoryUrl, setNewRepositoryUrl] = useState(''),
+    [newRemoteName, setNewRemoteName] = useState('origin'),
+    [newDefaultBranch, setNewDefaultBranch] = useState(''),
+    [newCredentialId, setNewCredentialId] = useState(''),
     [newInstructions, setNewInstructions] = useState(''),
     [newIcon, setNewIcon] = useState<IconName | ''>('')
   const route = useMemo(() => workspaceRoute(location.pathname), [location.pathname])
@@ -785,6 +809,12 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   useEffect(() => {
     if (modal === null) return
     setNewName('')
+    setNewDescription('')
+    setNewWorkspaceMode('create')
+    setNewWorkspacePath('')
+    setNewRepositoryUrl('')
+    setNewDefaultBranch('')
+    setNewCredentialId('')
     setNewInstructions('')
     setNewIcon('')
   }, [modal])
@@ -814,6 +844,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
   useEffect(() => {
     void skills().then(result => setSkillInventory(result.skills)).catch(() => setSkillInventory([]))
     void promptCommands().then(result => setCommandInventory(result.commands)).catch(() => setCommandInventory([]))
+    void gitCredentials().then(result => setGitCredentialList(result.credentials)).catch(() => setGitCredentialList([]))
   }, [])
   useEffect(() => {
     void modelDefaults()
@@ -927,7 +958,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
     event.preventDefault()
     try {
       if (modal === 'project') {
-        const result = await createProject(newName.trim())
+        const result = await createProjectFromInput({ name: newName.trim(), description: newDescription, instructions: newInstructions, workspaceMode: newWorkspaceMode, ...(newWorkspaceMode === 'existing' ? { workspacePath: newWorkspacePath } : {}), ...(newWorkspaceMode === 'clone' ? { repository: { url: newRepositoryUrl, remoteName: newRemoteName.trim() || 'origin', ...(newDefaultBranch.trim() ? { defaultBranch: newDefaultBranch.trim() } : {}), ...(newCredentialId ? { credentialId: newCredentialId } : {}) } } : {}) })
         setProjectList(projects => [...projects, result.project])
         routerNavigate(
           query.get('next') === 'agent'
@@ -941,6 +972,12 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
         routerNavigate(`/agents/${encodeURIComponent(result.agent.id)}`)
       }
       setNewName('')
+      setNewDescription('')
+      setNewWorkspacePath('')
+      setNewRepositoryUrl('')
+      setNewRemoteName('origin')
+      setNewDefaultBranch('')
+      setNewCredentialId('')
       setNewInstructions('')
       setNewIcon('')
     } catch {
@@ -1114,6 +1151,13 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
                 className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal outline-none focus:border-[#70d7cc]"
               />
             </label>
+            {modal === 'project' && <>
+              <label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Description<input value={newDescription} onChange={event => setNewDescription(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label>
+              <fieldset className="mb-4"><legend className="mb-2 text-xs uppercase tracking-widest text-[#829b92]">Workspace</legend><div className="grid gap-2 sm:grid-cols-3">{(['create', 'existing', 'clone'] as const).map(mode => <button type="button" key={mode} onClick={() => setNewWorkspaceMode(mode)} className={`${newWorkspaceMode === mode ? 'border-[#70d7cc] bg-[#1d4142]' : 'border-white/10'} rounded-lg border px-2 py-2 text-xs capitalize`}>{mode === 'create' ? 'Create empty' : mode === 'existing' ? 'Use existing' : 'Clone Git'}</button>)}</div></fieldset>
+              {newWorkspaceMode === 'existing' && <label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Server workspace path<input required value={newWorkspacePath} onChange={event => setNewWorkspacePath(event.target.value)} placeholder="/data/workspaces/my-repo" className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label>}
+              {newWorkspaceMode === 'clone' && <><label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Repository URL<input required value={newRepositoryUrl} onChange={event => setNewRepositoryUrl(event.target.value)} placeholder="https://git.example.com/team/project.git" className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label><label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Credential<select value={newCredentialId} onChange={event => setNewCredentialId(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal"><option value="">No credential</option>{gitCredentialList.map(item => <option key={item.id} value={item.id}>{item.name} · {item.provider}</option>)}</select></label><label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Remote name<input required value={newRemoteName} onChange={event => setNewRemoteName(event.target.value)} placeholder="origin" className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label><label className="mb-4 block text-xs uppercase tracking-widest text-[#829b92]">Default branch<input value={newDefaultBranch} onChange={event => setNewDefaultBranch(event.target.value)} placeholder="main" className="mt-2 w-full rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label></>}
+              <label className="mb-5 block text-xs uppercase tracking-widest text-[#829b92]">Project instructions<textarea value={newInstructions} onChange={event => setNewInstructions(event.target.value)} rows={4} className="mt-2 w-full resize-none rounded-lg border border-white/10 bg-[#091d1e] px-3 py-2.5 text-sm normal-case tracking-normal" /></label>
+            </>}
             {modal === 'agent' && (
               <>
                 <fieldset className="mb-4">
@@ -1151,7 +1195,7 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
               </>
             )}
             <button
-              disabled={!newName.trim() || (modal === 'agent' && (!selectedProject || !newIcon))}
+              disabled={!newName.trim() || (modal === 'agent' && (!selectedProject || !newIcon)) || (modal === 'project' && ((newWorkspaceMode === 'existing' && !newWorkspacePath.trim()) || (newWorkspaceMode === 'clone' && !newRepositoryUrl.trim())))}
               className="w-full rounded-lg bg-[#a9ddd5] px-4 py-2.5 font-semibold text-[#102627] disabled:opacity-40"
             >
               Create

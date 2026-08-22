@@ -3,9 +3,11 @@ import { ArrowLeft, Bot, UserRound } from 'lucide-react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import {
   availableModels,
+  createGitCredential,
   createIntegration,
   deleteIntegration,
   integrations,
+  gitCredentials,
   modelDefaults,
   saveModelDefaults,
   setupProviders,
@@ -28,6 +30,7 @@ import {
   type SubpolarModelDefaults,
   type SubpolarModelProvider,
   type SubpolarIntegration,
+  type SubpolarGitCredential,
   type SubpolarUser
 } from '@/lib/subpolar-api'
 import type { ModelProviderDefinition } from '@hermes/shared/model-providers'
@@ -323,15 +326,32 @@ function IntegrationForm({ initial, onCancel, onSaved }: { initial: IntegrationF
   </form>
 }
 
+function GitCredentialsSettings() {
+  const [items, setItems] = useState<readonly SubpolarGitCredential[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [form, setForm] = useState({ name: '', provider: 'github' as SubpolarGitCredential['provider'], username: '', token: '', privateKey: '', passphrase: '' })
+  useEffect(() => { void gitCredentials().then(result => setItems(result.credentials)).catch(() => setError('Could not load Git credentials.')) }, [])
+  const update = (key: keyof typeof form, value: string) => setForm(current => ({ ...current, [key]: value }))
+  const save = () => void createGitCredential({ name: form.name.trim(), provider: form.provider, username: form.username.trim() || undefined, token: form.token || undefined, privateKey: form.privateKey || undefined, passphrase: form.passphrase || undefined }).then(result => { setItems(current => [...current, result.credential]); setForm({ name: '', provider: form.provider, username: '', token: '', privateKey: '', passphrase: '' }); setError(null) }).catch(() => setError('Could not save Git credential.'))
+  return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Git</h2><p className="setup-help mt-1 text-sm">Configure named HTTPS tokens or SSH keys. Secrets stay server-side and are never sent to the Agent.</p></div></div>{error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}<section className="setup-option mt-5 rounded-xl p-4"><div className="grid gap-3 sm:grid-cols-2"><input aria-label="Git credential name" placeholder="Name" value={form.name} onChange={event => update('name', event.target.value)} className="setup-input" /><select aria-label="Git provider" value={form.provider} onChange={event => update('provider', event.target.value)} className="setup-input"><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="gitea">Gitea</option><option value="generic">Generic Git</option></select><input aria-label="Git username" placeholder="Username (optional)" value={form.username} onChange={event => update('username', event.target.value)} className="setup-input" /><input aria-label="Git token" type="password" placeholder="HTTPS token or password" value={form.token} onChange={event => update('token', event.target.value)} className="setup-input" /><textarea aria-label="Git private key" placeholder="SSH private key (optional)" value={form.privateKey} onChange={event => update('privateKey', event.target.value)} rows={5} className="setup-input sm:col-span-2" /><input aria-label="Git passphrase" type="password" placeholder="SSH key passphrase (optional)" value={form.passphrase} onChange={event => update('passphrase', event.target.value)} className="setup-input" /></div><button type="button" className="setup-primary mt-4" disabled={!form.name.trim() || (!form.token && !form.privateKey)} onClick={save}>Save Git credential</button></section>{items.length > 0 && <div className="mt-5 grid gap-2">{items.map(item => <p key={item.id} className="setup-option rounded-xl p-4 text-sm">{item.name} <span className="setup-help">· {item.provider}{item.username ? ` · ${item.username}` : ''}</span></p>)}</div>}</div>
+}
+
+function IntegrationTypeTabs({ type }: { type: 'mcp' | 'openapi' | 'git' }) {
+  return <nav className="mt-5 flex gap-2" aria-label="Integration types"><NavLink to="/settings/agent/integrations?type=mcp" className={`setup-step ${type === 'mcp' ? 'setup-step-active' : ''}`}>MCP</NavLink><NavLink to="/settings/agent/integrations?type=openapi" className={`setup-step ${type === 'openapi' ? 'setup-step-active' : ''}`}>OpenAPI</NavLink><NavLink to="/settings/agent/integrations?type=git" className={`setup-step ${type === 'git' ? 'setup-step-active' : ''}`}>Git</NavLink></nav>
+}
+
 function IntegrationsSettings() {
   const location = useLocation()
-  const type = new URLSearchParams(location.search).get('type') === 'openapi' ? 'openapi' : 'mcp'
+  const requestedType = new URLSearchParams(location.search).get('type')
+  const type = requestedType === 'openapi' || requestedType === 'git' ? requestedType : 'mcp'
   const [items, setItems] = useState<readonly SubpolarIntegration[]>([])
   const [editing, setEditing] = useState<IntegrationFormState | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const refresh = () => integrations().then(result => setItems(result.integrations)).catch(() => setError('Could not load integrations.'))
   useEffect(() => { void refresh() }, [])
+  if (type === 'git') return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual discovered capabilities.</p></div></div><IntegrationTypeTabs type={type} /><GitCredentialsSettings /></div>
+  const integrationType = type === 'git' ? 'mcp' : type
   const formFor = (item?: SubpolarIntegration): IntegrationFormState => {
     const config = item?.config ?? {}
     const auth = typeof config.auth === 'object' && config.auth !== null ? config.auth as Record<string, unknown> : {}
@@ -345,7 +365,7 @@ function IntegrationsSettings() {
     const result = editingId === null ? await createIntegration({ name: form.name, type: form.type, enabled: form.enabled, config, secrets }) : await updateIntegration(editingId, { name: form.name, type: form.type, enabled: form.enabled, config, ...(Object.keys(secrets).length > 0 ? { secrets } : {}) })
     setItems(current => editingId === null ? [...current, result.integration] : current.map(item => item.id === result.integration.id ? result.integration : item)); setEditing(null); setEditingId(null); setError(null)
   }
-  return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual discovered capabilities.</p></div><button type="button" onClick={() => { setEditingId(null); setEditing(emptyIntegrationForm(type)) }} className="setup-primary">Add {type === 'mcp' ? 'MCP' : 'OpenAPI'}</button></div><nav className="mt-5 flex gap-2" aria-label="Integration types"><NavLink to="/settings/agent/integrations?type=mcp" className={`setup-step ${type === 'mcp' ? 'setup-step-active' : ''}`}>MCP</NavLink><NavLink to="/settings/agent/integrations?type=openapi" className={`setup-step ${type === 'openapi' ? 'setup-step-active' : ''}`}>OpenAPI</NavLink></nav>{error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}{editing !== null && <IntegrationForm key={`${editingId ?? 'new'}-${editing.type}`} initial={editing} onCancel={() => { setEditing(null); setEditingId(null) }} onSaved={save} />}
+  return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual discovered capabilities.</p></div><button type="button" onClick={() => { setEditingId(null); setEditing(emptyIntegrationForm(integrationType)) }} className="setup-primary">Add {integrationType === 'mcp' ? 'MCP' : 'OpenAPI'}</button></div><nav className="mt-5 flex gap-2" aria-label="Integration types"><NavLink to="/settings/agent/integrations?type=mcp" className={`setup-step ${type === 'mcp' ? 'setup-step-active' : ''}`}>MCP</NavLink><NavLink to="/settings/agent/integrations?type=openapi" className={`setup-step ${type === 'openapi' ? 'setup-step-active' : ''}`}>OpenAPI</NavLink><NavLink to="/settings/agent/integrations?type=git" className={`setup-step ${type === 'git' ? 'setup-step-active' : ''}`}>Git</NavLink></nav>{error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}{editing !== null && <IntegrationForm key={`${editingId ?? 'new'}-${editing.type}`} initial={editing} onCancel={() => { setEditing(null); setEditingId(null) }} onSaved={save} />}
     <div className="mt-5 grid gap-3">{items.filter(item => item.type === type).map(item => <article key={item.id} className="setup-option rounded-xl p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-medium">{item.name}</h3><p className="setup-help mt-1 text-xs">{item.type.toUpperCase()} · {item.status.replace('_', ' ')} · {item.capabilities.length} capabilities</p><p className="setup-help mt-1 text-xs">{item.lastSuccessfulDiscovery === undefined ? 'Not discovered yet' : `Last discovery ${new Date(item.lastSuccessfulDiscovery).toLocaleString()}`}</p>{item.lastError !== undefined && <p className="mt-1 text-xs text-red-300">{item.lastError}</p>}</div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => void updateIntegration(item.id, { enabled: !item.enabled }).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.integration : candidate))).catch(() => setError('Could not update integration.'))} className="setup-step text-xs">{item.enabled ? 'Disable' : 'Enable'}</button><button type="button" onClick={() => { setEditingId(item.id); setEditing(formFor(item)) }} className="setup-step text-xs">Edit</button><button type="button" onClick={() => void testIntegration(item.id).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.integration : candidate))).catch(() => setError('Connection test failed.'))} className="setup-step text-xs">Test / reconnect</button>{typeof (item.config.auth as Record<string, unknown> | undefined)?.type === 'string' && (item.config.auth as Record<string, unknown>).type === 'oauth' && <><button type="button" onClick={() => void startIntegrationOAuth(item.id).then(result => { window.location.assign(result.authorizationUrl) }).catch(() => setError('Could not start authorization.'))} className="setup-step text-xs">Connect</button><button type="button" onClick={() => void revokeIntegrationOAuth(item.id).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.integration : candidate))).catch(() => setError('Could not revoke authorization.'))} className="setup-step text-xs">Revoke</button></>}<button type="button" onClick={() => { if (!window.confirm(`Delete ${item.name}?`)) return; void deleteIntegration(item.id).then(() => setItems(current => current.filter(candidate => candidate.id !== item.id))).catch(() => setError('Could not delete integration.')) }} className="setup-step text-xs">Delete</button></div></div></article>)}</div>{items.filter(item => item.type === type).length === 0 && editing === null && <p className="setup-option mt-5 rounded-xl p-4 text-sm setup-help">No {type === 'mcp' ? 'MCP' : 'OpenAPI'} integrations configured.</p>}</div>
 }
 

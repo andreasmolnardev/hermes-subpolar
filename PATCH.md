@@ -138,3 +138,11 @@
   IntegrationManager, OAuth, and migration tests are included but could not be
   executed here because the environment has no Bun runtime; the collaborative
   preview host is also unavailable.
+## Projects, workspaces, and Git
+
+- Projects now persist descriptions, server-controlled workspaces, project instructions, repository metadata, default Agents, and settings.
+- Project creation supports generated workspaces, validated existing workspaces, and server-side Git clones. Workspace paths are canonicalized under `SUBPOLAR_WORKSPACE_ROOT` (default: `$SUBPOLAR_DATA_DIR/workspaces`).
+- Git credentials are named, encrypted identity records. Project repository configuration stores only the credential ID; secrets are never returned to the browser or model.
+- Added typed `git.status`, `git.diff`, `git.log`, `git.branch.list`, `git.branch.create`, `git.commit`, `git.push`, and `git.pull` capabilities. Read operations allow by default; mutating operations ask by default.
+- The project overview includes source-control status and selectable diffs, and Agent Settings → Integrations → Git includes named HTTPS and SSH credential setup, including optional key passphrases.
+- Project creation exposes repository remote name and typed push/pull use that configured remote by default. Persisted workspaces are canonicalized again before Harness and native Git execution so later symlink replacement cannot escape the configured workspace root.

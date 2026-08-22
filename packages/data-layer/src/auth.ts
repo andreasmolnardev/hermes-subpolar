@@ -21,7 +21,51 @@ export type ProjectRecord = {
   readonly id: string;
   readonly ownerId: string;
   readonly name: string;
+  readonly description: string;
+  readonly workspace: string;
+  readonly instructions: string;
+  readonly repository?: ProjectRepositoryConfig;
+  readonly defaultAgentId?: string;
+  readonly settings: Record<string, unknown>;
   readonly createdAt: string;
+};
+
+export type ProjectRepositoryConfig = {
+  readonly url: string;
+  readonly credentialId?: string;
+  readonly defaultBranch?: string;
+  readonly remoteName: string;
+};
+
+export type ProjectInput = {
+  readonly name: string;
+  readonly description?: string;
+  readonly workspace?: string;
+  readonly instructions?: string;
+  readonly repository?: ProjectRepositoryConfig;
+  readonly defaultAgentId?: string;
+  readonly settings?: Record<string, unknown>;
+  readonly id?: string;
+};
+
+export type GitCredentialRecord = {
+  readonly id: string;
+  readonly ownerId: string;
+  readonly name: string;
+  readonly provider: "github" | "gitlab" | "gitea" | "generic";
+  readonly username?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type GitCredentialInput = {
+  readonly name: string;
+  readonly provider: GitCredentialRecord["provider"];
+  readonly username?: string;
+  readonly token?: string;
+  readonly password?: string;
+  readonly privateKey?: string;
+  readonly passphrase?: string;
 };
 
 export type AgentRecord = {
@@ -228,6 +272,8 @@ type Row = {
   created_at?: string;
 };
 
+type ProjectDbRow = { id: string; owner_id: string; name: string; description: string; workspace: string; instructions: string; repository_json: string | null; default_agent_id: string | null; settings_json: string; created_at: string };
+
 const AUTH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -248,9 +294,27 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  workspace TEXT NOT NULL DEFAULT '',
+  instructions TEXT NOT NULL DEFAULT '',
+  repository_json TEXT,
+  default_agent_id TEXT,
+  settings_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   UNIQUE(owner_id, name)
 );
+CREATE TABLE IF NOT EXISTS git_credentials (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN ('github', 'gitlab', 'gitea', 'generic')),
+  username TEXT,
+  secrets_ciphertext TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_git_credentials_owner ON git_credentials(owner_id, created_at, id);
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -632,6 +696,27 @@ export class SQLiteIdentityRepository {
       try { this.db.exec(statement); } catch { /* existing database already has the migration */ }
     }
     this.migrateAgentSkills();
+    for (const statement of [
+      "ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE projects ADD COLUMN workspace TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE projects ADD COLUMN repository_json TEXT",
+      "ALTER TABLE projects ADD COLUMN default_agent_id TEXT",
+      "ALTER TABLE projects ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'",
+    ]) {
+      try { this.db.exec(statement); } catch { /* existing database already has the migration */ }
+    }
+    this.db.exec(`CREATE TABLE IF NOT EXISTS git_credentials (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('github', 'gitlab', 'gitea', 'generic')),
+      username TEXT,
+      secrets_ciphertext TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(owner_id, name)
+    ); CREATE INDEX IF NOT EXISTS idx_git_credentials_owner ON git_credentials(owner_id, created_at, id);`);
   }
 
   close(): void {
@@ -957,15 +1042,106 @@ export class SQLiteIdentityRepository {
     if (token !== undefined) this.db.run("UPDATE auth_sessions SET revoked = 1 WHERE token_hash = ?", [hashToken(token)]);
   }
 
-  listProjects(userId: string): readonly ProjectRecord[] {
-    return this.db.query<ProjectRecord, [string]>("SELECT id, owner_id AS ownerId, name, created_at AS createdAt FROM projects WHERE owner_id = ? ORDER BY created_at, id").all(userId);
+  private project(row: { id: string; owner_id: string; name: string; description: string; workspace: string; instructions: string; repository_json: string | null; default_agent_id: string | null; settings_json: string; created_at: string }): ProjectRecord {
+    let repository: ProjectRepositoryConfig | undefined;
+    try { repository = row.repository_json === null ? undefined : JSON.parse(row.repository_json) as ProjectRepositoryConfig; } catch { throw new Error("project repository is invalid"); }
+    let settings: Record<string, unknown>;
+    try { settings = JSON.parse(row.settings_json) as Record<string, unknown>; } catch { settings = {}; }
+    return {
+      id: row.id, ownerId: row.owner_id, name: row.name, description: row.description ?? "",
+      workspace: row.workspace ?? "", instructions: row.instructions ?? "",
+      ...(repository === undefined ? {} : { repository }),
+      ...(row.default_agent_id === null ? {} : { defaultAgentId: row.default_agent_id }),
+      settings, createdAt: row.created_at,
+    };
   }
 
-  createProject(userId: string, name: string): ProjectRecord {
-    if (name.trim().length === 0 || name.length > 128) throw new Error("project name is invalid");
-    const project = { id: randomUUID(), ownerId: userId, name: name.trim(), createdAt: now() };
-    this.db.run("INSERT INTO projects (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)", [project.id, project.ownerId, project.name, project.createdAt]);
-    return project;
+  private projectRow(userId: string, projectId?: string) {
+    const query = "SELECT id, owner_id, name, description, workspace, instructions, repository_json, default_agent_id, settings_json, created_at FROM projects WHERE owner_id = ?" + (projectId === undefined ? "" : " AND id = ?");
+    return projectId === undefined
+      ? this.db.query<ProjectDbRow, [string]>(query).all(userId)
+      : this.db.query<ProjectDbRow, [string, string]>(query).all(userId, projectId);
+  }
+
+  listProjects(userId: string): readonly ProjectRecord[] {
+    return this.projectRow(userId).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).map(row => this.project(row));
+  }
+
+  getProject(userId: string, projectId: string): ProjectRecord | null {
+    const rows = this.projectRow(userId, projectId);
+    return rows.length === 0 ? null : this.project(rows[0]!);
+  }
+
+  createProject(userId: string, nameOrInput: string | ProjectInput): ProjectRecord {
+    const input: ProjectInput = typeof nameOrInput === "string" ? { name: nameOrInput } : nameOrInput;
+    const name = input.name.trim();
+    const description = input.description ?? "";
+    const instructions = input.instructions ?? "";
+    if (!name || name.length > 128 || description.length > 10_000 || instructions.length > 100_000) throw new Error("project is invalid");
+    if (input.workspace !== undefined && input.workspace.length > 4096) throw new Error("project workspace is invalid");
+    if (input.repository !== undefined) this.validateRepository(input.repository);
+    if (input.repository?.credentialId !== undefined && this.db.query<{ id: string }, [string, string]>("SELECT id FROM git_credentials WHERE id = ? AND owner_id = ?").get(input.repository.credentialId, userId) === null) throw new OwnershipError("Git credential is not owned by the authenticated user");
+    if (input.defaultAgentId !== undefined && this.db.query<{ id: string }, [string, string, string]>("SELECT id FROM agents WHERE id = ? AND owner_id = ? AND project_id = ?").get(input.defaultAgentId, userId, input.id ?? "") === null && input.id !== undefined) throw new OwnershipError("Default Agent is not assigned to this project");
+    if (input.settings !== undefined && (typeof input.settings !== "object" || input.settings === null || Array.isArray(input.settings))) throw new Error("project settings are invalid");
+    const project = { id: input.id ?? randomUUID(), ownerId: userId, name, description, workspace: input.workspace ?? "", instructions, repository: input.repository, defaultAgentId: input.defaultAgentId, settings: input.settings ?? {}, createdAt: now() };
+    this.db.run("INSERT INTO projects (id, owner_id, name, description, workspace, instructions, repository_json, default_agent_id, settings_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [project.id, project.ownerId, project.name, project.description, project.workspace, project.instructions, project.repository === undefined ? null : JSON.stringify(project.repository), project.defaultAgentId ?? null, JSON.stringify(project.settings), project.createdAt]);
+    return this.getProject(userId, project.id) as ProjectRecord;
+  }
+
+  updateProject(userId: string, projectId: string, input: Partial<ProjectInput>): ProjectRecord {
+    const existing = this.getProject(userId, projectId);
+    if (existing === null) throw new OwnershipError("Project is not owned by the authenticated user");
+    const next: ProjectInput = { ...existing, ...input, id: projectId, name: input.name ?? existing.name };
+    this.validateRepository(next.repository);
+    if (next.repository?.credentialId !== undefined && this.db.query<{ id: string }, [string, string]>("SELECT id FROM git_credentials WHERE id = ? AND owner_id = ?").get(next.repository.credentialId, userId) === null) throw new OwnershipError("Git credential is not owned by the authenticated user");
+    if (next.defaultAgentId !== undefined && this.db.query<{ id: string }, [string, string, string]>("SELECT id FROM agents WHERE id = ? AND owner_id = ? AND project_id = ?").get(next.defaultAgentId, userId, projectId) === null) throw new OwnershipError("Default Agent is not assigned to this project");
+    if (next.description !== undefined && next.description.length > 10_000 || next.instructions !== undefined && next.instructions.length > 100_000) throw new Error("project is invalid");
+    this.db.run("UPDATE projects SET name = ?, description = ?, workspace = ?, instructions = ?, repository_json = ?, default_agent_id = ?, settings_json = ? WHERE id = ? AND owner_id = ?", [next.name.trim(), next.description ?? "", next.workspace ?? "", next.instructions ?? "", next.repository === undefined ? null : JSON.stringify(next.repository), next.defaultAgentId ?? null, JSON.stringify(next.settings ?? {}), projectId, userId]);
+    return this.getProject(userId, projectId) as ProjectRecord;
+  }
+
+  deleteProject(userId: string, projectId: string): void {
+    const result = this.db.run("DELETE FROM projects WHERE id = ? AND owner_id = ?", [projectId, userId]);
+    if (result.changes === 0) throw new OwnershipError("Project is not owned by the authenticated user");
+  }
+
+  private validateRepository(repository: ProjectRepositoryConfig | undefined): void {
+    if (repository === undefined) return;
+    if (!repository.url.trim() || repository.url.length > 4096 || /[\r\n]/.test(repository.url) || repository.remoteName.length > 128 || !/^[A-Za-z0-9._-]+$/.test(repository.remoteName)) throw new Error("project repository is invalid");
+    if (repository.credentialId !== undefined && (!repository.credentialId || repository.credentialId.length > 128)) throw new Error("project credential is invalid");
+    if (repository.defaultBranch !== undefined && (!repository.defaultBranch.trim() || repository.defaultBranch.length > 256 || /[\r\n]/.test(repository.defaultBranch))) throw new Error("project branch is invalid");
+  }
+
+  private gitCredentialSecrets(userId: string, credentialId: string): Record<string, unknown> {
+    const row = this.db.query<{ secrets_ciphertext: string }, [string, string]>("SELECT secrets_ciphertext FROM git_credentials WHERE id = ? AND owner_id = ?").get(credentialId, userId);
+    if (row === null) throw new OwnershipError("Git credential is not owned by the authenticated user");
+    return decryptIntegrationSecrets(row.secrets_ciphertext, this.key());
+  }
+
+  getGitCredentialRuntime(userId: string, credentialId: string): GitCredentialInput {
+    const row = this.db.query<{ id: string; owner_id: string; name: string; provider: GitCredentialRecord["provider"]; username: string | null; secrets_ciphertext: string }, [string, string]>("SELECT id, owner_id, name, provider, username, secrets_ciphertext FROM git_credentials WHERE id = ? AND owner_id = ?").get(credentialId, userId);
+    if (row === null) throw new OwnershipError("Git credential is not owned by the authenticated user");
+    return { name: row.name, provider: row.provider, ...(row.username === null ? {} : { username: row.username }), ...this.gitCredentialSecrets(userId, credentialId) } as GitCredentialInput;
+  }
+
+  listGitCredentials(userId: string): readonly GitCredentialRecord[] {
+    return this.db.query<{ id: string; owner_id: string; name: string; provider: GitCredentialRecord["provider"]; username: string | null; created_at: string; updated_at: string }, [string]>("SELECT id, owner_id, name, provider, username, created_at, updated_at FROM git_credentials WHERE owner_id = ? ORDER BY created_at, id").all(userId).map(row => ({ id: row.id, ownerId: row.owner_id, name: row.name, provider: row.provider, ...(row.username === null ? {} : { username: row.username }), createdAt: row.created_at, updatedAt: row.updated_at }));
+  }
+
+  createGitCredential(userId: string, input: GitCredentialInput): GitCredentialRecord {
+    const name = input.name.trim();
+    if (!name || name.length > 128 || !["github", "gitlab", "gitea", "generic"].includes(input.provider)) throw new Error("git credential is invalid");
+    const secrets = Object.fromEntries(Object.entries(input).filter(([key]) => !["name", "provider", "username"].includes(key)));
+    if (!Object.values(secrets).some(value => typeof value === "string" && value.length > 0)) throw new Error("git credential secret is required");
+    const id = randomUUID(); const at = now();
+    this.db.run("INSERT INTO git_credentials (id, owner_id, name, provider, username, secrets_ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [id, userId, name, input.provider, input.username?.trim() || null, encryptIntegrationSecrets(secrets, this.key(true)), at, at]);
+    return this.listGitCredentials(userId).find(item => item.id === id)!;
+  }
+
+  deleteGitCredential(userId: string, credentialId: string): void {
+    if (this.db.query<{ id: string }, [string, string]>("SELECT id FROM projects WHERE owner_id = ? AND json_extract(repository_json, '$.credentialId') = ? LIMIT 1").get(userId, credentialId) !== null) throw new Error("git credential is in use");
+    const result = this.db.run("DELETE FROM git_credentials WHERE id = ? AND owner_id = ?", [credentialId, userId]);
+    if (result.changes === 0) throw new OwnershipError("Git credential is not owned by the authenticated user");
   }
 
   private skill(row: { id: string; owner_id: string; name: string; description: string; instructions: string; enabled: number; created_at: string; updated_at: string }): SkillRecord {
@@ -1113,6 +1289,7 @@ export class SQLiteIdentityRepository {
     if (name.trim().length === 0 || name.length > 128 || instructions.length > 100_000 || !/^[a-z-]{2,32}$/.test(icon)) throw new Error("agent is invalid");
     const agent = { id: randomUUID(), ownerId: userId, projectId, name: name.trim(), icon, instructions, createdAt: now() };
     this.db.run("INSERT INTO agents (id, owner_id, project_id, name, icon, instructions, capability_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, 'explicit', ?)", [agent.id, agent.ownerId, agent.projectId, agent.name, agent.icon, agent.instructions, agent.createdAt]);
+    this.db.run("UPDATE projects SET default_agent_id = ? WHERE id = ? AND owner_id = ? AND default_agent_id IS NULL", [agent.id, projectId, userId]);
     return this.getAgent(userId, agent.id) as AgentRecord;
   }
 
@@ -1298,13 +1475,13 @@ export class SQLiteIdentityRepository {
     return decryptCredential(row.credential_ciphertext, this.key());
   }
 
-  createInitialAgents(userId: string, templates: readonly string[]): { project: ProjectRecord; agents: readonly AgentRecord[] } {
+  createInitialAgents(userId: string, templates: readonly string[], workspace = ""): { project: ProjectRecord; agents: readonly AgentRecord[] } {
     const allowed = new Set(["research"]);
     if (templates.some(template => !allowed.has(template))) throw new Error("agent template is invalid");
     this.db.run("BEGIN IMMEDIATE");
     try {
       let project = this.listProjects(userId)[0];
-      if (project === undefined) project = this.createProject(userId, "My workspace");
+      if (project === undefined) project = this.createProject(userId, { name: "My workspace", workspace });
       const existing = this.listAgents(userId, project.id);
       const created: AgentRecord[] = [];
       if (!existing.some(agent => agent.name === "master")) created.push(this.createAgent(userId, project.id, "master", "You are the primary Subpolar agent. Coordinate the selected specialist agents when useful."));

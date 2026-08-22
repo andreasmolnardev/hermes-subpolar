@@ -27,6 +27,7 @@ initial agent templates.
 - Owner-scoped projects, agents, sessions, and ordered transcripts.
 - Native tool boundaries with deny-by-default resolution and bounded results.
 - SQLite persistence at `<SUBPOLAR_DATA_DIR>/state.db`.
+- Project workspaces are stored below `SUBPOLAR_WORKSPACE_ROOT` (default: `<SUBPOLAR_DATA_DIR>/workspaces`); mount that directory in Docker when projects must survive container replacement.
 - Static web assets served by the same Bun process as the API.
 
 The public API does not expose provider credentials or allow a browser client to

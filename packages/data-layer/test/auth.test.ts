@@ -28,6 +28,30 @@ test("identity repository scopes projects, agents, and sessions to their owner",
   }
 });
 
+test("projects persist workspace metadata and Git credential secrets stay out of public records", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    const credential = repository.createGitCredential(session.principal.id, { name: "GitHub", provider: "github", username: "operator", token: "server-only-token" });
+    const project = repository.createProject(session.principal.id, {
+      name: "repo",
+      description: "A repository",
+      workspace: "/data/workspaces/project-1",
+      instructions: "Use the project conventions.",
+      repository: { url: "https://github.com/org/repo.git", credentialId: credential.id, remoteName: "origin", defaultBranch: "main" },
+      settings: { autoRefresh: true },
+    });
+    assert.equal(project.workspace, "/data/workspaces/project-1");
+    assert.equal(project.instructions, "Use the project conventions.");
+    assert.equal(project.repository?.credentialId, credential.id);
+    assert.equal(JSON.stringify(project).includes("server-only-token"), false);
+    assert.deepEqual(repository.getGitCredentialRuntime(session.principal.id, credential.id), { name: "GitHub", provider: "github", username: "operator", token: "server-only-token" });
+    assert.deepEqual(repository.listGitCredentials(session.principal.id), [credential]);
+  } finally {
+    repository.close();
+  }
+});
+
 test("agent capability assignments and policies persist through updates", async () => {
   const repository = new SQLiteIdentityRepository(":memory:");
   try {

@@ -117,9 +117,11 @@
   `2026-07-28` stateless discovery first, and falls back to an explicit legacy
   initialize/initialized lifecycle only when needed. Modern HTTP execution gets
   a fresh transport with current credentials; legacy transports retain only the
-  session state their negotiated protocol requires. OpenAPI operations use the
-  same stable identity model and static headers are configurable without
-  returning saved values to the browser.
+  session state their negotiated protocol requires. OAuth revoke now replaces
+  the encrypted secret set so access and refresh tokens are actually removed.
+  OpenAPI operations use the same stable identity model and static headers are
+  configurable from the OpenAPI form without returning saved values to the
+  browser.
 
 ## Verification
 

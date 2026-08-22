@@ -870,7 +870,11 @@ export class SQLiteIdentityRepository {
     if (runtime === null) throw new OwnershipError();
     const secrets = { ...runtime.secrets };
     for (const key of ["accessToken", "refreshToken", "token", "tokenType", "expiresAt"]) delete secrets[key];
-    return this.updateIntegration(userId, integrationId, { secrets });
+    // Revoke is a replacement operation. updateIntegration intentionally merges
+    // secret patches so blank edit forms retain credentials, but that would keep
+    // the OAuth tokens we just removed.
+    this.db.run("UPDATE integrations SET secrets_ciphertext = ?, status = 'unknown', last_error = NULL, updated_at = ? WHERE id = ? AND owner_id = ?", [encryptIntegrationSecrets(secrets, this.key(true)), now(), integrationId, userId]);
+    return this.getIntegration(userId, integrationId) as IntegrationRecord;
   }
 
   private user(row: Row): IdentityUser {

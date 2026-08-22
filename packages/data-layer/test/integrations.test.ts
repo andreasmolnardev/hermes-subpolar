@@ -36,6 +36,24 @@ test("integration OAuth state is single-use and owner-bound", async () => {
   identity.close();
 });
 
+test("revoking OAuth replaces stored credentials instead of merging them back", async () => {
+  const identity = new SQLiteIdentityRepository(":memory:");
+  const owner = await identity.bootstrap("oauth-revoke-owner", "password-123");
+  const integration = identity.createIntegration(owner.principal.id, {
+    name: "OAuth MCP", type: "mcp", config: { transport: "http", endpoint: "https://mcp.example.test" },
+    secrets: { accessToken: "access", refreshToken: "refresh", tokenType: "Bearer", expiresAt: Date.now() + 60_000, headers: { "x-client": "retain" } },
+  });
+
+  identity.revokeIntegrationOAuth(owner.principal.id, integration.id);
+  const secrets = identity.getIntegrationRuntimeConfig(owner.principal.id, integration.id)?.secrets;
+  assert.equal(secrets?.accessToken, undefined);
+  assert.equal(secrets?.refreshToken, undefined);
+  assert.equal(secrets?.tokenType, undefined);
+  assert.equal(secrets?.expiresAt, undefined);
+  assert.deepEqual(secrets?.headers, { "x-client": "retain" });
+  identity.close();
+});
+
 test("renaming migrates legacy name-based capability assignments to persistent IDs", async () => {
   const identity = new SQLiteIdentityRepository(":memory:");
   const owner = await identity.bootstrap("legacy-id-owner", "password-123");

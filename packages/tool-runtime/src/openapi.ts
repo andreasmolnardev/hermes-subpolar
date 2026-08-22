@@ -7,7 +7,12 @@ export type OpenApiToolOptions = {
   readonly document: unknown;
   readonly baseUrl: string;
   readonly allowedOperationIds: readonly string[];
+  readonly capabilityPrefix?: string;
+  readonly integrationId?: string;
+  readonly integrationName?: string;
+  readonly integrationType?: string;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly headersFactory?: () => Promise<Readonly<Record<string, string>>>;
   readonly fetch?: typeof fetch;
   readonly policy?: "allow" | "ask" | "auto" | "deny";
   readonly maxResponseBytes?: number;
@@ -18,10 +23,18 @@ export type OpenApiToolOptions = {
 
 type Operation = {
   readonly id: string;
+  readonly label: string;
   readonly method: string;
   readonly path: string;
   readonly parameters: readonly unknown[];
   readonly requestBody?: { readonly schema: JsonSchema; readonly required: boolean };
+};
+
+export type OpenApiOperation = {
+  readonly operationId: string;
+  readonly method: string;
+  readonly path: string;
+  readonly label: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -45,7 +58,7 @@ function resolveLocalReferences(value: unknown, document: unknown, parents: read
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveLocalReferences(item, document, parents)]));
 }
 
-function operationList(document: unknown, allowed: ReadonlySet<string>): readonly Operation[] {
+function operationList(document: unknown, allowed: ReadonlySet<string> | undefined): readonly Operation[] {
   validateDocument(document);
   if (!isRecord(document) || !isRecord(document.paths)) throw new TypeError("OpenAPI document has no paths");
   const operations: Operation[] = [];
@@ -54,10 +67,11 @@ function operationList(document: unknown, allowed: ReadonlySet<string>): readonl
     for (const method of ["get", "post", "put", "patch", "delete"] as const) {
       const rawDefinition = item[method];
       const definition = resolveLocalReferences(rawDefinition, document);
-      if (!isRecord(definition) || typeof definition.operationId !== "string" || !allowed.has(definition.operationId)) continue;
-      if (Array.isArray(definition.security) && definition.security.length > 0) {
-        throw new TypeError("OpenAPI security requirements are not supported");
-      }
+      if (!isRecord(definition)) continue;
+      const operationId = typeof definition.operationId === "string" && definition.operationId.trim().length > 0
+        ? definition.operationId
+        : `${method}_${path.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_|_$/g, "") || "root"}`;
+      if (allowed !== undefined && !allowed.has(operationId)) continue;
       const parameters = [
         ...(Array.isArray(item.parameters) ? item.parameters.map(parameter => resolveLocalReferences(parameter, document)) : []),
         ...(Array.isArray(definition.parameters) ? definition.parameters.map(parameter => resolveLocalReferences(parameter, document)) : [])
@@ -67,14 +81,14 @@ function operationList(document: unknown, allowed: ReadonlySet<string>): readonl
         const body = resolveLocalReferences(definition.requestBody, document);
         if (!isRecord(body) || !isRecord(body.content) || !isRecord(body.content["application/json"]) ||
             body.content["application/json"].schema === undefined) {
-          throw new TypeError(`OpenAPI operation ${definition.operationId} must declare an application/json body`);
+          throw new TypeError(`OpenAPI operation ${operationId} must declare an application/json body`);
         }
         requestBody = {
-          schema: validateJsonSchema(resolveLocalReferences(body.content["application/json"].schema, document), definition.operationId),
+          schema: validateJsonSchema(resolveLocalReferences(body.content["application/json"].schema, document), operationId),
           required: body.required === true,
         };
       }
-       const operation: Operation = { id: definition.operationId, method: method.toUpperCase(), path, parameters,
+       const operation: Operation = { id: operationId, label: typeof definition.summary === "string" && definition.summary.length > 0 ? definition.summary : operationId, method: method.toUpperCase(), path, parameters,
         ...(requestBody === undefined ? {} : { requestBody }) };
       parameterSchema(operation);
       if (parameters.some(parameter => !isRecord(parameter) || typeof parameter.name !== "string" || typeof parameter.in !== "string")) {
@@ -99,13 +113,6 @@ function validateDocument(document: unknown): void {
     throw new TypeError("OpenAPI document must be OpenAPI 3.1.0 with paths");
   }
   if (document.servers !== undefined) throw new TypeError("OpenAPI server overrides are not supported");
-  if (isRecord(document.components) && document.components.securitySchemes !== undefined &&
-      (!isRecord(document.components.securitySchemes) || Object.keys(document.components.securitySchemes).length > 0)) {
-    throw new TypeError("OpenAPI security schemes are not supported");
-  }
-  if (Array.isArray(document.security) && document.security.length > 0) {
-    throw new TypeError("OpenAPI security requirements are not supported");
-  }
   const refs: string[] = [];
   const visit = (value: unknown): void => {
     if (Array.isArray(value)) { for (const item of value) visit(item); return; }
@@ -303,7 +310,11 @@ async function callOperation(operation: Operation, inputValue: unknown, options:
     else if (parameter.in === "query") url.searchParams.set(parameter.name, text);
   }
   url.pathname = `${url.pathname.replace(/\/$/, "")}${path}`;
-  const headers = new Headers(options.headers);
+  const fixedHeaders = options.headersFactory === undefined ? options.headers : await options.headersFactory();
+  for (const [name, value] of Object.entries(fixedHeaders ?? {})) {
+    if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(value)) throw new TypeError("OpenAPI fixed headers are invalid");
+  }
+  const headers = new Headers(fixedHeaders);
   for (const parameter of operation.parameters) {
     if (isRecord(parameter) && parameter.in === "header" && typeof parameter.name === "string" && input[parameter.name] !== undefined) {
       const value = String(input[parameter.name]);
@@ -343,23 +354,37 @@ export function createOpenApiToolDefinitions(options: OpenApiToolOptions): reado
   for (const [label, value] of [["maxResponseBytes", options.maxResponseBytes], ["maxRequestBytes", options.maxRequestBytes]] as const) {
     if (value !== undefined && (!Number.isInteger(value) || value < 1)) throw new TypeError(`${label} must be positive`);
   }
-  if (options.allowedOperationIds.length === 0 || new Set(options.allowedOperationIds).size !== options.allowedOperationIds.length) {
-    throw new TypeError("OpenAPI operation allowlist must be non-empty and unique");
-  }
+  const allowedOperationIds = options.allowedOperationIds.length === 0 ? undefined : new Set(options.allowedOperationIds);
   for (const [name, value] of Object.entries(options.headers ?? {})) {
     if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(value)) throw new TypeError("OpenAPI fixed headers are invalid");
   }
-  const allowed = new Set(options.allowedOperationIds);
+  const allowed = allowedOperationIds;
   const operations = operationList(options.document, allowed);
-  if (operations.length !== allowed.size) throw new TypeError("OpenAPI operation allowlist contains an unknown operation");
+  if (allowed !== undefined && operations.length !== allowed.size) throw new TypeError("OpenAPI operation allowlist contains an unknown operation");
   return operations.map(operation => ({
     name: `openapi__${options.serviceName.replace(/[^a-zA-Z0-9_.-]/g, "_")}__${operation.id.replace(/[^a-zA-Z0-9_.-]/g, "_")}`,
-    capabilityId: `openapi:${options.serviceName}:${operation.id}`,
+    capabilityId: options.capabilityPrefix === undefined ? `openapi:${options.serviceName}:${operation.id}` : `${options.capabilityPrefix}${operation.id}`,
     description: `Call ${operation.method} ${operation.path}`,
     inputSchema: parameterSchema(operation),
     source: `tool-runtime:openapi:${options.serviceName}`,
+    ...(options.integrationId === undefined ? {} : { integrationId: options.integrationId }),
+    integrationName: options.integrationName ?? options.serviceName,
+    integrationType: options.integrationType ?? "openapi",
+    nativeName: operation.id,
+    displayName: operation.label,
     capabilities: { network: true, mutating: operation.method !== "GET" },
      executable: { handle: createToolHandle((input, signal) => callOperation(operation, input, options, signal instanceof AbortSignal ? signal : undefined)) },
     policy: options.policy ?? "ask"
+  }));
+}
+
+/** Discovers every supported operation without creating executable handles. */
+export function discoverOpenApiOperations(document: unknown): readonly OpenApiOperation[] {
+  const operations = operationList(document, undefined);
+  return operations.map(operation => ({
+    operationId: operation.id,
+    method: operation.method,
+    path: operation.path,
+    label: operation.label,
   }));
 }

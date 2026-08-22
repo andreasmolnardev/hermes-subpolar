@@ -24,6 +24,12 @@ export type ToolDefinition = {
   readonly description: string;
   readonly inputSchema: JsonSchema;
   readonly source: string;
+  /** Normalized integration inventory metadata; never contains credentials. */
+  readonly integrationId?: string;
+  readonly integrationName?: string;
+  readonly integrationType?: string;
+  readonly nativeName?: string;
+  readonly displayName?: string;
   readonly capabilities?: ToolCapabilityMetadata;
   readonly executable: ToolExecutable;
   readonly policy?: ToolPolicy;
@@ -38,6 +44,11 @@ export type ToolDescriptor = {
   readonly inputSchema: JsonSchema;
   readonly policy: Exclude<ToolPolicy, "deny">;
   readonly source: string;
+  readonly integrationId?: string;
+  readonly integrationName?: string;
+  readonly integrationType?: string;
+  readonly nativeName?: string;
+  readonly displayName?: string;
   readonly capabilities: ToolCapabilityMetadata;
   readonly executable: ToolExecutable;
 };
@@ -593,6 +604,11 @@ function copyDescriptor(
     inputSchema: sanitizeJsonSchema(originalSchema),
     policy,
     source: definition.source,
+    ...(definition.integrationId === undefined ? {} : { integrationId: definition.integrationId }),
+    ...(definition.integrationName === undefined ? {} : { integrationName: definition.integrationName }),
+    ...(definition.integrationType === undefined ? {} : { integrationType: definition.integrationType }),
+    ...(definition.nativeName === undefined ? {} : { nativeName: definition.nativeName }),
+    ...(definition.displayName === undefined ? {} : { displayName: definition.displayName }),
     capabilities: cloneCapabilities(definition.capabilities, definition.name),
     executable
   };

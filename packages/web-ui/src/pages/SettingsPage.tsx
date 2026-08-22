@@ -3,23 +3,31 @@ import { ArrowLeft, Bot, UserRound } from 'lucide-react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import {
   availableModels,
+  createIntegration,
+  deleteIntegration,
+  integrations,
   modelDefaults,
   saveModelDefaults,
   setupProviders,
+  startIntegrationOAuth,
+  testIntegration,
   createPromptCommand,
   createSkill,
   deletePromptCommand,
   deleteSkill,
   promptCommands,
+  revokeIntegrationOAuth,
   skills,
   updatePromptCommand,
   updateSkill,
+  updateIntegration,
   type SubpolarPromptCommand,
   type SubpolarPromptCommandInput,
   type SubpolarSkill,
   type SubpolarSkillInput,
   type SubpolarModelDefaults,
   type SubpolarModelProvider,
+  type SubpolarIntegration,
   type SubpolarUser
 } from '@/lib/subpolar-api'
 import type { ModelProviderDefinition } from '@hermes/shared/model-providers'
@@ -274,6 +282,73 @@ function PromptCommandsSettings() {
   )
 }
 
+type IntegrationFormState = {
+  name: string; type: 'mcp' | 'openapi'; transport: 'http' | 'stdio'; endpoint: string; command: string; arguments: string; environment: string; headers: string;
+  specificationUrl: string; specificationContent: string; baseUrl: string; authType: string; authHeaderName: string; secret: string;
+  authorizationUrl: string; tokenUrl: string; clientId: string; clientSecret: string; scopes: string; revocationUrl: string; enabled: boolean;
+};
+
+const emptyIntegrationForm = (type: 'mcp' | 'openapi'): IntegrationFormState => ({
+  name: '', type, transport: 'http', endpoint: '', command: '', arguments: '', environment: '', headers: '', specificationUrl: '', specificationContent: '', baseUrl: '', authType: 'none', authHeaderName: 'x-api-key', secret: '', authorizationUrl: '', tokenUrl: '', clientId: '', clientSecret: '', scopes: '', revocationUrl: '', enabled: true
+});
+
+function linesToRecord(value: string): Record<string, string> {
+  return Object.fromEntries(value.split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const separator = line.indexOf('=') >= 0 ? line.indexOf('=') : line.indexOf(':')
+    return separator <= 0 ? [line, ''] : [line.slice(0, separator).trim(), line.slice(separator + 1).trim()]
+  }).filter(([, item]) => item !== ''))
+}
+
+function IntegrationForm({ initial, onCancel, onSaved }: { initial: IntegrationFormState; onCancel: () => void; onSaved: (input: IntegrationFormState) => Promise<void> }) {
+  const [form, setForm] = useState(initial)
+  const [saving, setSaving] = useState(false)
+  const set = <K extends keyof IntegrationFormState>(key: K, value: IntegrationFormState[K]) => setForm(current => ({ ...current, [key]: value }))
+  return <form onSubmit={event => { event.preventDefault(); setSaving(true); void onSaved(form).finally(() => setSaving(false)) }} className="setup-option mt-5 rounded-xl p-5">
+    <div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{initial.name ? `Edit ${initial.name}` : `Add ${initial.type === 'mcp' ? 'MCP' : 'OpenAPI'} integration`}</h3><button type="button" onClick={onCancel} className="setup-step">Cancel</button></div>
+    <label className="setup-label mt-5 block">Name<input required value={form.name} onChange={event => set('name', event.target.value)} className="setup-input mt-2 w-full" /></label>
+    {form.type === 'mcp' ? <>
+      <label className="setup-label mt-4 block">Transport<select value={form.transport} onChange={event => set('transport', event.target.value as 'http' | 'stdio')} className="setup-input mt-2 w-full"><option value="http">HTTP / Streamable HTTP</option><option value="stdio">stdio</option></select></label>
+      {form.transport === 'http' ? <label className="setup-label mt-4 block">Endpoint<input required value={form.endpoint} onChange={event => set('endpoint', event.target.value)} className="setup-input mt-2 w-full" placeholder="https://mcp.example.com/mcp" /></label> : <><label className="setup-label mt-4 block">Command<input required value={form.command} onChange={event => set('command', event.target.value)} className="setup-input mt-2 w-full" placeholder="npx" /></label><label className="setup-label mt-4 block">Arguments<input value={form.arguments} onChange={event => set('arguments', event.target.value)} className="setup-input mt-2 w-full" placeholder="-y @example/mcp" /></label></>}
+      <label className="setup-label mt-4 block">Environment variables <span className="normal-case tracking-normal">(NAME=value, one per line)</span><textarea value={form.environment} onChange={event => set('environment', event.target.value)} className="setup-input mt-2 min-h-20 w-full" /></label>
+    </> : <>
+      <label className="setup-label mt-4 block">Specification URL<input value={form.specificationUrl} onChange={event => set('specificationUrl', event.target.value)} className="setup-input mt-2 w-full" placeholder="https://api.example.com/openapi.json" /></label>
+      <label className="setup-label mt-4 block">Or specification content<textarea value={form.specificationContent} onChange={event => set('specificationContent', event.target.value)} className="setup-input mt-2 min-h-24 w-full" placeholder="OpenAPI JSON" /></label>
+      <label className="setup-label mt-4 block">Base URL<input required value={form.baseUrl} onChange={event => set('baseUrl', event.target.value)} className="setup-input mt-2 w-full" placeholder="https://api.example.com" /></label>
+    </>}
+    <label className="setup-label mt-4 block">{form.type === 'openapi' ? 'Custom static headers' : 'HTTP headers'} <span className="normal-case tracking-normal">(Name: value, one per line; saved values stay hidden while editing)</span><textarea value={form.headers} onChange={event => set('headers', event.target.value)} className="setup-input mt-2 min-h-20 w-full" /></label>
+    <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="setup-label">Authentication<select value={form.authType} onChange={event => set('authType', event.target.value)} className="setup-input mt-2 w-full"><option value="none">None</option><option value="bearer">Bearer token</option><option value="api_key">API key header</option><option value="custom_headers">Custom static headers</option><option value="oauth">OAuth</option></select></label>{form.authType === 'api_key' && <label className="setup-label">Header name<input value={form.authHeaderName} onChange={event => set('authHeaderName', event.target.value)} className="setup-input mt-2 w-full" /></label>}</div>
+    {form.authType === 'oauth' ? <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="setup-label">Authorization URL<input required value={form.authorizationUrl} onChange={event => set('authorizationUrl', event.target.value)} className="setup-input mt-2 w-full" /></label><label className="setup-label">Token URL<input required value={form.tokenUrl} onChange={event => set('tokenUrl', event.target.value)} className="setup-input mt-2 w-full" /></label><label className="setup-label">Client ID<input required value={form.clientId} onChange={event => set('clientId', event.target.value)} className="setup-input mt-2 w-full" /></label><label className="setup-label">Client secret<input type="password" value={form.clientSecret} onChange={event => set('clientSecret', event.target.value)} className="setup-input mt-2 w-full" placeholder="Leave blank to keep saved secret" /></label><label className="setup-label">Scopes<input value={form.scopes} onChange={event => set('scopes', event.target.value)} className="setup-input mt-2 w-full" placeholder="tools.read tools.write" /></label><label className="setup-label">Revocation URL<input value={form.revocationUrl} onChange={event => set('revocationUrl', event.target.value)} className="setup-input mt-2 w-full" /></label></div> : form.authType !== 'none' && form.authType !== 'custom_headers' ? <label className="setup-label mt-4 block">Secret<input type="password" value={form.secret} onChange={event => set('secret', event.target.value)} className="setup-input mt-2 w-full" placeholder="Leave blank to keep saved secret" /></label> : null}
+    <label className="mt-5 flex items-center gap-2 text-sm"><input type="checkbox" checked={form.enabled} onChange={event => set('enabled', event.target.checked)} /> Enabled</label>
+    <button type="submit" disabled={saving} className="setup-primary mt-5">{saving ? 'Saving…' : 'Save integration'}</button>
+  </form>
+}
+
+function IntegrationsSettings() {
+  const location = useLocation()
+  const type = new URLSearchParams(location.search).get('type') === 'openapi' ? 'openapi' : 'mcp'
+  const [items, setItems] = useState<readonly SubpolarIntegration[]>([])
+  const [editing, setEditing] = useState<IntegrationFormState | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const refresh = () => integrations().then(result => setItems(result.integrations)).catch(() => setError('Could not load integrations.'))
+  useEffect(() => { void refresh() }, [])
+  const formFor = (item?: SubpolarIntegration): IntegrationFormState => {
+    const config = item?.config ?? {}
+    const auth = typeof config.auth === 'object' && config.auth !== null ? config.auth as Record<string, unknown> : {}
+    return { ...emptyIntegrationForm((item?.type as 'mcp' | 'openapi') ?? type), name: item?.name ?? '', transport: config.transport === 'stdio' ? 'stdio' : 'http', endpoint: String(config.endpoint ?? ''), command: String(config.command ?? ''), arguments: Array.isArray(config.arguments) ? config.arguments.join(' ') : '', environment: '', headers: '', specificationUrl: String(config.specificationUrl ?? ''), specificationContent: String(config.specificationContent ?? ''), baseUrl: String(config.baseUrl ?? ''), authType: String(auth.type ?? 'none'), authHeaderName: String(auth.headerName ?? 'x-api-key'), secret: '', authorizationUrl: String(auth.authorizationUrl ?? ''), tokenUrl: String(auth.tokenUrl ?? ''), clientId: String(auth.clientId ?? ''), clientSecret: '', scopes: Array.isArray(auth.scopes) ? auth.scopes.join(' ') : '', revocationUrl: String(auth.revocationUrl ?? ''), enabled: item?.enabled ?? true }
+  }
+  async function save(form: IntegrationFormState) {
+    const config: Record<string, unknown> = form.type === 'mcp' ? { transport: form.transport, ...(form.endpoint ? { endpoint: form.endpoint } : {}), ...(form.command ? { command: form.command } : {}), arguments: form.arguments.split(/\s+/).filter(Boolean) } : { ...(form.specificationUrl ? { specificationUrl: form.specificationUrl } : {}), ...(form.specificationContent ? { specificationContent: form.specificationContent } : {}), baseUrl: form.baseUrl }
+    const auth: Record<string, unknown> = { type: form.authType, ...(form.authType === 'api_key' ? { headerName: form.authHeaderName } : {}), ...(form.authType === 'oauth' ? { authorizationUrl: form.authorizationUrl, tokenUrl: form.tokenUrl, clientId: form.clientId, scopes: form.scopes.split(/\s+/).filter(Boolean), ...(form.revocationUrl ? { revocationUrl: form.revocationUrl } : {}) } : {}) }
+    config.auth = auth
+    const secrets: Record<string, unknown> = { ...(form.headers ? { headers: linesToRecord(form.headers) } : {}), ...(form.environment ? { environment: linesToRecord(form.environment) } : {}), ...(form.authType === 'oauth' && form.clientSecret ? { clientSecret: form.clientSecret } : {}), ...(form.authType === 'bearer' && form.secret ? { token: form.secret } : {}), ...(form.authType === 'api_key' && form.secret ? { apiKey: form.secret } : {}) }
+    const result = editingId === null ? await createIntegration({ name: form.name, type: form.type, enabled: form.enabled, config, secrets }) : await updateIntegration(editingId, { name: form.name, type: form.type, enabled: form.enabled, config, ...(Object.keys(secrets).length > 0 ? { secrets } : {}) })
+    setItems(current => editingId === null ? [...current, result.integration] : current.map(item => item.id === result.integration.id ? result.integration : item)); setEditing(null); setEditingId(null); setError(null)
+  }
+  return <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Integrations</h2><p className="setup-help mt-1 text-sm">Configure global connections once; Agents select individual discovered capabilities.</p></div><button type="button" onClick={() => { setEditingId(null); setEditing(emptyIntegrationForm(type)) }} className="setup-primary">Add {type === 'mcp' ? 'MCP' : 'OpenAPI'}</button></div><nav className="mt-5 flex gap-2" aria-label="Integration types"><NavLink to="/settings/agent/integrations?type=mcp" className={`setup-step ${type === 'mcp' ? 'setup-step-active' : ''}`}>MCP</NavLink><NavLink to="/settings/agent/integrations?type=openapi" className={`setup-step ${type === 'openapi' ? 'setup-step-active' : ''}`}>OpenAPI</NavLink></nav>{error !== null && <p role="alert" className="setup-error mt-4">{error}</p>}{editing !== null && <IntegrationForm key={`${editingId ?? 'new'}-${editing.type}`} initial={editing} onCancel={() => { setEditing(null); setEditingId(null) }} onSaved={save} />}
+    <div className="mt-5 grid gap-3">{items.filter(item => item.type === type).map(item => <article key={item.id} className="setup-option rounded-xl p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-medium">{item.name}</h3><p className="setup-help mt-1 text-xs">{item.type.toUpperCase()} · {item.status.replace('_', ' ')} · {item.capabilities.length} capabilities</p><p className="setup-help mt-1 text-xs">{item.lastSuccessfulDiscovery === undefined ? 'Not discovered yet' : `Last discovery ${new Date(item.lastSuccessfulDiscovery).toLocaleString()}`}</p>{item.lastError !== undefined && <p className="mt-1 text-xs text-red-300">{item.lastError}</p>}</div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => void updateIntegration(item.id, { enabled: !item.enabled }).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.integration : candidate))).catch(() => setError('Could not update integration.'))} className="setup-step text-xs">{item.enabled ? 'Disable' : 'Enable'}</button><button type="button" onClick={() => { setEditingId(item.id); setEditing(formFor(item)) }} className="setup-step text-xs">Edit</button><button type="button" onClick={() => void testIntegration(item.id).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.integration : candidate))).catch(() => setError('Connection test failed.'))} className="setup-step text-xs">Test / reconnect</button>{typeof (item.config.auth as Record<string, unknown> | undefined)?.type === 'string' && (item.config.auth as Record<string, unknown>).type === 'oauth' && <><button type="button" onClick={() => void startIntegrationOAuth(item.id).then(result => { window.location.assign(result.authorizationUrl) }).catch(() => setError('Could not start authorization.'))} className="setup-step text-xs">Connect</button><button type="button" onClick={() => void revokeIntegrationOAuth(item.id).then(result => setItems(current => current.map(candidate => candidate.id === item.id ? result.integration : candidate))).catch(() => setError('Could not revoke authorization.'))} className="setup-step text-xs">Revoke</button></>}<button type="button" onClick={() => { if (!window.confirm(`Delete ${item.name}?`)) return; void deleteIntegration(item.id).then(() => setItems(current => current.filter(candidate => candidate.id !== item.id))).catch(() => setError('Could not delete integration.')) }} className="setup-step text-xs">Delete</button></div></div></article>)}</div>{items.filter(item => item.type === type).length === 0 && editing === null && <p className="setup-option mt-5 rounded-xl p-4 text-sm setup-help">No {type === 'mcp' ? 'MCP' : 'OpenAPI'} integrations configured.</p>}</div>
+}
+
 export default function SettingsPage({ user, onLogout }: { user: SubpolarUser; onLogout: () => void }) {
   const location = useLocation()
   const {
@@ -482,6 +557,8 @@ export default function SettingsPage({ user, onLogout }: { user: SubpolarUser; o
             )
           ) : scope === 'agent' && section.id === 'skills' ? (
             <SkillsSettings />
+          ) : scope === 'agent' && section.id === 'integrations' ? (
+            <IntegrationsSettings />
           ) : scope === 'user' && section.id === 'prompt-commands' ? (
             <PromptCommandsSettings />
           ) : (

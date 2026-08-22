@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "bun:test";
 
-import { createOpenApiToolDefinitions } from "../src/index.ts";
+import { createOpenApiToolDefinitions, discoverOpenApiOperations } from "../src/index.ts";
 
 const document = {
   openapi: "3.1.0",
@@ -17,6 +17,13 @@ const document = {
     }
   }
 };
+
+test("OpenAPI discovery keeps operation IDs stable when display summaries change", () => {
+  const first = discoverOpenApiOperations({ openapi: "3.1.0", paths: { "/records": { get: { operationId: "listRecords", summary: "Records" } } } });
+  const second = discoverOpenApiOperations({ openapi: "3.1.0", paths: { "/records": { get: { operationId: "listRecords", summary: "All records" } } } });
+  assert.equal(first[0]?.operationId, second[0]?.operationId);
+  assert.notEqual(first[0]?.label, second[0]?.label);
+});
 
 test("OpenAPI tools use the configured origin and declared parameters", async () => {
   let request: Request | undefined;

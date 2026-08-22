@@ -10,7 +10,8 @@ export type {
   ShellSpawnOptions,
   ShellToolOptions
 } from "./shell";
-export { createMcpToolDefinitions } from "./mcp";
-export type { McpToolOptions, McpTransport } from "./mcp";
-export { createOpenApiToolDefinitions } from "./openapi";
-export type { OpenApiToolOptions } from "./openapi";
+export { createMcpHttpTransport, createMcpStdioTransport, createMcpToolDefinitions } from "./mcp";
+export type { McpHttpTransportOptions, McpProtocol, McpStdioSpawnOptions, McpStdioTransportOptions, McpTool, McpToolOptions, McpTransport, McpWireRequest } from "./mcp";
+export { MCP_MODERN_PROTOCOL_VERSION, modernMeta, parseMcpTools, requestMcp } from "./mcp";
+export { createOpenApiToolDefinitions, discoverOpenApiOperations } from "./openapi";
+export type { OpenApiOperation, OpenApiToolOptions } from "./openapi";

@@ -152,6 +152,59 @@ export type OwnedSessionRecord = {
   readonly createdAt: string;
 };
 
+export type AutomationSchedule =
+  | { readonly kind: "cron"; readonly expression: string; readonly timezone: string }
+  | { readonly kind: "once"; readonly at: string; readonly timezone: string };
+
+export type AutomationPermissionMode = "read-only" | "pre-approved" | "fail";
+
+export type AutomationRecord = {
+  readonly id: string;
+  readonly ownerId: string;
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly schedule: AutomationSchedule;
+  readonly prompt: string;
+  readonly agentId: string;
+  readonly projectId?: string;
+  readonly model?: string;
+  readonly permissionMode: AutomationPermissionMode;
+  readonly metadata: Record<string, unknown>;
+  readonly lastRunAt?: string;
+  readonly nextRunAt?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type AutomationInput = {
+  readonly name: string;
+  readonly enabled?: boolean;
+  readonly schedule: AutomationSchedule;
+  readonly prompt: string;
+  readonly agentId: string;
+  readonly projectId?: string | null;
+  readonly model?: string | null;
+  readonly permissionMode: AutomationPermissionMode;
+  readonly metadata?: Record<string, unknown>;
+  /** Scheduler-computed next occurrence. This is never accepted from the browser. */
+  readonly nextRunAt?: string | null;
+};
+
+export type AutomationRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "needs_attention";
+
+export type AutomationRunRecord = {
+  readonly id: string;
+  readonly automationId: string;
+  readonly ownerId: string;
+  readonly status: AutomationRunStatus;
+  readonly scheduledFor: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly sessionId: string;
+  readonly error?: string;
+  readonly triggerMetadata: Record<string, unknown>;
+};
+
 export type ProviderConnection = {
   readonly providerId: string;
   readonly baseUrl: string;
@@ -273,6 +326,8 @@ type Row = {
 };
 
 type ProjectDbRow = { id: string; owner_id: string; name: string; description: string; workspace: string; instructions: string; repository_json: string | null; default_agent_id: string | null; settings_json: string; created_at: string };
+type AutomationDbRow = { id: string; owner_id: string; name: string; enabled: number; schedule_json: string; prompt: string; agent_id: string; project_id: string | null; model: string | null; permission_mode: string; metadata_json: string; last_run_at: string | null; next_run_at: string | null; created_at: string; updated_at: string };
+type AutomationRunDbRow = { id: string; automation_id: string; owner_id: string; status: string; scheduled_for: string; started_at: string | null; completed_at: string | null; session_id: string; error: string | null; trigger_metadata_json: string };
 
 const AUTH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -391,6 +446,39 @@ CREATE TABLE IF NOT EXISTS session_owners (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(owner_id, created_at);
+CREATE TABLE IF NOT EXISTS automations (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  schedule_json TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  project_id TEXT,
+  model TEXT,
+  permission_mode TEXT NOT NULL CHECK (permission_mode IN ('read-only', 'pre-approved', 'fail')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  last_run_at TEXT,
+  next_run_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, next_run_at);
+CREATE TABLE IF NOT EXISTS automation_runs (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled', 'needs_attention')),
+  scheduled_for TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  session_id TEXT NOT NULL,
+  error TEXT,
+  trigger_metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(automation_id, scheduled_for)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_history ON automation_runs(automation_id, scheduled_for DESC);
 CREATE TABLE IF NOT EXISTS provider_connections (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   provider TEXT NOT NULL DEFAULT 'openai-api',
@@ -1373,6 +1461,176 @@ export class SQLiteIdentityRepository {
       ...(row.agent_id === null ? {} : { agentId: row.agent_id }),
       createdAt: required(row.created_at, "session createdAt"),
     }));
+  }
+
+  getUser(userId: string): IdentityUser | null {
+    const row = this.db.query<{ id: string; username: string }, [string]>("SELECT id, username FROM users WHERE id = ?").get(userId);
+    return row === null ? null : { id: row.id, username: row.username };
+  }
+
+  private automation(row: AutomationDbRow): AutomationRecord {
+    const schedule = JSON.parse(row.schedule_json) as AutomationSchedule;
+    const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+    return {
+      id: row.id,
+      ownerId: row.owner_id,
+      name: row.name,
+      enabled: row.enabled === 1,
+      schedule,
+      prompt: row.prompt,
+      agentId: row.agent_id,
+      ...(row.project_id === null ? {} : { projectId: row.project_id }),
+      ...(row.model === null ? {} : { model: row.model }),
+      permissionMode: row.permission_mode as AutomationPermissionMode,
+      metadata,
+      ...(row.last_run_at === null ? {} : { lastRunAt: row.last_run_at }),
+      ...(row.next_run_at === null ? {} : { nextRunAt: row.next_run_at }),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private automationRun(row: AutomationRunDbRow): AutomationRunRecord {
+    return {
+      id: row.id,
+      automationId: row.automation_id,
+      ownerId: row.owner_id,
+      status: row.status as AutomationRunStatus,
+      scheduledFor: row.scheduled_for,
+      ...(row.started_at === null ? {} : { startedAt: row.started_at }),
+      ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
+      sessionId: row.session_id,
+      ...(row.error === null ? {} : { error: row.error }),
+      triggerMetadata: JSON.parse(row.trigger_metadata_json) as Record<string, unknown>,
+    };
+  }
+
+  private automationRow(userId: string, automationId: string): AutomationDbRow | null {
+    return this.db.query<AutomationDbRow, [string, string]>(
+      "SELECT id, owner_id, name, enabled, schedule_json, prompt, agent_id, project_id, model, permission_mode, metadata_json, last_run_at, next_run_at, created_at, updated_at FROM automations WHERE id = ? AND owner_id = ?",
+    ).get(automationId, userId);
+  }
+
+  private validateAutomationInput(userId: string, input: AutomationInput, existing?: AutomationRecord): void {
+    if (!input.name.trim() || input.name.length > 128 || input.prompt.trim().length === 0 || input.prompt.length > 100_000) throw new Error("automation is invalid");
+    if (!input.agentId || this.getAgent(userId, input.agentId) === null) throw new OwnershipError("Agent is not owned by the authenticated user");
+    if (input.projectId !== undefined && input.projectId !== null) {
+      if (this.getProject(userId, input.projectId) === null) throw new OwnershipError("Project is not owned by the authenticated user");
+      const agent = this.getAgent(userId, input.agentId);
+      if (agent === null || agent.projectId !== input.projectId) throw new OwnershipError("Agent is not assigned to this project");
+    }
+    if (input.model !== undefined && input.model !== null && (!input.model.trim() || input.model.length > 256)) throw new Error("automation model is invalid");
+    if (!['read-only', 'pre-approved', 'fail'].includes(input.permissionMode)) throw new Error("automation permission mode is invalid");
+    if (input.schedule.kind === "cron") {
+      if (!input.schedule.expression.trim() || input.schedule.expression.trim().split(/\s+/).length !== 5) throw new Error("automation schedule is invalid");
+      try { new Intl.DateTimeFormat("en-US", { timeZone: input.schedule.timezone }).format(); } catch { throw new Error("automation timezone is invalid"); }
+    } else if (input.schedule.kind === "once") {
+      if (Number.isNaN(Date.parse(input.schedule.at))) throw new Error("automation schedule is invalid");
+      try { new Intl.DateTimeFormat("en-US", { timeZone: input.schedule.timezone }).format(); } catch { throw new Error("automation timezone is invalid"); }
+    } else throw new Error("automation schedule is invalid");
+    if (existing !== undefined && existing.ownerId !== userId) throw new OwnershipError();
+  }
+
+  listAutomations(userId: string, projectId?: string): readonly AutomationRecord[] {
+    const query = projectId === undefined
+      ? "SELECT id, owner_id, name, enabled, schedule_json, prompt, agent_id, project_id, model, permission_mode, metadata_json, last_run_at, next_run_at, created_at, updated_at FROM automations WHERE owner_id = ? ORDER BY created_at, id"
+      : "SELECT id, owner_id, name, enabled, schedule_json, prompt, agent_id, project_id, model, permission_mode, metadata_json, last_run_at, next_run_at, created_at, updated_at FROM automations WHERE owner_id = ? AND project_id = ? ORDER BY created_at, id";
+    return (projectId === undefined
+      ? this.db.query<AutomationDbRow, [string]>(query).all(userId)
+      : this.db.query<AutomationDbRow, [string, string]>(query).all(userId, projectId)).map(row => this.automation(row));
+  }
+
+  getAutomation(userId: string, automationId: string): AutomationRecord | null {
+    const row = this.automationRow(userId, automationId);
+    return row === null ? null : this.automation(row);
+  }
+
+  createAutomation(userId: string, input: AutomationInput): AutomationRecord {
+    this.validateAutomationInput(userId, input);
+    const at = now();
+    const automation = { id: randomUUID(), ownerId: userId, name: input.name.trim(), enabled: input.enabled !== false, schedule: input.schedule, prompt: input.prompt, agentId: input.agentId, ...(input.projectId === undefined || input.projectId === null ? {} : { projectId: input.projectId }), ...(input.model?.trim() ? { model: input.model.trim() } : {}), permissionMode: input.permissionMode, metadata: input.metadata ?? {}, ...(input.nextRunAt ? { nextRunAt: input.nextRunAt } : {}), createdAt: at, updatedAt: at };
+    this.db.run("INSERT INTO automations (id, owner_id, name, enabled, schedule_json, prompt, agent_id, project_id, model, permission_mode, metadata_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [automation.id, userId, automation.name, automation.enabled ? 1 : 0, JSON.stringify(automation.schedule), automation.prompt, automation.agentId, automation.projectId ?? null, automation.model ?? null, automation.permissionMode, JSON.stringify(automation.metadata), automation.enabled ? automation.nextRunAt ?? null : null, at, at]);
+    return this.getAutomation(userId, automation.id) as AutomationRecord;
+  }
+
+  updateAutomation(userId: string, automationId: string, input: Partial<AutomationInput>): AutomationRecord {
+    const existing = this.getAutomation(userId, automationId);
+    if (existing === null) throw new OwnershipError("Automation is not owned by the authenticated user");
+    const next: AutomationInput = {
+      name: input.name ?? existing.name,
+      enabled: input.enabled ?? existing.enabled,
+      schedule: input.schedule ?? existing.schedule,
+      prompt: input.prompt ?? existing.prompt,
+      agentId: input.agentId ?? existing.agentId,
+      ...(input.projectId === undefined ? (existing.projectId === undefined ? {} : { projectId: existing.projectId }) : input.projectId === null ? { projectId: null } : { projectId: input.projectId }),
+      model: input.model === undefined ? existing.model ?? null : input.model,
+      permissionMode: input.permissionMode ?? existing.permissionMode,
+      metadata: input.metadata ?? existing.metadata,
+      nextRunAt: input.nextRunAt === undefined ? existing.nextRunAt ?? null : input.nextRunAt,
+    };
+    this.validateAutomationInput(userId, next, existing);
+    const at = now();
+    this.db.run("UPDATE automations SET name = ?, enabled = ?, schedule_json = ?, prompt = ?, agent_id = ?, project_id = ?, model = ?, permission_mode = ?, metadata_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [next.name.trim(), next.enabled === false ? 0 : 1, JSON.stringify(next.schedule), next.prompt, next.agentId, next.projectId ?? null, next.model?.trim() || null, next.permissionMode, JSON.stringify(next.metadata ?? {}), next.enabled === false ? null : next.nextRunAt ?? null, at, automationId, userId]);
+    return this.getAutomation(userId, automationId) as AutomationRecord;
+  }
+
+  deleteAutomation(userId: string, automationId: string): void {
+    const result = this.db.run("DELETE FROM automations WHERE id = ? AND owner_id = ?", [automationId, userId]);
+    if (result.changes === 0) throw new OwnershipError("Automation is not owned by the authenticated user");
+  }
+
+  listDueAutomations(at: string): readonly AutomationRecord[] {
+    return this.db.query<AutomationDbRow, [string]>("SELECT id, owner_id, name, enabled, schedule_json, prompt, agent_id, project_id, model, permission_mode, metadata_json, last_run_at, next_run_at, created_at, updated_at FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at, id").all(at).map(row => this.automation(row));
+  }
+
+  claimDueAutomationRun(automationId: string, scheduledFor: string, nextRunAt: string | null, triggerMetadata: Record<string, unknown> = {}): AutomationRunRecord | null {
+    const at = now();
+    const run = { id: randomUUID(), sessionId: randomUUID() };
+    this.db.run("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.query<{ owner_id: string; enabled: number; next_run_at: string | null }, [string]>("SELECT owner_id, enabled, next_run_at FROM automations WHERE id = ?").get(automationId);
+      if (row === null || row.enabled !== 1 || row.next_run_at !== scheduledFor) { this.db.run("COMMIT"); return null; }
+      const inserted = this.db.run("INSERT OR IGNORE INTO automation_runs (id, automation_id, owner_id, status, scheduled_for, session_id, trigger_metadata_json) VALUES (?, ?, ?, 'queued', ?, ?, ?)", [run.id, automationId, row.owner_id, scheduledFor, run.sessionId, JSON.stringify(triggerMetadata)]);
+      if (inserted.changes === 0) { this.db.run("COMMIT"); return null; }
+      this.db.run("UPDATE automations SET next_run_at = ?, enabled = ?, updated_at = ? WHERE id = ? AND next_run_at = ?", [nextRunAt, nextRunAt === null ? 0 : 1, at, automationId, scheduledFor]);
+      this.db.run("COMMIT");
+      return this.getAutomationRun(row.owner_id, automationId, run.id);
+    } catch (error) { this.db.run("ROLLBACK"); throw error; }
+  }
+
+  triggerAutomation(userId: string, automationId: string, triggerMetadata: Record<string, unknown> = {}): AutomationRunRecord {
+    const automation = this.getAutomation(userId, automationId);
+    if (automation === null) throw new OwnershipError("Automation is not owned by the authenticated user");
+    const scheduledFor = now();
+    const run = { id: randomUUID(), sessionId: randomUUID() };
+    this.db.run("INSERT INTO automation_runs (id, automation_id, owner_id, status, scheduled_for, session_id, trigger_metadata_json) VALUES (?, ?, ?, 'queued', ?, ?, ?)", [run.id, automationId, userId, scheduledFor, run.sessionId, JSON.stringify({ ...triggerMetadata, manual: true })]);
+    return this.getAutomationRun(userId, automationId, run.id) as AutomationRunRecord;
+  }
+
+  getAutomationRun(userId: string, automationId: string, runId: string): AutomationRunRecord | null {
+    const row = this.db.query<AutomationRunDbRow, [string, string, string]>("SELECT id, automation_id, owner_id, status, scheduled_for, started_at, completed_at, session_id, error, trigger_metadata_json FROM automation_runs WHERE id = ? AND automation_id = ? AND owner_id = ?").get(runId, automationId, userId);
+    return row === null ? null : this.automationRun(row);
+  }
+
+  listAutomationRuns(userId: string, automationId: string): readonly AutomationRunRecord[] {
+    return this.db.query<AutomationRunDbRow, [string, string]>("SELECT id, automation_id, owner_id, status, scheduled_for, started_at, completed_at, session_id, error, trigger_metadata_json FROM automation_runs WHERE automation_id = ? AND owner_id = ? ORDER BY scheduled_for DESC, id DESC").all(automationId, userId).map(row => this.automationRun(row));
+  }
+
+  updateAutomationRun(runId: string, status: AutomationRunStatus, error?: string): AutomationRunRecord | null {
+    const at = now();
+    const run = this.db.query<AutomationRunDbRow, [string]>("SELECT id, automation_id, owner_id, status, scheduled_for, started_at, completed_at, session_id, error, trigger_metadata_json FROM automation_runs WHERE id = ?").get(runId);
+    if (run === null) return null;
+    const startedAt = run.started_at ?? (status === "running" ? at : null);
+    const terminal = ["completed", "failed", "cancelled", "needs_attention"].includes(status);
+    this.db.run("UPDATE automation_runs SET status = ?, started_at = ?, completed_at = ?, error = ? WHERE id = ?", [status, startedAt, terminal ? at : run.completed_at, error ?? (terminal ? null : run.error), runId]);
+    if (terminal) this.db.run("UPDATE automations SET last_run_at = ?, updated_at = ? WHERE id = ?", [at, at, run.automation_id]);
+    const updated = this.db.query<AutomationRunDbRow, [string]>("SELECT id, automation_id, owner_id, status, scheduled_for, started_at, completed_at, session_id, error, trigger_metadata_json FROM automation_runs WHERE id = ?").get(runId);
+    return updated === null ? null : this.automationRun(updated);
+  }
+
+  recoverAutomationRuns(): void {
+    const at = now();
+    this.db.run("UPDATE automation_runs SET status = 'failed', completed_at = ?, error = 'Server restarted before the automation run completed' WHERE status IN ('queued', 'running')", [at]);
   }
 
   setupStatus(userId: string): SetupStatus {

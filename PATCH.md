@@ -1,5 +1,19 @@
 # Subpolar Migration Record
 
+## Persisted Automations
+
+- Replaced the placeholder Scheduled gallery with owner-scoped global and
+  project automations, an editor, explicit cron/timezone normalization, model
+  and permission policy selection, enable/disable controls, and durable run
+  history with session links.
+- Added SQLite automation/run state, atomic scheduled-occurrence claims,
+  restart recovery, immediate triggers, and execution through the existing
+  Agent, Project, Tool Resolver, and Harness path. Interactive approval is
+  captured as `needs_attention`; it is never silently allowed.
+- The scheduler is single-instance today; the deployment assumption and
+  predictable restart/missed-run behavior are documented in
+  `docs/automations.md`.
+
 ## Current State
 
 - Added owner-configurable MCP and OpenAPI Integrations. MCP supports HTTP /

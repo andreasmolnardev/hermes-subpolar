@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "hermes-agent",
+      "name": "hermes-subpolar",
       "dependencies": {
         "@streamdown/math": "1.0.2",
         "agent-browser": "0.26.0",

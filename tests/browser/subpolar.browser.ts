@@ -18,7 +18,7 @@ test('serves static content, authenticates, enforces CSRF, and completes setup',
 
   const staticPage = await page.goto('/setup')
   expect(staticPage?.status()).toBe(200)
-  await expect(page).toHaveTitle('Hermes Agent - Dashboard')
+  await expect(page).toHaveTitle('Hermes Subpolar - Dashboard')
   await expect(page.getByRole('heading', { name: 'Create administrator' })).toBeVisible()
 
   const bootstrapStatus = await page.request.get('/v1/auth/bootstrap')

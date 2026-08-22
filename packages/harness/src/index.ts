@@ -70,6 +70,9 @@ export type {
   SubpolarPiToolRequest,
   SubpolarPiToolResult
 } from "./pi-tools";
+export { SubpolarPiCredentialStore } from "./pi-credentials";
+export type { SubpolarCredentialBackend } from "./pi-credentials";
+export { hydratePiSession, toPiMessages } from "./pi-messages";
 
 export {
   MAX_RETRY_ATTEMPTS,

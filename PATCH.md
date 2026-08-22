@@ -17,6 +17,10 @@
   in-memory Pi session creation, controlled resource loading, custom-tool
   authorization, and stable Subpolar event projection. The legacy provider
   loop remains available until the parity migration is complete.
+- Added explicit provider-credential and conversation seams for Pi: a
+  Subpolar-backed credential-store adapter and provider-neutral message
+  hydration into Pi's transcript model. System policy remains resource-loader
+  input rather than a persisted conversation message.
 
 ## Repository Residue Cleanup
 

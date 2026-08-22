@@ -8,6 +8,7 @@ import {
 	type Skill,
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, type Model, type Provider } from "@earendil-works/pi-ai";
+import type { CredentialStore } from "@earendil-works/pi-ai";
 import { PiEventProjector, type SubpolarPiEvent, type SubpolarPiEventSink } from "./pi-events";
 import { SubpolarResourceLoader, type SubpolarPiResourceOptions } from "./pi-resources";
 import { toPiToolDefinition, type SubpolarPiRunContext, type SubpolarPiTool } from "./pi-tools";
@@ -17,6 +18,7 @@ export interface CreateSubpolarPiRuntimeOptions extends SubpolarPiRunContext, Su
 	readonly tools?: readonly SubpolarPiTool[];
 	readonly thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	readonly modelRuntime?: ModelRuntime;
+	readonly credentials?: CredentialStore;
 	/** Native providers registered by the Subpolar model/credential layer. */
 	readonly nativeProviders?: readonly Provider[];
 	readonly signal?: AbortSignal;
@@ -36,7 +38,7 @@ export interface SubpolarPiRuntime {
 export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOptions): Promise<SubpolarPiRuntime> {
 	const modelRuntime = options.modelRuntime ??
 		(await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
+			credentials: options.credentials ?? new InMemoryCredentialStore(),
 			modelsPath: null,
 			allowModelNetwork: false,
 			refreshOnCreate: false,

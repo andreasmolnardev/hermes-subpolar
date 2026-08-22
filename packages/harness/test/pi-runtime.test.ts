@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
 	createSubpolarPiRuntime,
+	hydratePiSession,
 	PiEventProjector,
+	SubpolarPiCredentialStore,
 	SubpolarResourceLoader,
+	toPiMessages,
 	toPiToolDefinition,
 	type SubpolarPiEvent,
 	type SubpolarPiTool,
@@ -101,5 +104,43 @@ describe("Subpolar Pi runtime seam", () => {
 		expect(executions).toBe(0);
 		expect(result.details).toEqual({ denied: true });
 		expect(result.content).toEqual([{ type: "text", text: "Permission denied for tool dangerous.demo." }]);
+	});
+
+	test("message hydration keeps system policy out of the transcript and preserves tool calls", () => {
+		const faux = fauxProvider();
+		const model = faux.getModel();
+		const messages = toPiMessages([
+			{ role: "system", content: "server policy" },
+			{ role: "user", content: "read the file" },
+			{
+				role: "assistant",
+				content: "I will inspect it",
+				toolCalls: [{ id: "call-1", name: "filesystem.read", arguments: '{"path":"a.txt"}' }],
+			},
+			{ role: "tool", toolCallId: "call-1", name: "filesystem.read", content: "contents" },
+		], model);
+
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(messages[1]).toMatchObject({ content: [{ type: "text", text: "I will inspect it" }, { type: "toolCall", id: "call-1" }] });
+		expect(messages[2]).toMatchObject({ toolCallId: "call-1", toolName: "filesystem.read" });
+		const session = { messages: [] as typeof messages } as never;
+		hydratePiSession(session, [{ role: "user", content: "hello" }], model);
+		expect(session.messages).toHaveLength(1);
+	});
+
+	test("credential access is delegated to Subpolar storage", async () => {
+		let reads = 0;
+		const store = new SubpolarPiCredentialStore({
+			read: async () => {
+				reads += 1;
+				return undefined;
+			},
+			list: async () => [],
+			modify: async (_providerId, fn) => fn(undefined),
+			delete: async () => {},
+		});
+
+		await store.read("openai");
+		expect(reads).toBe(1);
 	});
 });

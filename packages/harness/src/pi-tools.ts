@@ -74,6 +74,24 @@ export function toPiToolDefinition(tool: SubpolarPiTool, run: SubpolarPiRunConte
 	};
 }
 
+/** Adapt a resolved descriptor to the application-owned tool shape used by the Pi runtime. */
+export function toSubpolarPiTool(
+	descriptor: ToolDescriptor,
+	run: SubpolarPiRunContext,
+	executor: SubpolarPiResolvedToolExecutor,
+	authorize?: SubpolarPiTool["authorize"],
+): SubpolarPiTool {
+	return {
+		name: descriptor.name,
+		label: descriptor.displayName ?? descriptor.name,
+		description: descriptor.description,
+		parameters: descriptor.inputSchema as ToolDefinition["parameters"],
+		capabilityId: descriptor.capabilityId,
+		authorize: descriptor.policy === "ask" ? (authorize ?? (async () => "deny")) : async () => "allow",
+		execute: (request) => executor(descriptor, request),
+	};
+}
+
 /**
  * Adapt a Tool Resolver descriptor without allowing Pi to become the resolver
  * or runtime. The executor remains an injected Subpolar Tool Runtime seam.
@@ -84,13 +102,5 @@ export function toPiResolvedTool(
 	executor: SubpolarPiResolvedToolExecutor,
 	authorize?: SubpolarPiTool["authorize"],
 ): ToolDefinition {
-	return toPiToolDefinition({
-		name: descriptor.name,
-		label: descriptor.displayName ?? descriptor.name,
-		description: descriptor.description,
-		parameters: descriptor.inputSchema as ToolDefinition["parameters"],
-		capabilityId: descriptor.capabilityId,
-		authorize: descriptor.policy === "ask" ? (authorize ?? (async () => "deny")) : async () => "allow",
-		execute: (request) => executor(descriptor, request),
-	}, run);
+	return toPiToolDefinition(toSubpolarPiTool(descriptor, run, executor, authorize), run);
 }

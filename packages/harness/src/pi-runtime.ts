@@ -71,7 +71,7 @@ export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOp
 		model: options.model,
 		...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 		noTools: "all",
-		tools: [],
+		tools: options.tools?.map(tool => tool.name) ?? [],
 		customTools: options.tools?.map((tool) => toPiToolDefinition(tool, options)),
 		resourceLoader,
 		sessionManager,

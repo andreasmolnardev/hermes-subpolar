@@ -67,7 +67,7 @@ export type {
 } from "./pi-runtime";
 export { SubpolarResourceLoader } from "./pi-resources";
 export type { SubpolarPiResourceOptions } from "./pi-resources";
-export { toPiResolvedTool, toPiToolDefinition } from "./pi-tools";
+export { toPiResolvedTool, toPiToolDefinition, toSubpolarPiTool } from "./pi-tools";
 export type {
   SubpolarPiPermissionDecision,
   SubpolarPiRunContext,
@@ -79,7 +79,7 @@ export type { SubpolarPiResolvedToolExecutor } from "./pi-tools";
 export { SubpolarPiCredentialStore } from "./pi-credentials";
 export type { SubpolarCredentialBackend } from "./pi-credentials";
 export { hydratePiSession, toPiMessages } from "./pi-messages";
-export { createSubpolarPiProviderBridge } from "./pi-provider-bridge";
+export { createSubpolarPiProviderBridge, piAssistantMessageToProviderResult } from "./pi-provider-bridge";
 export type { SubpolarPiProviderBridge, SubpolarPiProviderBridgeOptions } from "./pi-provider-bridge";
 
 export {

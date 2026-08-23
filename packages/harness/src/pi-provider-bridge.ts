@@ -1,4 +1,4 @@
-import type { ChatProvider, ProviderContent, ProviderMessage, ProviderRequest, ProviderStreamEvent } from "chat-provider-interface";
+import type { ChatProvider, ProviderContent, ProviderMessage, ProviderRequest, ProviderResult, ProviderStreamEvent } from "chat-provider-interface";
 import type {
 	Api,
 	AssistantMessage,
@@ -27,6 +27,37 @@ export interface SubpolarPiProviderBridgeOptions {
 export interface SubpolarPiProviderBridge {
 	readonly model: Model<Api>;
 	readonly provider: Provider<Api>;
+}
+
+/** Convert a completed Pi assistant message back to Hermes' provider-neutral result. */
+export function piAssistantMessageToProviderResult(message: AssistantMessage | undefined): ProviderResult {
+	if (message === undefined) throw new Error("Pi execution produced no assistant message");
+	const text: string[] = [];
+	const reasoning: string[] = [];
+	const toolCalls: Array<NonNullable<ProviderMessage["toolCalls"]>[number]> = [];
+	for (const part of message.content) {
+		if (part.type === "text") text.push(part.text);
+		if (part.type === "thinking") reasoning.push(part.thinking);
+		if (part.type === "toolCall") toolCalls.push({ id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) });
+	}
+	const finishReason = message.stopReason === "toolUse" ? "tool_call" : message.stopReason === "length" ? "length" : message.stopReason === "aborted" ? "cancelled" : message.stopReason === "error" ? "error" : "stop";
+	return {
+		message: {
+			role: "assistant",
+			content: text.join(""),
+			...(reasoning.length === 0 ? {} : { reasoning: reasoning.join("") }),
+			...(toolCalls.length === 0 ? {} : { toolCalls }),
+		},
+		usage: {
+			inputTokens: message.usage.input,
+			outputTokens: message.usage.output,
+			totalTokens: message.usage.totalTokens,
+			reasoningTokens: message.usage.reasoning,
+			cachedInputTokens: message.usage.cacheRead,
+			cacheCreationInputTokens: message.usage.cacheWrite,
+		},
+		finishReason,
+	};
 }
 
 function contentText(content: ProviderContent): string {

@@ -52,7 +52,7 @@ export function piAssistantMessageToProviderResult(message: AssistantMessage | u
 			inputTokens: message.usage.input,
 			outputTokens: message.usage.output,
 			totalTokens: message.usage.totalTokens,
-			reasoningTokens: message.usage.reasoning,
+			...(message.usage.reasoning === undefined ? {} : { reasoningTokens: message.usage.reasoning }),
 			cachedInputTokens: message.usage.cacheRead,
 			cacheCreationInputTokens: message.usage.cacheWrite,
 		},

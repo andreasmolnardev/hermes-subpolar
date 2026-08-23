@@ -16,7 +16,7 @@
 - Added the first Subpolar-owned Pi harness seam: an explicit per-run context,
   in-memory Pi session creation, controlled resource loading, custom-tool
   authorization, and stable Subpolar event projection. The legacy provider
-  loop remains available until the parity migration is complete.
+  loop remains available as a gateway compatibility path.
 - Added explicit provider-credential and conversation seams for Pi: a
   Subpolar-backed credential-store adapter and provider-neutral message
   hydration into Pi's transcript model. System policy remains resource-loader
@@ -32,8 +32,8 @@
   performs exactly one Pi-backed turn, giving gateway/automation callers one
   shared migration boundary.
 - Added an optional `api-gateway` Pi executor seam. It receives the normalized
-  request and projected event sink, while the legacy provider path remains the
-  default until gateway parity is complete.
+  request and projected event sink; the server now supplies the embedded Pi
+  executor by default.
 - Kept the staged gateway/Pi source graph type-safe across Bun and DOM fetch
   declarations, including executable-handle narrowing and two documented
   upstream Pi fetch/Headers compatibility patches.
@@ -53,8 +53,8 @@
   resource loader, and projects text/reasoning/tool/terminal events back to the
   gateway event contract.
 - Allowed explicitly injected Pi custom tools while keeping Pi built-in tools
-  disabled by default; the legacy provider loop and durable gateway persistence
-  remain the default until parity migration is complete.
+  disabled by default; the generic gateway still permits an explicit legacy
+  path for compatibility.
 - Added Pi-path persistence projection: inbound preparation, before/after tool
   checkpoints, and the final assistant result/usage are written through the
   existing gateway persistence port without making Pi's JSONL session state
@@ -64,6 +64,14 @@
 - Enforced Pi-path session setup and approval routing at the executor boundary,
   with coverage proving `ask` tools cannot execute without the gateway approval
   decision.
+- Added a bounded native model-resolution seam in `harness`: Hermes provider
+  IDs map explicitly to Pi provider IDs, unsupported providers fail closed, and
+  `ModelRuntime.getModel()` runs with a network-disabled runtime backed by
+  `SubpolarPiCredentialStore`.
+- Switched `startApiGatewayServer()` to the embedded Pi executor by default,
+  while retaining the explicit `piExecutor` option for custom runtimes and
+  tests. Fixed optional usage serialization so Pi results remain valid JSON for
+  idempotency replay.
 
 ## Repository Residue Cleanup
 

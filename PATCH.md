@@ -44,6 +44,9 @@
   Pi AI model/provider, translating messages, tools, usage, errors, and stream
   deltas. This enables Pi-loop execution before the native credential/provider
   catalog migration is switched on.
+- Passed the selected `ChatProvider` into the optional gateway Pi executor so
+  application-owned Pi adapters can bridge the request without process-global
+  provider state.
 
 ## Repository Residue Cleanup
 

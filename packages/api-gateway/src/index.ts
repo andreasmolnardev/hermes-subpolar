@@ -161,6 +161,7 @@ export type GatewayNormalizedRequest = {
 /** Optional Pi-backed execution seam. The default remains the legacy harness until parity is complete. */
 export type GatewayPiExecutor = (
   request: GatewayNormalizedRequest,
+  provider: ChatProvider,
   eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
 ) => Promise<HarnessResult>;
 
@@ -1017,7 +1018,7 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
       try {
         const configured = configureHarnessRequest(normalized, options);
         const eventSink = safeHarnessEventSink(request);
-        if (options.piExecutor !== undefined) return await options.piExecutor(configured, eventSink);
+        if (options.piExecutor !== undefined) return await options.piExecutor(configured, provider, eventSink);
         return await harnessRuntimeAdapter.execute(configured, provider, eventSink);
       } finally {
         lease.release();

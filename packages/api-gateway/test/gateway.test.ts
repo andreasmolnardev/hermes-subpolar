@@ -75,10 +75,12 @@ test("gateway can route a normalized request through the staged Pi executor seam
   let piCalls = 0;
   let providerCalls = 0;
   let seenModel: string | undefined;
+  let seenProvider: object | undefined;
   const result = await createGateway({
-    piExecutor: async (request) => {
+    piExecutor: async (request, provider) => {
       piCalls += 1;
       seenModel = request.model;
+      seenProvider = provider;
       return completion;
     }
   }).executeRequest({
@@ -97,6 +99,7 @@ test("gateway can route a normalized request through the staged Pi executor seam
   assert.equal(piCalls, 1);
   assert.equal(providerCalls, 0);
   assert.equal(seenModel, "pi-model");
+  assert.equal(seenProvider !== undefined, true);
 });
 
 test("unsupported executable references fail before provider effects", async () => {

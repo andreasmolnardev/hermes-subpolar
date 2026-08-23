@@ -24,7 +24,7 @@ import {
   type AutomationInput,
   type AutomationPermissionMode,
 } from "data-layer";
-import { assembleHarnessContext, type HarnessApprovalPolicy, type HarnessContextAssembler } from "harness";
+import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
 import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
@@ -398,15 +398,6 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const identity = new SQLiteIdentityRepository(databasePath);
   const integrations = new IntegrationManager(identity);
   const persistence = createGatewayPersistenceAdapter(sessions);
-  const piExecutor = options.piExecutor ?? createGatewayPiExecutor({
-    cwd: workspaceRoot,
-    agentDir: join(dataDir, "pi-agent"),
-  });
-  const gateway = createGateway({
-    sessionRepository: persistence,
-    persistence,
-    piExecutor,
-  });
   const activeTurns = new Set<AbortController>();
   const socketTurns = new Map<object, Map<string, AbortController>>();
   const pendingApprovals = new WeakMap<object, Map<string, { readonly resolve: (decision: "allow" | "deny") => void }>>();
@@ -429,6 +420,68 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     if (profile.authType === "gcp") return resolveGcpCredential(credentials);
     return profile.authType === "oauth" ? refreshProviderCredential(identity, profile.id, connection.credentialHandle, credentials) : credentials;
   };
+
+  type PiCredential = NonNullable<Awaited<ReturnType<SubpolarCredentialBackend["read"]>>>;
+  const nativeCredential = (credentials: Awaited<ReturnType<typeof configuredCredential>>): PiCredential | undefined => {
+    const access = credentials.accessToken ?? credentials.copilotToken ?? credentials.apiKey;
+    if (access === undefined || access.trim() === "" || access === "env") return undefined;
+    if (credentials.refreshToken !== undefined && credentials.expiresAt !== undefined) {
+      return { type: "oauth", access, refresh: credentials.refreshToken, expires: credentials.expiresAt };
+    }
+    return { type: "api_key", key: access };
+  };
+  const nativeCredentialBackend: SubpolarCredentialBackend = {
+    async read(providerId) {
+      const connection = identity.providerConnection();
+      if (connection === null || mapHermesProviderToPi(connection.providerId) !== providerId) return undefined;
+      return nativeCredential(await configuredCredential(connection));
+    },
+    async list() {
+      const connection = identity.providerConnection();
+      if (connection === null) return [];
+      const providerId = mapHermesProviderToPi(connection.providerId);
+      const credentials = nativeCredential(await configuredCredential(connection));
+      if (providerId === undefined || credentials === undefined) return [];
+      return [{ providerId, type: credentials.type }];
+    },
+    async modify(providerId, fn) {
+      const connection = identity.providerConnection();
+      if (connection === null || mapHermesProviderToPi(connection.providerId) !== providerId) return fn(undefined);
+      const current = nativeCredential(await configuredCredential(connection));
+      const next = await fn(current);
+      if (next === undefined) return current;
+      identity.saveProviderCredential(connection.credentialHandle, next.type === "oauth"
+        ? { accessToken: next.access, refreshToken: next.refresh, expiresAt: next.expires }
+        : { apiKey: next.key });
+      return next;
+    },
+    async delete(providerId) {
+      const connection = identity.providerConnection();
+      if (connection !== null && mapHermesProviderToPi(connection.providerId) === providerId) {
+        throw new Error("Native Pi credential deletion must use the authenticated Subpolar provider settings flow");
+      }
+    },
+  };
+  const piExecutor = options.piExecutor ?? createGatewayPiExecutor({
+    cwd: workspaceRoot,
+    agentDir: join(dataDir, "pi-agent"),
+    ...(options.provider === undefined ? { resolveModel: async request => {
+      const connection = identity.providerConnection();
+      if (connection === null) throw new Error("provider_not_configured");
+      return resolveSubpolarPiModel({
+        hermesProviderId: connection.providerId,
+        modelId: request.model,
+        baseUrl: connection.baseUrl,
+        credentials: nativeCredentialBackend,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      });
+    } } : {}),
+  });
+  const gateway = createGateway({
+    sessionRepository: persistence,
+    persistence,
+    piExecutor,
+  });
 
   const trackTurn = (controller: AbortController): (() => void) => {
     activeTurns.add(controller);
@@ -524,10 +577,11 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     if (runtimeCwd !== undefined) await gateway.setSessionCwd(prepared.sessionId, runtimeCwd);
     const connection = options.provider === undefined ? identity.providerConnection() : null;
     if (options.provider === undefined && connection === null) throw new Error("provider_not_configured");
-    const runtime = connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
+    const nativePiDefault = options.piExecutor === undefined && options.provider === undefined;
+    const runtime = nativePiDefault || connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
     const approvalPolicy = turnApprovalPolicy ?? options.approvalPolicy;
     return gateway.executeRequest({
-      model: prepared.input.model === "default" && runtime !== null ? runtime.model : prepared.input.model,
+      model: prepared.input.model === "default" && connection !== null ? connection.model : prepared.input.model,
       messages: prepared.input.messages,
       toolPolicies: [],
       toolDefinitions: prepared.tools,
@@ -559,7 +613,9 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         return decision;
       } }),
       ...(prepared.contextAssembler === undefined ? {} : { contextAssembler: prepared.contextAssembler }),
-    }, options.provider ?? createProvider(runtime as NonNullable<typeof runtime>, { resolveCredential: handle => identity.resolveCredentialHandle(handle) }));
+    }, options.provider ?? (runtime === null
+      ? { async complete() { throw new Error("Legacy provider execution is unavailable on the native Pi path"); } }
+      : createProvider(runtime, { resolveCredential: handle => identity.resolveCredentialHandle(handle) })));
   };
 
   const executeAutomation = async (automation: NonNullable<ReturnType<SQLiteIdentityRepository["getAutomation"]>>, run: NonNullable<ReturnType<SQLiteIdentityRepository["getAutomationRun"]>>, signal: AbortSignal): Promise<void> => {

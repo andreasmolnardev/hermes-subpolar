@@ -76,6 +76,11 @@
   provider mappings and a network-disabled, Subpolar-backed `ModelRuntime`.
 - Added automation coverage proving Pi-backed success persistence, approval
   failure, and provider failure behavior through the normal automation runner.
+- Native server-default model resolution now honors Hermes' persisted endpoint,
+  materializes configured model IDs from a controlled Pi catalog template, and
+  selects Pi's Chat Completions API for the Hermes `openai-api` profile.
+- Added a true default-path integration test covering Subpolar credentials,
+  custom endpoint dispatch, streaming completion projection, and usage.
 
 ## Repository Residue Cleanup
 

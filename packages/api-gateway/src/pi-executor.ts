@@ -19,6 +19,7 @@ import {
   type HarnessSessionSetup,
   type HarnessTool,
   type HarnessToolResult,
+  type SubpolarPiModelResolution,
   type SubpolarPiEvent,
   type SubpolarPiRunContext,
 } from "harness";
@@ -37,6 +38,8 @@ export type GatewayPiExecutorOptions = {
   readonly providerId?: string;
   readonly providerName?: string;
   readonly systemPrompt?: (request: GatewayNormalizedRequest) => string | undefined;
+  /** Optional native Pi model resolution. When present, the compatibility ChatProvider is not used for model calls. */
+  readonly resolveModel?: (request: GatewayNormalizedRequest) => Promise<SubpolarPiModelResolution>;
 };
 
 function isToolDescriptor(value: GatewayNormalizedRequest["tools"][number]): value is ToolDescriptor {
@@ -269,16 +272,17 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
       ...assembled.filter(message => message.role === "system").map(message => contentText(message.content as ProviderContent)),
     ].filter((value): value is string => value !== undefined && value.trim() !== "").join("\n\n");
     const assembledUser = requestUserMessage(assembled as readonly ProviderMessage[]);
-    const bridge = createSubpolarPiProviderBridge({
+    const nativeResolution = options.resolveModel === undefined ? undefined : await options.resolveModel(request);
+    const bridge = nativeResolution === undefined ? createSubpolarPiProviderBridge({
       providerId: options.providerId ?? "subpolar",
       ...(options.providerName === undefined ? {} : { providerName: options.providerName }),
       modelId: request.model,
       chatProvider: provider,
-    });
+    }) : undefined;
     const result = await executeSubpolarPiRun({
       ...run,
-      model: bridge.model,
-      nativeProviders: [bridge.provider],
+      model: nativeResolution?.model ?? bridge!.model,
+      ...(nativeResolution === undefined ? { nativeProviders: [bridge!.provider] } : { modelRuntime: nativeResolution.modelRuntime }),
       tools,
       systemPrompt: systemPrompt || undefined,
       history: assembledUser.history,

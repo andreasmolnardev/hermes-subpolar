@@ -187,6 +187,48 @@ test("opt-in Pi executor commits the final assistant result through gateway pers
   assert.equal(fake.writes[0]?.messages[0]?.content, "safe");
 });
 
+test("opt-in Pi executor routes ask-policy tools through the gateway approval callback", async () => {
+  let providerCalls = 0;
+  let approvalCalls = 0;
+  let executed = false;
+  const result = await createGateway({
+    piExecutor: createGatewayPiExecutor({ cwd: mkdtempSync(join(tmpdir(), "subpolar-pi-cwd-")), agentDir: mkdtempSync(join(tmpdir(), "subpolar-pi-agent-")) })
+  }).executeRequest({
+    model: "pi-model",
+    requestId: "pi-approval-request",
+    sessionId: "pi-approval-session",
+    messages: [{ role: "user", content: "write it" }],
+    toolPolicies: [{
+      name: "write",
+      description: "Write data",
+      inputSchema: { type: "object" },
+      source: "test",
+      executable: { handle: createToolHandle(async () => { executed = true; return "written"; }) },
+      policy: "ask"
+    }],
+    approvalPolicy: async approval => {
+      approvalCalls += 1;
+      assert.equal(approval.call.name, "write");
+      return "allow";
+    }
+  }, {
+    async complete(request) {
+      providerCalls += 1;
+      if (request.messages.some(message => message.role === "tool")) return completion;
+      return {
+        message: { role: "assistant", content: "", toolCalls: [{ id: "approval-call", name: "write", arguments: "{}" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        finishReason: "tool_call"
+      };
+    }
+  });
+
+  assert.equal(result.message.content, "safe");
+  assert.equal(executed, true);
+  assert.equal(approvalCalls, 1);
+  assert.equal(providerCalls, 2);
+});
+
 test("unsupported executable references fail before provider effects", async () => {
   let providerCalls = 0;
   await assert.rejects(() => createGateway().executeRequest({

@@ -61,6 +61,9 @@
   authoritative.
 - Added authenticated server coverage for the opt-in Pi path, including its
   normal HTTP chat dispatch and persisted session boundary.
+- Enforced Pi-path session setup and approval routing at the executor boundary,
+  with coverage proving `ask` tools cannot execute without the gateway approval
+  decision.
 
 ## Repository Residue Cleanup
 

@@ -16,6 +16,7 @@ import {
   type HarnessPersistedUsage,
   type HarnessRecoveredToolCall,
   type HarnessResult,
+  type HarnessSessionSetup,
   type HarnessTool,
   type HarnessToolResult,
   type SubpolarPiEvent,
@@ -199,6 +200,14 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
       agentDir: options.agentDir,
     };
     const signal = request.signal ?? new AbortController().signal;
+    const sessionSetup: HarnessSessionSetup = {
+      sessionId: request.sessionId,
+      model: request.model,
+      runtime: { runtimeVersion: "pi", schemaVersion: 1 },
+      createdAt: new Date().toISOString(),
+    };
+    await request.persistence?.ensureSession?.(request.sessionId, sessionSetup);
+    await request.sessionRepository?.ensureSession?.(request.sessionId, sessionSetup);
     const inboundPreparer = request.persistence as (typeof request.persistence & {
       prepareInbound?: (sessionId: string, requestId: string, model: string, messages: readonly ProviderMessage[]) => Promise<void>;
     }) | undefined;

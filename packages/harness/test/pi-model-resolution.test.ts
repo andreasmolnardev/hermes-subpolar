@@ -58,13 +58,25 @@ describe("native Pi model resolution", () => {
 		expect(reads).toBe(1);
 	});
 
-	test("fails closed for unsupported providers and missing models", async () => {
+	test("materializes configured model IDs and endpoints through the Pi provider seam", async () => {
+		const result = await resolveSubpolarPiModel({
+			hermesProviderId: "openai-api",
+			modelId: "local-model",
+			baseUrl: "https://local-provider.example/v1",
+			credentials: credentials(),
+		});
+
+		expect(result.model.id).toBe("local-model");
+		expect(result.model.provider).toBe("openai");
+		expect(result.model.api).toBe("openai-completions");
+		expect(result.model.baseUrl).toBe("https://local-provider.example/v1");
+	});
+
+	test("fails closed for unsupported providers while accepting configured model IDs", async () => {
 		await expect(resolveSubpolarPiModel({ hermesProviderId: "custom", modelId: "gpt-4.1-mini", credentials: credentials() })).rejects.toMatchObject<Partial<SubpolarPiModelResolutionError>>({
 			code: "unsupported_provider",
 		});
-		await expect(resolveSubpolarPiModel({ hermesProviderId: "openai-api", modelId: "not-a-catalog-model", credentials: credentials() })).rejects.toMatchObject<Partial<SubpolarPiModelResolutionError>>({
-			code: "model_not_found",
-			piProviderId: "openai",
-		});
+		const configured = await resolveSubpolarPiModel({ hermesProviderId: "openai-api", modelId: "not-a-catalog-model", credentials: credentials() });
+		expect(configured.model.id).toBe("not-a-catalog-model");
 	});
 });

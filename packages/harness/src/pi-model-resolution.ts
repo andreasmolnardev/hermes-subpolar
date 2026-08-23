@@ -93,6 +93,7 @@ export interface CreateSubpolarPiModelRuntimeOptions {
 export interface ResolveSubpolarPiModelOptions extends CreateSubpolarPiModelRuntimeOptions {
 	readonly hermesProviderId: string;
 	readonly modelId: string;
+	readonly baseUrl?: string;
 }
 
 export interface SubpolarPiModelResolution {
@@ -102,10 +103,57 @@ export interface SubpolarPiModelResolution {
 	readonly piProviderId: string;
 }
 
+const HERMES_NATIVE_API: Readonly<Record<string, Api>> = {
+	"openai-api": "openai-completions",
+};
+
+function modelDefinition(
+	model: Model<Api>,
+	modelId: string,
+	baseUrl: string | undefined,
+	api: Api | undefined,
+): NonNullable<Parameters<ModelRuntime["registerProvider"]>[1]["models"]>[number] {
+	return {
+		id: modelId,
+		name: modelId,
+		api: api ?? model.api,
+		baseUrl: baseUrl ?? model.baseUrl,
+		reasoning: model.reasoning,
+		...(model.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: model.thinkingLevelMap }),
+		input: model.input,
+		cost: model.cost,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		...(model.samplingParams === undefined ? {} : { samplingParams: model.samplingParams }),
+		...(model.compat === undefined ? {} : { compat: model.compat }),
+	};
+}
+
+function resolveConfiguredModel(
+	runtime: ModelRuntime,
+	providerId: string,
+	modelId: string,
+	baseUrl: string | undefined,
+	api: Api | undefined,
+): Model<Api> | undefined {
+	const current = runtime.getModel(providerId, modelId);
+	const provider = runtime.getProvider(providerId);
+	if (provider === undefined) return current;
+	const endpoint = baseUrl?.trim() || undefined;
+	if (current !== undefined && endpoint === undefined && api === undefined) return current;
+	const template = current ?? provider.getModels()[0];
+	if (template === undefined) return undefined;
+	const definition = modelDefinition(template, modelId, endpoint, api);
+	runtime.registerProvider(providerId, {
+		models: [definition],
+	});
+	return runtime.getModel(providerId, modelId);
+}
+
 /** Resolve the explicit Hermes provider mapping without same-name fallback. */
 export function mapHermesProviderToPi(hermesProviderId: string): string | undefined {
 	const normalized = hermesProviderId.trim().toLowerCase();
-	const mapped = HERMES_TO_PI_PROVIDER_ID[normalized];
+	const mapped = (HERMES_TO_PI_PROVIDER_ID as Readonly<Record<string, string | null>>)[normalized];
 	return mapped ?? undefined;
 }
 
@@ -136,7 +184,7 @@ export async function resolveSubpolarPiModel(
 	}
 
 	const modelRuntime = await createSubpolarPiModelRuntime(options);
-	const model = modelRuntime.getModel(piProviderId, options.modelId);
+	const model = resolveConfiguredModel(modelRuntime, piProviderId, options.modelId, options.baseUrl, HERMES_NATIVE_API[hermesProviderId]);
 	if (!model) {
 		throw new SubpolarPiModelResolutionError("model_not_found", hermesProviderId, options.modelId, piProviderId);
 	}

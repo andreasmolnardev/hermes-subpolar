@@ -2,6 +2,9 @@
 
 ## Embedded Pi Runtime
 
+- Added `PI-MIGRATION-PLAN.md` as the authoritative Pi-specific task tracker,
+  with package ownership, completed baseline, remaining parity/security gates,
+  and package-batch release criteria.
 - Vendored the pinned Pi `0.84.2` runtime closure from commit
   `c49906ec77788625aacbdc53ebca6fbe65bd20f5` under `packages/pi-*`:
   agent core, AI, client, coding-agent, protocol, telemetry, and TUI.

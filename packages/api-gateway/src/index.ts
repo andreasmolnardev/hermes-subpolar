@@ -165,6 +165,9 @@ export type GatewayPiExecutor = (
   eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
 ) => Promise<HarnessResult>;
 
+export { createGatewayPiExecutor } from "./pi-executor";
+export type { GatewayPiExecutorOptions } from "./pi-executor";
+
 export type GatewayOptions = {
   readonly sessionRepository?: GatewaySessionRepository;
   readonly persistence?: HarnessPersistencePort;

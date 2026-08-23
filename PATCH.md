@@ -47,6 +47,14 @@
 - Passed the selected `ChatProvider` into the optional gateway Pi executor so
   application-owned Pi adapters can bridge the request without process-global
   provider state.
+- Added an opt-in gateway Pi executor that converts resolved descriptors into
+  Subpolar-owned Pi tools, routes approvals and execution through the existing
+  gateway callbacks, applies assembled system context through the controlled
+  resource loader, and projects text/reasoning/tool/terminal events back to the
+  gateway event contract.
+- Allowed explicitly injected Pi custom tools while keeping Pi built-in tools
+  disabled by default; the legacy provider loop and durable gateway persistence
+  remain the default until parity migration is complete.
 
 ## Repository Residue Cleanup
 

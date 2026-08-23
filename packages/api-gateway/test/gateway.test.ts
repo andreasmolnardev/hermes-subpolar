@@ -6,6 +6,7 @@ import { test } from "bun:test";
 
 import {
   createGateway,
+  createGatewayPiExecutor,
   executeRequest,
   normalizeGatewayRequest,
   GatewayTurnLeaseError,
@@ -100,6 +101,44 @@ test("gateway can route a normalized request through the staged Pi executor seam
   assert.equal(providerCalls, 0);
   assert.equal(seenModel, "pi-model");
   assert.equal(seenProvider !== undefined, true);
+});
+
+test("opt-in Pi executor runs resolved descriptor tools through the gateway contract", async () => {
+  let providerCalls = 0;
+  let executed = false;
+  const events: GatewayProtocolEvent[] = [];
+  const result = await createGateway({
+    piExecutor: createGatewayPiExecutor({ cwd: mkdtempSync(join(tmpdir(), "subpolar-pi-cwd-")), agentDir: mkdtempSync(join(tmpdir(), "subpolar-pi-agent-")) })
+  }).executeRequest({
+    model: "pi-model",
+    requestId: "pi-request",
+    sessionId: "pi-session",
+    messages: [{ role: "user", content: "write it" }],
+    eventSink: event => events.push(event),
+    toolPolicies: [{
+      name: "write",
+      description: "Write data",
+      inputSchema: { type: "object" },
+      source: "test",
+      executable: { handle: createToolHandle(async () => { executed = true; return "written"; }) },
+      policy: "allow"
+    }]
+  }, {
+    async complete(request) {
+      providerCalls += 1;
+      if (request.messages.some(message => message.role === "tool")) return completion;
+      return {
+        message: { role: "assistant", content: "", toolCalls: [{ id: "write-call", name: "write", arguments: "{}" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        finishReason: "tool_call"
+      };
+    }
+  });
+
+  assert.equal(result.message.content, "safe");
+  assert.equal(executed, true);
+  assert.equal(providerCalls, 2);
+  assert.deepEqual(events.map(event => event.type).filter(type => ["message.start", "tool.start", "tool.complete", "message.complete"].includes(type)), ["message.start", "tool.start", "tool.complete", "message.complete"]);
 });
 
 test("unsupported executable references fail before provider effects", async () => {

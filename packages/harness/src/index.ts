@@ -81,6 +81,19 @@ export type { SubpolarCredentialBackend } from "./pi-credentials";
 export { hydratePiSession, toPiMessages } from "./pi-messages";
 export { createSubpolarPiProviderBridge, piAssistantMessageToProviderResult } from "./pi-provider-bridge";
 export type { SubpolarPiProviderBridge, SubpolarPiProviderBridgeOptions } from "./pi-provider-bridge";
+export {
+  HERMES_TO_PI_PROVIDER_ID,
+  createSubpolarPiModelRuntime,
+  mapHermesProviderToPi,
+  resolveSubpolarPiModel,
+  SubpolarPiModelResolutionError
+} from "./pi-model-resolution";
+export type {
+  CreateSubpolarPiModelRuntimeOptions,
+  ResolveSubpolarPiModelOptions,
+  SubpolarPiModelResolution,
+  SubpolarPiModelResolutionErrorCode
+} from "./pi-model-resolution";
 
 export {
   MAX_RETRY_ATTEMPTS,

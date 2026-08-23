@@ -11,8 +11,13 @@ import {
   piAssistantMessageToProviderResult,
   toSubpolarPiTool,
   type HarnessApprovalRequest,
+  type HarnessAtomicTurnWrite,
+  type HarnessPersistedMessageDraft,
+  type HarnessPersistedUsage,
+  type HarnessRecoveredToolCall,
   type HarnessResult,
   type HarnessTool,
+  type HarnessToolResult,
   type SubpolarPiEvent,
   type SubpolarPiRunContext,
 } from "harness";
@@ -65,6 +70,79 @@ function toolResult(value: { readonly content?: unknown; readonly isError?: bool
     details: {},
     ...(value.isError === true ? { isError: true as const } : {}),
   };
+}
+
+function harnessToolResult(value: { readonly content?: unknown; readonly isError?: boolean }): HarnessToolResult {
+  return {
+    content: typeof value.content === "string" ? value.content : resultText(value.content),
+    ...(value.isError === true ? { isError: true } : {}),
+  };
+}
+
+function persistedAssistant(request: GatewayNormalizedRequest, result: ProviderResult, recordedAt: string): HarnessPersistedMessageDraft {
+  const finishReason = result.finishReason === undefined || result.finishReason === "unknown"
+    ? undefined
+    : result.finishReason === "tool_call"
+      ? "tool_calls" as const
+      : result.finishReason === "cancelled"
+        ? "error" as const
+        : result.finishReason;
+  return {
+    id: `${request.requestId}:assistant`,
+    role: "assistant",
+    content: result.message.content as HarnessPersistedMessageDraft["content"],
+    createdAt: recordedAt,
+    ...(result.message.reasoning === undefined ? {} : { reasoning: result.message.reasoning }),
+    ...(result.message.toolCalls === undefined ? {} : { toolCalls: result.message.toolCalls }),
+    ...(finishReason === undefined ? {} : { finishReason }),
+    ...(result.usage === undefined ? {} : { usage: result.usage }),
+  };
+}
+
+async function checkpointPiTool(
+  request: GatewayNormalizedRequest,
+  call: { readonly id: string; readonly name: string; readonly arguments: string },
+  phase: "before-tool" | "tool-completed",
+  result: HarnessToolResult | undefined,
+): Promise<void> {
+  if (request.persistence?.checkpoint === undefined) return;
+  const completedToolCalls: readonly HarnessRecoveredToolCall[] = result === undefined ? [] : [{ call, result }];
+  await request.persistence.checkpoint({
+    requestId: request.requestId,
+    sessionId: request.sessionId,
+    turnId: request.requestId,
+    call,
+    phase,
+    pendingToolCallIds: phase === "before-tool" ? [call.id] : [],
+    completedToolCalls,
+    ...(result === undefined ? {} : { result }),
+    at: new Date().toISOString(),
+  });
+}
+
+async function persistPiResult(request: GatewayNormalizedRequest, result: ProviderResult): Promise<void> {
+  const repository = request.persistence ?? request.sessionRepository;
+  if (repository?.commitTurn === undefined) return;
+  const recordedAt = new Date().toISOString();
+  const existing = repository.listMessages === undefined ? undefined : await repository.listMessages(request.sessionId);
+  const usage: HarnessPersistedUsage = {
+    schemaVersion: 1,
+    sessionId: request.sessionId,
+    recordedAt,
+    usage: result.usage,
+    messageId: `${request.requestId}:assistant`,
+  };
+  const write: HarnessAtomicTurnWrite = {
+    sessionId: request.sessionId,
+    messages: [persistedAssistant(request, result, recordedAt)],
+    ...(existing === undefined ? {} : { expectedNextSequence: existing.length }),
+    usage,
+  };
+  if (repository.transaction !== undefined) {
+    await repository.transaction(transaction => transaction.commitTurn(write));
+  } else {
+    await repository.commitTurn(write);
+  }
 }
 
 function gatewayBase(request: GatewayNormalizedRequest, id: string): GatewayProjectionBase {
@@ -121,6 +199,10 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
       agentDir: options.agentDir,
     };
     const signal = request.signal ?? new AbortController().signal;
+    const inboundPreparer = request.persistence as (typeof request.persistence & {
+      prepareInbound?: (sessionId: string, requestId: string, model: string, messages: readonly ProviderMessage[]) => Promise<void>;
+    }) | undefined;
+    await inboundPreparer?.prepareInbound?.(request.sessionId, request.requestId, request.model, request.messages);
     const descriptors = request.tools.filter(isToolDescriptor);
     const tools = descriptors.map(descriptor => toSubpolarPiTool(
       descriptor,
@@ -129,6 +211,7 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
         const argumentsValue = objectArguments(toolRequest.params);
         if (request.toolExecutor !== undefined) {
           const call = { id: toolRequest.toolCallId, name: descriptor.name, arguments: JSON.stringify(argumentsValue) };
+          await checkpointPiTool(request, call, "before-tool", undefined);
           const result = await request.toolExecutor({
             requestId: request.requestId,
             sessionId: request.sessionId,
@@ -136,11 +219,17 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
             arguments: argumentsValue,
             signal,
           });
-          return toolResult(result);
+          const persisted = harnessToolResult(result);
+          await checkpointPiTool(request, call, "tool-completed", persisted);
+          return toolResult(persisted);
         }
         if ("handle" in descriptor.executable && descriptor.executable.handle !== undefined) {
+          const call = { id: toolRequest.toolCallId, name: descriptor.name, arguments: JSON.stringify(argumentsValue) };
+          await checkpointPiTool(request, call, "before-tool", undefined);
           const value = await descriptor.executable.handle.execute(argumentsValue, signal);
-          return toolResult({ content: value });
+          const persisted = harnessToolResult({ content: value });
+          await checkpointPiTool(request, call, "tool-completed", persisted);
+          return toolResult(persisted);
         }
         return toolResult({ content: `No executable handle for tool ${descriptor.name}`, isError: true });
       },
@@ -190,6 +279,8 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
         if (eventSink !== undefined) void projectPiEvent(request, event, eventSink, () => `pi-${++eventSequence}`);
       },
     });
-    return piAssistantMessageToProviderResult(result.message?.role === "assistant" ? result.message : undefined);
+    const providerResult = piAssistantMessageToProviderResult(result.message?.role === "assistant" ? result.message : undefined);
+    await persistPiResult(request, providerResult);
+    return providerResult;
   };
 }

@@ -141,6 +141,52 @@ test("opt-in Pi executor runs resolved descriptor tools through the gateway cont
   assert.deepEqual(events.map(event => event.type).filter(type => ["message.start", "tool.start", "tool.complete", "message.complete"].includes(type)), ["message.start", "tool.start", "tool.complete", "message.complete"]);
 });
 
+test("opt-in Pi executor commits the final assistant result through gateway persistence", async () => {
+  const fake = fakeRepository();
+  const checkpoints: string[] = [];
+  const persistence = {
+    ...fake.repository,
+    checkpoint: async (checkpoint: { phase: string }) => checkpoints.push(checkpoint.phase),
+  };
+  let providerCalls = 0;
+  let executed = false;
+  const result = await createGateway({
+    piExecutor: createGatewayPiExecutor({ cwd: mkdtempSync(join(tmpdir(), "subpolar-pi-cwd-")), agentDir: mkdtempSync(join(tmpdir(), "subpolar-pi-agent-")) })
+  }).executeRequest({
+    model: "pi-model",
+    requestId: "pi-persist-request",
+    sessionId: "restart-session",
+    messages: [{ role: "user", content: "hello" }],
+    toolPolicies: [{
+      name: "write",
+      description: "Write data",
+      inputSchema: { type: "object" },
+      source: "test",
+      executable: { handle: createToolHandle(async () => { executed = true; return "written"; }) },
+      policy: "allow"
+    }],
+    persistence,
+  }, {
+    async complete(request) {
+      providerCalls += 1;
+      if (request.messages.some(message => message.role === "tool")) return completion;
+      return {
+        message: { role: "assistant", content: "", toolCalls: [{ id: "write-call", name: "write", arguments: "{}" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        finishReason: "tool_call"
+      };
+    }
+  });
+
+  assert.equal(result.message.content, "safe");
+  assert.equal(executed, true);
+  assert.equal(providerCalls, 2);
+  assert.deepEqual(checkpoints, ["before-tool", "tool-completed"]);
+  assert.equal(fake.writes.length, 1);
+  assert.equal(fake.writes[0]?.messages[0]?.role, "assistant");
+  assert.equal(fake.writes[0]?.messages[0]?.content, "safe");
+});
+
 test("unsupported executable references fail before provider effects", async () => {
   let providerCalls = 0;
   await assert.rejects(() => createGateway().executeRequest({

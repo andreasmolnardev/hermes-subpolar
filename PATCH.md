@@ -55,6 +55,10 @@
 - Allowed explicitly injected Pi custom tools while keeping Pi built-in tools
   disabled by default; the legacy provider loop and durable gateway persistence
   remain the default until parity migration is complete.
+- Added Pi-path persistence projection: inbound preparation, before/after tool
+  checkpoints, and the final assistant result/usage are written through the
+  existing gateway persistence port without making Pi's JSONL session state
+  authoritative.
 
 ## Repository Residue Cleanup
 

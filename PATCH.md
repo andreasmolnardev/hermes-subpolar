@@ -59,6 +59,8 @@
   checkpoints, and the final assistant result/usage are written through the
   existing gateway persistence port without making Pi's JSONL session state
   authoritative.
+- Added authenticated server coverage for the opt-in Pi path, including its
+  normal HTTP chat dispatch and persisted session boundary.
 
 ## Repository Residue Cleanup
 

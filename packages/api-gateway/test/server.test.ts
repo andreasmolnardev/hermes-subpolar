@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { test } from "bun:test";
 
 import { startApiGatewayServer } from "../src/server.ts";
+import { createGatewayPiExecutor } from "../src/index.ts";
 
 function sessionCookies(response: Response): string {
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
@@ -104,6 +105,46 @@ test("server authenticates users before dispatching owned chat turns", async () 
     const logout = await fetch(`${server.url}v1/auth/logout`, { method: "POST", headers: { cookie: rotatedCookies, "x-csrf-token": csrf(rotatedCookies), origin: new URL(server.url).origin } });
     assert.equal(logout.status, 200);
     assert.equal((await fetch(`${server.url}v1/me`, { headers: { cookie: rotatedCookies } })).status, 401);
+  } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("server can dispatch an authenticated chat turn through the opt-in Pi executor", async () => {
+  const dataDir = testDataDir();
+  let providerCalls = 0;
+  const server = startApiGatewayServer({
+    port: 0,
+    dataDir,
+    provider: {
+      async complete() {
+        providerCalls += 1;
+        return { message: { role: "assistant", content: "pi response" }, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } };
+      }
+    },
+    piExecutor: createGatewayPiExecutor({ cwd: dataDir, agentDir: join(dataDir, "pi-agent") }),
+  });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ username: "pi-user", password: "correct horse" }),
+    });
+    const cookies = sessionCookies(bootstrap);
+    const response = await fetch(`${server.url}v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin },
+      body: JSON.stringify({ model: "test", sessionId: "pi-server-session", messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      message: { role: "assistant", content: "pi response" },
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, cachedInputTokens: 0, cacheCreationInputTokens: 0 },
+      finishReason: "stop",
+    });
+    assert.equal(providerCalls, 1);
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "bun:test";
 import { startApiGatewayServer } from "../src/server.ts";
+import { createGatewayPiExecutor } from "../src/index.ts";
 import { AutomationRunError, AutomationScheduler, nextAutomationRun, normalizeAutomationSchedule } from "../src/automation.ts";
 import { SQLiteIdentityRepository } from "data-layer";
 import { createToolHandle } from "tool-resolver";
@@ -191,6 +192,109 @@ test("fail-mode automation marks interactive approval as needs_attention", async
       return runs[0]?.status === "completed" ? runs[0] : undefined;
     });
     assert.equal(executed, true);
+  } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi-backed automations persist success and fail closed for approval and provider failure", { timeout: 30_000 }, async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "subpolar-automation-pi-"));
+  let providerCalls = 0;
+  let piExecutorCalls = 0;
+  let executed = false;
+  const piRuntimeExecutor = createGatewayPiExecutor({ cwd: dataDir, agentDir: join(dataDir, "pi-agent") });
+  const piExecutor = async (
+    request: Parameters<typeof piRuntimeExecutor>[0],
+    provider: Parameters<typeof piRuntimeExecutor>[1],
+    eventSink: Parameters<typeof piRuntimeExecutor>[2],
+  ) => {
+    piExecutorCalls += 1;
+    if (request.messages.some(message => message.role === "user" && message.content === "Pi provider failure")) throw new Error("Pi provider unavailable");
+    return piRuntimeExecutor(request, provider, eventSink);
+  };
+  const server = startApiGatewayServer({
+    port: 0,
+    dataDir,
+    automationPollMs: 100,
+    toolDefinitions: [{
+      name: "write",
+      capabilityId: "test.write",
+      description: "Write data",
+      inputSchema: { type: "object" },
+      source: "test",
+      capabilities: { mutating: true },
+      executable: { handle: createToolHandle(async () => { executed = true; return "written"; }) },
+    }],
+    provider: {
+      async complete(request) {
+        providerCalls += 1;
+        const prompt = request.messages.find(message => message.role === "user")?.content;
+        if (prompt === "Pi provider failure") throw new Error("Pi provider unavailable");
+        if (prompt === "Pi approval" && !request.messages.some(message => message.role === "tool")) {
+          return { message: { role: "assistant", content: "", toolCalls: [{ id: "pi-approval-call", name: "write", arguments: "{}" }] }, finishReason: "tool_calls" };
+        }
+        return { message: { role: "assistant", content: "Pi automation complete" }, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } };
+      },
+    },
+    piExecutor,
+  });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ username: "pi-automation-owner", password: "correct horse" }) });
+    const cookie = cookies(bootstrap);
+    const headers = { "content-type": "application/json", cookie, "x-csrf-token": csrf(cookie), origin };
+    const project = await fetch(`${server.url}v1/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Pi automation project" }) });
+    const projectId = (await project.json() as { project: { id: string } }).project.id;
+    const agent = await fetch(`${server.url}v1/agents`, { method: "POST", headers, body: JSON.stringify({ projectId, name: "pi-runner", instructions: "Run Pi automation work.", icon: "bot" }) });
+    const agentId = (await agent.json() as { agent: { id: string } }).agent.id;
+    const agentUpdate = await fetch(`${server.url}v1/agents/${agentId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ capabilities: [{ capabilityId: "test.write", enabled: true }], permissions: [{ capabilityId: "test.write", policy: "allow" }] }),
+    });
+    assert.equal(agentUpdate.status, 200);
+
+    const create = async (name: string, prompt: string, permissionMode: "pre-approved" | "fail") => {
+      const response = await fetch(`${server.url}v1/automations`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name, schedule: { kind: "once", at: new Date(Date.now() + 60_000).toISOString(), timezone: "UTC" }, prompt, agentId, projectId, permissionMode }),
+      });
+      assert.equal(response.status, 201);
+      return (await response.json() as { automation: { id: string } }).automation.id;
+    };
+    const runAutomation = async (automationId: string) => {
+      const response = await fetch(`${server.url}v1/automations/${automationId}/run`, { method: "POST", headers });
+      assert.equal(response.status, 202);
+    };
+    const statusOf = async (automationId: string, status: string) => eventually(async () => {
+      const response = await fetch(`${server.url}v1/automations/${automationId}/runs`, { headers: { cookie } });
+      const runs = (await response.json() as { runs: readonly { status: string; sessionId: string; error?: string }[] }).runs;
+      const run = runs[0];
+      return run?.status === status ? run : undefined;
+    });
+
+    const successAutomation = await create("Pi success", "Pi success", "pre-approved");
+    await runAutomation(successAutomation);
+    const successRun = await statusOf(successAutomation, "completed");
+    const transcript = await fetch(`${server.url}v1/sessions/${encodeURIComponent(successRun.sessionId)}`, { headers: { cookie } });
+    assert.equal(transcript.status, 200);
+    const transcriptBody = await transcript.json() as { messages: readonly { role: string; content: unknown }[] };
+    assert.ok(transcriptBody.messages.some(message => message.role === "assistant" && message.content === "Pi automation complete"));
+
+    const approvalAutomation = await create("Pi approval", "Pi approval", "fail");
+    await runAutomation(approvalAutomation);
+    const approvalRun = await statusOf(approvalAutomation, "needs_attention");
+    assert.match(approvalRun.error ?? "", /Permission required/);
+    assert.equal(executed, false);
+
+    const failureAutomation = await create("Pi failure", "Pi provider failure", "pre-approved");
+    await runAutomation(failureAutomation);
+    const failureRun = await statusOf(failureAutomation, "failed");
+    assert.match(failureRun.error ?? "", /Pi provider unavailable/);
+    assert.ok(providerCalls >= 3);
+    assert.equal(piExecutorCalls, 3);
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });

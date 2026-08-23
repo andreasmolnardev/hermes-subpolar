@@ -72,6 +72,10 @@
   while retaining the explicit `piExecutor` option for custom runtimes and
   tests. Fixed optional usage serialization so Pi results remain valid JSON for
   idempotency replay.
+- Added a fail-closed native Pi model-resolution seam with explicit Hermes-to-Pi
+  provider mappings and a network-disabled, Subpolar-backed `ModelRuntime`.
+- Added automation coverage proving Pi-backed success persistence, approval
+  failure, and provider failure behavior through the normal automation runner.
 
 ## Repository Residue Cleanup
 

@@ -11,6 +11,8 @@
   "scripts": {
     "postinstall": "echo 'Subpolar TypeScript runtime ready. Run: bun run serve'",
     "check:boundaries": "bun scripts/check-package-boundaries.mjs",
+    "check:pi": "bun scripts/check-pi-vendor.mjs",
+    "test:pi": "bun test scripts/check-pi-vendor.test.mjs",
     "test:boundaries": "bun test scripts/check-package-boundaries.test.mjs",
     "check:runtime": "bun run --filter './packages/*' check",
     "check:monorepo": "bun run check:boundaries && bun run test:boundaries && bun run check:runtime",

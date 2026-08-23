@@ -123,7 +123,7 @@ package       boundary checks passing
 
 - [x] Record the upstream commit, imported package closure, and local patch
   policy.
-- [ ] Add a repeatable CI check that the imported package list and pinned
+- [x] Add a repeatable CI check that the imported package list and pinned
   commit agree with `scripts/pi/PINNED_COMMIT` and `scripts/pi/README.md`.
 - [ ] Define the update procedure: import, Pi package tests, Subpolar tests,
   security tests, review of local patches, then one Pi package batch commit.

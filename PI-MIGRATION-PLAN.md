@@ -182,8 +182,10 @@ tests with no duplicate side effects or terminal events.
   server's Subpolar credential backend and provider ID.
 - [x] Map native resolution errors to stable API errors such as
   `provider_not_configured`, `unsupported_provider`, and `model_not_found`.
-- [ ] Add provider behavior fixtures for streaming, usage, reasoning,
+- [~] Add provider behavior fixtures for streaming, usage, reasoning,
   credentials, custom endpoints, errors, cancellation, and multimodal input.
+  Native OpenAI streaming/usage, endpoint, credential, and unsupported-error
+  fixtures are green; the remaining advertised-provider matrix is pending.
 
 Exit gate: every advertised provider has a documented Pi transport, credential
 owner, endpoint behavior, and provider-specific behavior/security test.
@@ -237,8 +239,10 @@ lose a terminal result, expose a secret, or cross an owner/session boundary.
   explicit `legacyHarness` compatibility option for legacy contract tests.
 - [x] Ensure no production server route reaches the legacy provider loop when
   the native Pi path is configured.
-- [ ] Remove duplicate provider-loop, retry, token-budget, and message
-  normalization code only after the parity matrix is green.
+- [~] Remove duplicate provider-loop, retry, token-budget, and message
+  normalization code only after the parity matrix is green. Production uses
+  Pi by default and legacy code is explicit, but compatibility code remains
+  until the retained provider matrix and nested-run persistence gates close.
 - [x] Update public docs and package comments so “default” and “compatibility”
   have one unambiguous meaning.
 

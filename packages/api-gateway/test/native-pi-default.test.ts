@@ -32,6 +32,7 @@ test("default server dispatch uses native Pi ModelRuntime for a configured suppo
   const server = startApiGatewayServer({ port: 0, dataDir });
   const originalFetch = globalThis.fetch;
   let nativeCompletionsCalls = 0;
+  let nativeMessages: unknown;
   try {
     const origin = new URL(server.url).origin;
     const bootstrap = await originalFetch(`${server.url}v1/auth/bootstrap`, {
@@ -63,6 +64,7 @@ test("default server dispatch uses native Pi ModelRuntime for a configured suppo
       const url = String(input);
       if (url === "https://legacy-provider.invalid/v1/chat/completions") {
         nativeCompletionsCalls += 1;
+        nativeMessages = JSON.parse(String(init?.body ?? "{}")).messages;
         assert.equal(new Headers(init?.headers).get("authorization"), "Bearer native-test-key");
         return chatCompletionsSse();
       }
@@ -73,13 +75,27 @@ test("default server dispatch uses native Pi ModelRuntime for a configured suppo
     const completion = await fetch(`${server.url}v1/chat/completions`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: [
+          { type: "text", text: "hello" },
+          { type: "image_url", imageUrl: { url: "data:image/png;base64,AA==" } },
+        ] }],
+      }),
     });
     assert.equal(completion.status, 200);
     const result = await completion.json() as { message: { content: string }; usage?: { inputTokens?: number } };
     assert.equal(result.message.content, "native Pi");
     assert.equal(result.usage?.inputTokens, 3);
     assert.equal(nativeCompletionsCalls, 1);
+    const userMessage = (nativeMessages as readonly { readonly role: string; readonly content: unknown }[]).find(message => message.role === "user");
+    assert.deepEqual(userMessage, {
+      role: "user",
+      content: [
+        { type: "text", text: "hello" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+      ],
+    });
   } finally {
     globalThis.fetch = originalFetch;
     await server.shutdown();

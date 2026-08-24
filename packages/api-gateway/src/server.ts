@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createGateway, createGatewayPersistenceAdapter, createGatewayPiExecutor, type GatewayPiExecutor, type GatewayProtocolEvent } from "./index";
-import { type ChatProvider, type ProviderContent, type ProviderMessage } from "chat-provider-interface";
+import { type ChatProvider, type ProviderContent, type ProviderMessage, validateProviderRequest } from "chat-provider-interface";
 import { createHttpSpeechToTextProvider, createHttpTextToSpeechProvider, VoiceProviderError } from "voice-provider-interface";
 import {
   AuthenticationError,
@@ -121,14 +121,19 @@ function originAllowed(request: Request): boolean {
 
 function parseMessages(value: unknown): readonly ProviderMessage[] {
   if (!Array.isArray(value) || value.length === 0) throw new TypeError("messages must be a non-empty array");
-  return value.map(message => {
+  const messages = value.map(message => {
     if (typeof message !== "object" || message === null || Array.isArray(message)) throw new TypeError("message must be an object");
     const record = message as Record<string, unknown>;
-    if ((record.role !== "system" && record.role !== "user" && record.role !== "assistant") || typeof record.content !== "string") {
+    if (record.role !== "system" && record.role !== "user" && record.role !== "assistant") {
       throw new TypeError("message role and content are invalid");
     }
-    return { role: record.role, content: record.content };
+    if (typeof record.content !== "string" && !Array.isArray(record.content)) {
+      throw new TypeError("message role and content are invalid");
+    }
+    return { role: record.role, content: record.content as ProviderContent };
   });
+  validateProviderRequest({ model: "gateway", messages, tools: [], requestId: "gateway-chat" });
+  return messages;
 }
 
 function turnInput(value: unknown): TurnInput {

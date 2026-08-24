@@ -9,6 +9,7 @@ import {
   createSubpolarPiProviderBridge,
   executeSubpolarPiRun,
   piAssistantMessageToProviderResult,
+  toPiImages,
   toSubpolarPiTool,
   type HarnessApprovalRequest,
   type HarnessAtomicTurnWrite,
@@ -50,8 +51,8 @@ function contentText(content: ProviderContent): string {
   if (typeof content === "string") return content;
   return content.map(part => {
     if (part.type === "text" || part.type === "reasoning") return part.text;
-    return JSON.stringify(part);
-  }).join("\n");
+    return "";
+  }).filter(Boolean).join("\n");
 }
 
 function objectArguments(value: unknown): ProviderJsonObject {
@@ -168,6 +169,10 @@ function projectPiEvent(request: GatewayNormalizedRequest, event: SubpolarPiEven
       return Promise.resolve(sink({ ...base, type: "tool.completed", callId: event.toolCallId, result: toolResult({ content: event.result, isError: event.isError }) }));
     case "run.completed":
       return Promise.resolve(sink({ ...base, type: "terminal", outcome: "completed" }));
+    case "run.budget_exhausted":
+      return Promise.resolve(sink({ ...base, type: "terminal", outcome: "budget_exhausted", message: `Pi ${event.resource} budget exhausted at ${event.limit}.` }));
+    case "run.timed_out":
+      return Promise.resolve(sink({ ...base, type: "terminal", outcome: "budget_exhausted", message: "Pi run deadline exceeded." }));
     default:
       return Promise.resolve();
   }
@@ -182,12 +187,13 @@ function toolForApproval(descriptor: ToolDescriptor): HarnessTool {
   };
 }
 
-function requestUserMessage(messages: readonly ProviderMessage[]): { history: readonly ProviderMessage[]; userMessage: string } {
+function requestUserMessage(messages: readonly ProviderMessage[]): { history: readonly ProviderMessage[]; userMessage: string; userImages: ReturnType<typeof toPiImages> } {
   const lastUser = [...messages].map((message, index) => ({ message, index })).reverse().find(entry => entry.message.role === "user");
   if (lastUser === undefined) throw new TypeError("Pi execution requires a user message");
   return {
     history: messages.slice(0, lastUser.index),
     userMessage: contentText(lastUser.message.content),
+    userImages: toPiImages(lastUser.message.content, `messages[${lastUser.index}].content`),
   };
 }
 
@@ -295,7 +301,11 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
         systemPrompt: systemPrompt || undefined,
         history: assembledUser.history,
         userMessage: assembledUser.userMessage,
+        userImages: assembledUser.userImages,
         signal,
+        ...(request.budgets === undefined ? {} : { budgets: request.budgets }),
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+        ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
         onEvent: enqueueEvent,
       });
     } catch (error) {

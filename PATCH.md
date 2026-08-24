@@ -2,6 +2,22 @@
 
 ## Embedded Pi Runtime
 
+- Added bounded `spawn_agent` as a Subpolar-owned Pi custom-tool primitive:
+  child Agent resolution, authorization, deadline clamping, cancellation,
+  recursive privilege stripping, and parent/child event correlation are
+  covered by the harness suite.
+- Added opt-in Pi session-file hydration for process restart tests without
+  making Pi JSONL authoritative, plus model-change/session-state persistence
+  coverage.
+- Added a server-scoped native Pi `ModelRuntime` pool keyed by provider so
+  catalog initialization is reused while the credential backend remains
+  Subpolar-owned and provider-scoped.
+- Added traversal, symlink, sibling-project, stale-resolution, hidden-tool,
+  shell-interpreter, approval, and child-privilege security regressions.
+- Included all vendored Pi package manifests in the Docker dependency layer;
+  live Docker build/health verification remains host-permission blocked when
+  the invoking user cannot access `/var/run/docker.sock`.
+
 - Added `PI-MIGRATION-PLAN.md` as the authoritative Pi-specific task tracker,
   with package ownership, completed baseline, remaining parity/security gates,
   and package-batch release criteria.

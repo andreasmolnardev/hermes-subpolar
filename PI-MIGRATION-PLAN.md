@@ -99,9 +99,13 @@ Reference batches:
 Current verification baseline:
 
 ```text
-harness       85 tests passing
-api-gateway   43 tests passing
-package       boundary checks passing
+harness       101 tests passing
+api-gateway   50 tests passing
+data-layer    54 tests passing
+tool-runtime  25 tests passing
+tool-resolver 19 tests passing
+browser E2E   1 test passing
+package       boundary and vendored-Pi checks passing
 ```
 
 ## Workstreams and remaining gates
@@ -127,7 +131,9 @@ package       boundary checks passing
   commit agree with `scripts/pi/PINNED_COMMIT` and `scripts/pi/README.md`.
 - [x] Define the update procedure: import, Pi package tests, Subpolar tests,
   security tests, review of local patches, then one Pi package batch commit.
-- [ ] Keep changes to `pi-*` packages exceptional and independently reviewable.
+- [x] Keep changes to `pi-*` packages exceptional and independently reviewable;
+  the vendor integrity check and package-batched history keep local Pi changes
+  isolated from Subpolar adapters.
 
 Exit gate: a Pi pin update is reproducible, reviewable, and cannot silently
 replace Subpolar policy code.
@@ -144,10 +150,13 @@ replace Subpolar policy code.
 - [x] Tie every Pi session and model runtime to the request abort signal and
   server shutdown. Ensure no model/tool work survives a cancelled or closed
   server.
-- [ ] Decide and implement resumable-session hydration after process restart;
-  Pi JSONL must not become the authoritative database.
-- [ ] Persist compaction, model switching, steering/follow-up, and retry
-  metadata where the public Activity Panel needs them.
+- [x] Decide and implement resumable-session hydration after process restart;
+  an opt-in Pi session file hydrates once while SQLite/Subpolar remains the
+  authoritative database.
+- [~] Persist compaction, model switching, steering/follow-up, and retry
+  metadata where the public Activity Panel needs them. Pi model-change and
+  session-state entries are covered; steering/follow-up and retry-in-progress
+  records remain in-memory until the public event contract needs them.
 - [x] Make event delivery awaitable and ordered at the gateway boundary;
   fire-and-forget projection must not race persistence or terminal delivery.
 
@@ -168,8 +177,9 @@ tests with no duplicate side effects or terminal events.
   credentials, external-process credentials, Copilot variants, and provider
   environment semantics have explicit Pi mappings or unsupported results;
   server-level native credential wiring and provider-specific fixtures remain.
-- [ ] Share a server-level `ModelRuntime`/provider catalog where safe instead
-  of creating a model runtime for every request.
+- [x] Share a server-level `ModelRuntime`/provider catalog where safe instead
+  of creating a model runtime for every request; the pool remains scoped to the
+  server's Subpolar credential backend and provider ID.
 - [x] Map native resolution errors to stable API errors such as
   `provider_not_configured`, `unsupported_provider`, and `model_not_found`.
 - [ ] Add provider behavior fixtures for streaming, usage, reasoning,
@@ -191,7 +201,7 @@ owner, endpoint behavior, and provider-specific behavior/security test.
   `grep`, `find`, `ls`) with canonical workspace confinement and diff metadata.
 - [~] Finish explicitly gated `bash`/shell execution with timeout, output,
   cancellation, and approval coverage.
-- [ ] Add regression tests for traversal, symlink escape, cross-project
+- [x] Add regression tests for traversal, symlink escape, cross-project
   access, stale capability caches, hidden tools, approval bypass, and
   subagent/automation privilege escalation.
 
@@ -204,12 +214,14 @@ resolved descriptor, policy decision, workspace check, and bounded runtime.
 - [x] Persist inbound messages, tool before/after checkpoints, final assistant
   state, and usage through the gateway persistence adapter.
 - [x] Keep HTTP/SSE/WebSocket contracts outside Pi internals.
-- [~] Add a restart/resume integration test that hydrates a persisted session,
+- [x] Add a restart/resume integration test that hydrates a persisted session,
   continues it through Pi, and verifies message/tool correlation.
 - [~] Persist pending approvals with ownership, expiration, and reconnect
   behavior; verify a stale approval cannot execute a later run.
-- [ ] Verify event ordering across HTTP, SSE, and WebSocket clients, including
-  cancellation and transport disconnects.
+- [~] Verify event ordering across HTTP, SSE, and WebSocket clients, including
+  cancellation and transport disconnects. Gateway projection is ordered and
+  HTTP/WebSocket behavior is covered; one cross-transport browser fixture
+  remains.
 - [x] Add retention/redaction tests for provider payloads, credentials,
   tool arguments, tool output, reasoning, and error details.
 
@@ -241,11 +253,15 @@ observable, and removable.
   coverage includes the native endpoint/credential path, disconnect denial,
   and stale approval rejection.
 - [~] Implement `spawn_agent` as a Subpolar-controlled Pi custom tool with a
-  restricted Agent/Project capability set.
+  restricted Agent/Project capability set. The harness tool is production
+  typed and tested with deadlines, cancellation, authorization, recursive
+  privilege stripping, and parent/child event correlation; gateway wiring to
+  persisted child-run records remains.
 - [~] Link parent/child run IDs and events in persistence and Activity Panel
   projections.
 - [~] Add deadline, cancellation, budget, and privilege-isolation tests for
-  nested runs.
+  nested runs. Deadline, cancellation, and privilege isolation are covered;
+  nested cost/turn budget accounting remains.
 
 Exit gate: subagents cannot broaden parent privileges and automation execution
 cannot bypass the normal Agent, Project, tool, or credential policy.
@@ -257,14 +273,19 @@ cannot bypass the normal Agent, Project, tool, or credential policy.
   Pi types into `web-ui`.
 - [x] Add reconnect and pending-approval browser/protocol E2E coverage.
 - [~] Define health/readiness/shutdown behavior for active Pi sessions and
-  provider/model runtime initialization.
-- [ ] Verify isolated `SUBPOLAR_DATA_DIR`, workspace root confinement, clean
-  install, and container startup with the Pi closure.
-- [ ] Run the complete repository gates from the TypeScript migration plan:
+  provider/model runtime initialization. Health/readiness, abort, idempotent
+  shutdown, and native runtime pooling are covered; live container probing is
+  host-permission blocked.
+- [~] Verify isolated `SUBPOLAR_DATA_DIR`, workspace root confinement, clean
+  install, and container startup with the Pi closure. Workspace/data-path and
+  clean-install manifests are covered; Docker health probing is blocked by
+  the host Docker socket permissions.
+- [~] Run the complete repository gates from the TypeScript migration plan:
   `bun run check:monorepo`, `bun run typecheck:runtime`, `bun run test`, browser
   E2E, clean-install build, and Docker health checks.
-- [ ] Remove stale Python/provider/CLI claims only after the retained Bun
-  capability inventory is current.
+- [~] Remove stale Python/provider/CLI claims only after the retained Bun
+  capability inventory is current. Active runtime docs describe the Bun/Pi
+  path; historical migration records retain Python references intentionally.
 
 Exit gate: a clean install and container run expose only supported Bun/Pi
 behavior, with operational evidence for shutdown, health, persistence, and
@@ -288,13 +309,13 @@ rows as features are retained.
 | Multiple tool calls | `[x]` | harness/tool loop coverage |
 | Deny/approval | `[x]` | approval-boundary and automation tests |
 | Project cwd | `[x]` | Git/workspace security coverage |
-| Persisted resume | `[~]` | session repository coverage; process-restart Pi test pending |
-| Diff metadata | `[~]` | gateway Git diff exists; Pi edit patch projection pending |
+| Persisted resume | `[x]` | SQLite authority plus opt-in process-restart Pi hydration test |
+| Diff metadata | `[x]` | native Pi filesystem write/edit projection and gateway diff test |
 | Model override | `[x]` | native configured model resolution |
 | Agent/Project instructions | `[x]` | reusable instruction coverage |
 | Skills/resources | `[~]` | controlled loader exists; full active skill UX pending |
 | Automation invocation | `[x]` | Pi-backed automation coverage |
-| Subagents | `[ ]` | restricted child-session implementation and tests |
+| Subagents | `[~]` | restricted child-session/spawn-agent tests; gateway persistence wiring pending |
 
 ## Batch and commit policy
 

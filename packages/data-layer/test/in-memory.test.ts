@@ -306,6 +306,97 @@ describe("InMemorySessionRepository", () => {
     assert.equal(await repository.getMigrationState("session-1"), null);
   });
 
+  test("maintains the approval lifecycle across reconnects and retention", async () => {
+    const repository = new InMemorySessionRepository();
+    await repository.createSession(session());
+    await repository.createSession(session("session-2"));
+
+    await repository.savePendingApproval({
+      requestId: "approval-allow",
+      sessionId: "session-1",
+      callId: "call-allow",
+      toolName: "write",
+      arguments: { path: "allowed.txt" },
+      status: "pending",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await repository.savePendingApproval({
+      requestId: "approval-deny",
+      sessionId: "session-1",
+      callId: "call-deny",
+      toolName: "bash",
+      arguments: { command: "rm -rf" },
+      status: "pending",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    });
+    await repository.savePendingApproval({
+      requestId: "approval-other-session",
+      sessionId: "session-2",
+      callId: "call-other-session",
+      toolName: "read",
+      arguments: { path: "other.txt" },
+      status: "pending",
+      createdAt: "2026-01-01T00:00:02.000Z",
+      updatedAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    assert.deepEqual(
+      (await repository.listPendingApprovals("session-1")).map(({ requestId }) => requestId),
+      ["approval-allow", "approval-deny"],
+    );
+    assert.deepEqual(
+      (await repository.listPendingApprovals()).map(({ requestId }) => requestId),
+      ["approval-allow", "approval-deny", "approval-other-session"],
+    );
+
+    const allowed = await repository.resolvePendingApproval(
+      "approval-allow", "allow", "2026-01-01T00:00:03.000Z",
+    );
+    assert.deepEqual(allowed, {
+      requestId: "approval-allow",
+      sessionId: "session-1",
+      callId: "call-allow",
+      toolName: "write",
+      arguments: { path: "allowed.txt" },
+      status: "allowed",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+      resolvedAt: "2026-01-01T00:00:03.000Z",
+    });
+    assert.deepEqual(
+      await repository.resolvePendingApproval("approval-allow", "allow", "2026-01-01T00:00:04.000Z"),
+      allowed,
+    );
+    await assert.rejects(
+      repository.resolvePendingApproval("approval-allow", "deny"),
+      /already resolved: approval-allow/,
+    );
+
+    const denied = await repository.resolvePendingApproval(
+      "approval-deny", "deny", "2026-01-01T00:00:03.000Z",
+    );
+    assert.equal(denied.status, "denied");
+    assert.deepEqual(
+      await repository.resolvePendingApproval("approval-deny", "deny", "2026-01-01T00:00:04.000Z"),
+      denied,
+    );
+    assert.deepEqual(
+      (await repository.listPendingApprovals("session-1")).map(({ requestId }) => requestId),
+      [],
+    );
+    assert.deepEqual(
+      (await repository.listPendingApprovals()).map(({ requestId }) => requestId),
+      ["approval-other-session"],
+    );
+
+    const prune = await repository.prune("2026-01-09T00:00:00.000Z");
+    assert.deepEqual(prune, { idempotencyRecords: 0, approvalRecords: 0 });
+    assert.equal(await repository.getPendingApproval("approval-allow"), null);
+    assert.equal(await repository.getPendingApproval("approval-other-session"), null);
+  });
+
   test("round-trips structured content without compatibility conversion", async () => {
     const repository = new InMemorySessionRepository();
     await repository.createSession(session());

@@ -187,9 +187,9 @@ owner, endpoint behavior, and provider-specific behavior/security test.
   approval persistence; automation approval fails closed.
 - [x] Keep Pi built-ins disabled by default and validate project workspaces
   before native filesystem/Git execution.
-- [ ] Finish native filesystem tool integration (`read`, `write`, `edit`,
+- [~] Finish native filesystem tool integration (`read`, `write`, `edit`,
   `grep`, `find`, `ls`) with canonical workspace confinement and diff metadata.
-- [ ] Finish explicitly gated `bash`/shell execution with timeout, output,
+- [~] Finish explicitly gated `bash`/shell execution with timeout, output,
   cancellation, and approval coverage.
 - [ ] Add regression tests for traversal, symlink escape, cross-project
   access, stale capability caches, hidden tools, approval bypass, and
@@ -204,9 +204,9 @@ resolved descriptor, policy decision, workspace check, and bounded runtime.
 - [x] Persist inbound messages, tool before/after checkpoints, final assistant
   state, and usage through the gateway persistence adapter.
 - [x] Keep HTTP/SSE/WebSocket contracts outside Pi internals.
-- [ ] Add a restart/resume integration test that hydrates a persisted session,
+- [~] Add a restart/resume integration test that hydrates a persisted session,
   continues it through Pi, and verifies message/tool correlation.
-- [ ] Persist pending approvals with ownership, expiration, and reconnect
+- [~] Persist pending approvals with ownership, expiration, and reconnect
   behavior; verify a stale approval cannot execute a later run.
 - [ ] Verify event ordering across HTTP, SSE, and WebSocket clients, including
   cancellation and transport disconnects.
@@ -252,7 +252,7 @@ cannot bypass the normal Agent, Project, tool, or credential policy.
 
 ### 8. UI, operations, and release readiness
 
-- [ ] Render the projected model-step/tool timeline, reasoning state, diffs,
+- [~] Render the projected model-step/tool timeline, reasoning state, diffs,
   pending approvals, retries, compaction, and cancellation without importing
   Pi types into `web-ui`.
 - [ ] Add reconnect and pending-approval browser/protocol E2E coverage.

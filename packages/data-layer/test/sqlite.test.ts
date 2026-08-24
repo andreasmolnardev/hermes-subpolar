@@ -186,7 +186,37 @@ test("SQLite commitTurn atomically persists recovery metadata and usage", async 
       expect((await restarted.listUsage("session-1"))[0]?.usage.totalTokens).toBe(5);
       expect((await restarted.getCheckpoint("session-1", "checkpoint-1"))?.runtime.runtimeVersion)
         .toBe("test");
-      expect((await restarted.getMigrationState("session-1"))?.recovery?.status).toBe("interrupted");
+      const migration = await restarted.getMigrationState("session-1");
+      expect(migration?.recovery?.status).toBe("interrupted");
+      expect((await restarted.listMessages("session-1"))[0]?.sequence).toBe(0);
+
+      await restarted.appendMessages("session-1", [
+        message("tool output", {
+          role: "tool",
+          toolCallId: "call-1",
+          toolResult: { toolCallId: "call-1", content: "tool output", isError: false },
+        }),
+        message("resumed answer", { role: "assistant", finishReason: "stop" }),
+      ], { expectedNextSequence: 1 });
+      await restarted.saveMigrationState({
+        ...migration!,
+        updatedAt: "2026-08-05T00:00:03.000Z",
+        recovery: {
+          ...migration!.recovery!,
+          status: "recoverable",
+          pendingToolCallIds: [],
+          updatedAt: "2026-08-05T00:00:03.000Z",
+        },
+      });
+
+      expect((await restarted.listMessages("session-1")).map(({ sequence, content }) => ({ sequence, content })))
+        .toEqual([
+          { sequence: 0, content: "run" },
+          { sequence: 1, content: "tool output" },
+          { sequence: 2, content: "resumed answer" },
+        ]);
+      expect((await restarted.listToolResults("session-1"))[0]?.toolCallId).toBe("call-1");
+      expect((await restarted.getMigrationState("session-1"))?.recovery?.status).toBe("recoverable");
     } finally {
       restarted.close();
     }
@@ -389,26 +419,45 @@ test("SQLite replays completed idempotency records and rejects mismatches", asyn
   });
 });
 
-test("SQLite persists pending approvals, resolves them once, and prunes retained records", async () => {
+test("SQLite persists pending approvals, reconnects decisions, and prunes retained records", async () => {
   const paths = homePath();
+  const now = Date.now();
+  const firstCreatedAt = new Date(now - 100).toISOString();
+  const secondCreatedAt = new Date(now - 50).toISOString();
+  const firstResolvedAt = new Date(now).toISOString();
+  const secondResolvedAt = new Date(now + 1).toISOString();
   const first = new SQLiteSessionRepository({
-    path: paths.database, idempotencyRetentionMs: 1_000, approvalRetentionMs: 1_000,
+    path: paths.database, idempotencyRetentionMs: 60_000, approvalRetentionMs: 60_000,
   });
   try {
     await first.savePendingApproval({
       requestId: "approval-1", sessionId: "session-1", callId: "call-1", toolName: "write",
-      arguments: { path: "file" }, status: "pending", createdAt: "2026-08-05T00:00:00.000Z",
-      updatedAt: "2026-08-05T00:00:00.000Z",
+      arguments: { path: "file" }, status: "pending", createdAt: firstCreatedAt,
+      updatedAt: firstCreatedAt,
+    });
+    await first.savePendingApproval({
+      requestId: "approval-2", sessionId: "session-1", callId: "call-2", toolName: "bash",
+      arguments: { command: "dangerous" }, status: "pending", createdAt: secondCreatedAt,
+      updatedAt: secondCreatedAt,
     });
     const restarted = new SQLiteSessionRepository({
-      path: paths.database, idempotencyRetentionMs: 1_000, approvalRetentionMs: 1_000,
+      path: paths.database, idempotencyRetentionMs: 60_000, approvalRetentionMs: 60_000,
     });
     try {
-      expect((await restarted.listPendingApprovals("session-1"))[0]?.callId).toBe("call-1");
-      expect((await restarted.resolvePendingApproval("approval-1", "allow", "2026-08-05T00:00:01.000Z")).status).toBe("allowed");
+      expect((await restarted.listPendingApprovals("session-1")).map(({ requestId }) => requestId))
+        .toEqual(["approval-1", "approval-2"]);
+      const allowed = await restarted.resolvePendingApproval("approval-1", "allow", firstResolvedAt);
+      expect(allowed.status).toBe("allowed");
+      expect(await restarted.resolvePendingApproval("approval-1", "allow", secondResolvedAt))
+        .toEqual(allowed);
+      await expect(restarted.resolvePendingApproval("approval-1", "deny")).rejects
+        .toThrow("already resolved: approval-1");
+      expect((await restarted.resolvePendingApproval("approval-2", "deny", firstResolvedAt)).status)
+        .toBe("denied");
       expect(await restarted.listPendingApprovals("session-1")).toEqual([]);
-      await restarted.prune("2026-08-05T00:00:03.000Z");
+      await restarted.prune(new Date(now + 120_000).toISOString());
       expect(await restarted.getPendingApproval("approval-1")).toBeNull();
+      expect(await restarted.getPendingApproval("approval-2")).toBeNull();
     } finally {
       restarted.close();
     }

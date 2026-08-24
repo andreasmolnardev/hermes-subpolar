@@ -97,6 +97,11 @@
 - Added workspace-confined native filesystem tools with bounded read/write,
   canonical traversal and symlink-escape checks, fail-closed operation
   selection, approval-gated mutations, and explicit shell-interpreter opt-in.
+- Added restart/recovery and pending-approval behavior coverage for both the
+  in-memory and SQLite repositories, including reconnect filtering,
+  idempotent decisions, conflicting decisions, and retention pruning.
+- Projected native Pi status phases into the WebUI activity timeline without
+  importing Pi package types into the browser.
 
 ## Repository Residue Cleanup
 

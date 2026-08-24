@@ -19,3 +19,17 @@ test("projects supported reasoning, tool, approval, error, and terminal events",
     { kind: "terminal", text: "Completed", sequence: 5 },
   ]);
 });
+
+test("projects native Pi status updates into stable timeline activity", () => {
+  const events = [
+    { protocol: "subpolar.v1", requestId: "request-status", sequence: 1, event: { type: "status.update", payload: { phase: "provider.started" } } },
+    { protocol: "subpolar.v1", requestId: "request-status", sequence: 2, event: { type: "status.update", payload: { phase: "retry.scheduled" } } },
+    { protocol: "subpolar.v1", requestId: "request-status", sequence: 3, event: { type: "status.update", payload: { phase: "unknown.phase" } } },
+  ] as const;
+
+  expect(events.map(event => projectSubpolarActivity(event))).toMatchObject([
+    { kind: "status", type: "status.update", text: "Model started", sequence: 1 },
+    { kind: "status", type: "status.update", text: "Retry scheduled", sequence: 2 },
+    { kind: "status", type: "status.update", text: "Unknown Phase", sequence: 3 },
+  ]);
+});

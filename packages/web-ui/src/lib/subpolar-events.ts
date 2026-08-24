@@ -1,6 +1,6 @@
 import type { SubpolarSocketEvent } from "./subpolar-client";
 
-export type SubpolarActivityKind = "reasoning" | "tool" | "approval" | "error" | "terminal";
+export type SubpolarActivityKind = "reasoning" | "tool" | "approval" | "status" | "error" | "terminal";
 
 export type SubpolarActivity = {
   readonly kind: SubpolarActivityKind;
@@ -27,6 +27,23 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function statusText(phase: unknown): string | undefined {
+  if (typeof phase !== "string" || phase.length === 0) return undefined;
+  const labels: Record<string, string> = {
+    "provider.requested": "Model request queued",
+    "provider.started": "Model started",
+    "provider.completed": "Model completed",
+    "provider.failed": "Model failed",
+    "provider.usage": "Usage updated",
+    "provider.finished": "Model finished",
+    "approval.allow": "Tool approval granted",
+    "approval.deny": "Tool approval denied",
+    "retry.scheduled": "Retry scheduled",
+    "fallback.selected": "Fallback model selected",
+  };
+  return labels[phase] ?? phase.replace(/[._-]+/g, " ").replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
 export function projectSubpolarActivity(event: SubpolarSocketEvent): SubpolarActivity | undefined {
   const type = subpolarEventType(event);
   const data = payload(event);
@@ -45,6 +62,9 @@ export function projectSubpolarActivity(event: SubpolarSocketEvent): SubpolarAct
   } else if (type === "approval.request" || type === "approval.requested") {
     kind = "approval";
     detail = `Approval requested for ${name}`;
+  } else if (type === "status.update") {
+    kind = "status";
+    detail = statusText(data.phase);
   } else if (type === "error") {
     kind = "error";
     detail = text(data.message) ?? text(event.message) ?? text(event.code) ?? "Request failed";

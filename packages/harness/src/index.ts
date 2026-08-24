@@ -100,6 +100,7 @@ export {
   createSubpolarPiModelRuntime,
   mapHermesProviderToPi,
   resolveSubpolarPiModel,
+  SubpolarPiModelRuntimePool,
   SubpolarPiModelResolutionError
 } from "./pi-model-resolution";
 export type {

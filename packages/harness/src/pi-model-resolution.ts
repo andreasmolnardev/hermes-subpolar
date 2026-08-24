@@ -91,10 +91,31 @@ export interface CreateSubpolarPiModelRuntimeOptions {
 	readonly signal?: AbortSignal;
 }
 
+/** Reuses network-disabled provider catalogs while keeping credentials in Subpolar. */
+export class SubpolarPiModelRuntimePool {
+	private readonly runtimes = new Map<string, Promise<ModelRuntime>>();
+
+	constructor(private readonly credentials: SubpolarCredentialBackend) {}
+
+	get(providerId?: string): Promise<ModelRuntime> {
+		const key = providerId ?? "*";
+		const existing = this.runtimes.get(key);
+		if (existing !== undefined) return existing;
+		const runtime = createSubpolarPiModelRuntime({ credentials: this.credentials, ...(providerId === undefined ? {} : { providerId }) });
+		this.runtimes.set(key, runtime);
+		return runtime;
+	}
+
+	clear(): void {
+		this.runtimes.clear();
+	}
+}
+
 export interface ResolveSubpolarPiModelOptions extends CreateSubpolarPiModelRuntimeOptions {
 	readonly hermesProviderId: string;
 	readonly modelId: string;
 	readonly baseUrl?: string;
+	readonly runtimePool?: SubpolarPiModelRuntimePool;
 }
 
 export interface SubpolarPiModelResolution {
@@ -184,7 +205,7 @@ export async function resolveSubpolarPiModel(
 		throw new SubpolarPiModelResolutionError("unsupported_provider", hermesProviderId, options.modelId);
 	}
 
-	const modelRuntime = await createSubpolarPiModelRuntime({ ...options, providerId: piProviderId });
+	const modelRuntime = await (options.runtimePool?.get(piProviderId) ?? createSubpolarPiModelRuntime({ ...options, providerId: piProviderId }));
 	const model = resolveConfiguredModel(modelRuntime, piProviderId, options.modelId, options.baseUrl, HERMES_NATIVE_API[hermesProviderId]);
 	if (!model) {
 		throw new SubpolarPiModelResolutionError("model_not_found", hermesProviderId, options.modelId, piProviderId);

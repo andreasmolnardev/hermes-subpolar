@@ -4,6 +4,7 @@ import {
 	HERMES_TO_PI_PROVIDER_ID,
 	mapHermesProviderToPi,
 	resolveSubpolarPiModel,
+	SubpolarPiModelRuntimePool,
 	SubpolarPiModelResolutionError,
 } from "../src/index";
 import {
@@ -103,6 +104,17 @@ describe("native Pi model resolution", () => {
 		expect(runtime.getModel("openai", "gpt-4.1-mini")).toBeDefined();
 		await runtime.getAuth("openai");
 		expect(reads).toBe(1);
+	});
+
+	test("reuses one provider catalog through the server-level runtime pool", async () => {
+		const pool = new SubpolarPiModelRuntimePool(credentials());
+		const [first, second] = await Promise.all([
+			resolveSubpolarPiModel({ hermesProviderId: "openai-api", modelId: "gpt-4.1-mini", credentials: credentials(), runtimePool: pool }),
+			resolveSubpolarPiModel({ hermesProviderId: "openai-api", modelId: "local-model", credentials: credentials(), runtimePool: pool }),
+		]);
+
+		expect(first.modelRuntime).toBe(second.modelRuntime);
+		expect(second.model.id).toBe("local-model");
 	});
 
 	test("materializes configured model IDs and endpoints through the Pi provider seam", async () => {

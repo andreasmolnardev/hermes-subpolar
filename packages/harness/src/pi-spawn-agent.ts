@@ -2,13 +2,10 @@ import { Type } from "@earendil-works/pi-ai";
 import type { Model, Provider, CredentialStore } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type {
-	SubpolarPiChildEvent,
 	SubpolarPiChildEventSink,
 	SubpolarPiParentRunContext,
-	SubpolarPiTool,
-	SubpolarPiToolRequest,
-	SubpolarPiToolResult,
 } from "./pi-child-session";
+import type { SubpolarPiTool, SubpolarPiToolRequest, SubpolarPiToolResult } from "./pi-tools";
 import { executeSubpolarPiChildRun } from "./pi-child-session";
 
 export const SUBPOLAR_PI_SPAWN_AGENT_TOOL_NAME = "spawn_agent";
@@ -54,7 +51,7 @@ function parseParams(params: unknown): SpawnAgentParams {
 	const value = params as Record<string, unknown>;
 	if (typeof value.agentId !== "string" || value.agentId.trim() === "") throw new Error("spawn_agent requires agentId.");
 	if (typeof value.task !== "string" || value.task.trim() === "") throw new Error("spawn_agent requires task.");
-	if (value.deadlineMs !== undefined && (!Number.isInteger(value.deadlineMs) || value.deadlineMs <= 0)) {
+	if (value.deadlineMs !== undefined && (typeof value.deadlineMs !== "number" || !Number.isInteger(value.deadlineMs) || value.deadlineMs <= 0)) {
 		throw new Error("spawn_agent deadlineMs must be a positive integer.");
 	}
 	return {
@@ -104,8 +101,8 @@ function childSignal(
 	};
 }
 
-function textFromChildMessage(message: { content?: unknown }): string {
-	const content = message.content;
+function textFromChildMessage(message: unknown): string {
+	const content = typeof message === "object" && message !== null && "content" in message ? (message as { content?: unknown }).content : undefined;
 	if (Array.isArray(content)) {
 		const text = content
 			.filter((part): part is { type: "text"; text: string } => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string")
@@ -116,7 +113,7 @@ function textFromChildMessage(message: { content?: unknown }): string {
 	return JSON.stringify(message);
 }
 
-function childToolResult(result: { readonly childRunId: string; readonly childAgentId: string; readonly parentRunId: string; readonly message: { content?: unknown } | undefined }): SubpolarPiToolResult {
+function childToolResult(result: { readonly childRunId: string; readonly childAgentId: string; readonly parentRunId: string; readonly message: unknown }): SubpolarPiToolResult {
 	return {
 		content: [{ type: "text", text: textFromChildMessage(result.message ?? { content: "" }) }],
 		details: {

@@ -6,6 +6,7 @@ import { test } from "bun:test";
 
 import { startApiGatewayServer } from "../src/server.ts";
 import { createGatewayPiExecutor } from "../src/index.ts";
+import { createToolHandle } from "tool-resolver";
 
 function sessionCookies(response: Response): string {
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
@@ -350,6 +351,94 @@ test("server upgrades authenticated WebSockets and projects ordered chat events"
     assert.ok(events.some(event => event.includes('"type":"connected"')));
     assert.ok(events.some(event => event.includes('"type":"message.start"')));
     assert.ok(events.some(event => event.includes('"type":"message.complete"')));
+  } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("WebSocket approvals deny on disconnect and cannot be reused on another run", async () => {
+  const dataDir = testDataDir();
+  let providerCalls = 0;
+  let toolEffects = 0;
+  const server = startApiGatewayServer({
+    port: 0,
+    dataDir,
+    toolDefinitions: [{
+      name: "write",
+      capabilityId: "test.write",
+      description: "Write data",
+      inputSchema: { type: "object" },
+      source: "test",
+      policy: "ask",
+      executable: { handle: createToolHandle(async () => { toolEffects += 1; return "written"; }) },
+    }],
+    provider: {
+      async complete(request) {
+        providerCalls += 1;
+        if (request.messages.some(message => message.role === "tool")) return { message: { role: "assistant", content: "write denied" }, finishReason: "stop" };
+        return { message: { role: "assistant", content: "", toolCalls: [{ id: "ws-approval-call", name: "write", arguments: "{}" }] }, finishReason: "tool_calls" };
+      },
+    },
+  });
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ username: "ws-approval-owner", password: "correct horse" }),
+    });
+    const cookies = sessionCookies(bootstrap);
+    const headers = { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf(cookies), origin };
+    const project = await fetch(`${server.url}v1/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Approval project" }) });
+    const projectId = (await project.json() as { project: { id: string } }).project.id;
+    const agent = await fetch(`${server.url}v1/agents`, { method: "POST", headers, body: JSON.stringify({ projectId, name: "approval-runner", instructions: "Request approval before writing.", icon: "bot" }) });
+    const agentId = (await agent.json() as { agent: { id: string } }).agent.id;
+    const configured = await fetch(`${server.url}v1/agents/${agentId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ capabilities: [{ capabilityId: "test.write", enabled: true }], permissions: [{ capabilityId: "test.write", policy: "ask" }] }),
+    });
+    assert.equal(configured.status, 200);
+
+    const socketUrl = String(server.url).replace(/^http/, "ws") + "v1/ws";
+    const firstSocket = new WebSocket(socketUrl, { headers: { cookie: cookies, origin } } as unknown as string);
+    let approval: { requestId: string; callId: string } | undefined;
+    const firstMessages: unknown[] = [];
+    const firstClosed = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Timed out waiting for approval; messages=" + JSON.stringify(firstMessages))), 5_000);
+      firstSocket.addEventListener("open", () => firstSocket.send(JSON.stringify({ type: "chat.start", requestId: "ws-disconnect-run", csrfToken: csrf(cookies), model: "test", projectId, agentId, messages: [{ role: "user", content: "write" }] })));
+      firstSocket.addEventListener("message", event => {
+        const message = JSON.parse(String(event.data)) as { requestId?: string; event?: { type?: string; payload?: { call_id?: string } } };
+        firstMessages.push(message);
+        if (message.event?.type === "approval.request") {
+          const callId = message.event.payload?.call_id;
+          if (message.requestId === "ws-disconnect-run" && callId !== undefined) {
+            approval = { requestId: message.requestId, callId };
+            firstSocket.close();
+          }
+        }
+      });
+      firstSocket.addEventListener("close", () => { clearTimeout(timeout); resolve(); });
+      firstSocket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("WebSocket approval run failed; messages=" + JSON.stringify(firstMessages))); });
+    });
+    await firstClosed;
+    assert.deepEqual(approval, { requestId: "ws-disconnect-run", callId: "ws-approval-call" });
+    assert.equal(providerCalls, 1);
+    assert.equal(toolEffects, 0);
+    assert.ok(firstMessages.some(message => (message as { event?: { type?: string } }).event?.type === "approval.request"));
+
+    const secondSocket = new WebSocket(socketUrl, { headers: { cookie: cookies, origin } } as unknown as string);
+    const staleResponse = await new Promise<{ code?: string }>((resolve, reject) => {
+      secondSocket.addEventListener("open", () => secondSocket.send(JSON.stringify({ type: "permission_response", requestId: approval!.requestId, callId: approval!.callId, decision: "allow" })));
+      secondSocket.addEventListener("message", event => {
+        const message = JSON.parse(String(event.data)) as { type?: string; code?: string };
+        if (message.type === "error") resolve({ code: message.code });
+      });
+      secondSocket.addEventListener("error", () => reject(new Error("WebSocket stale approval run failed")));
+    });
+    assert.equal(staleResponse.code, "request_failed");
+    secondSocket.close();
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });

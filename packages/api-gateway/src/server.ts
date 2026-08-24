@@ -1323,7 +1323,13 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             turns.set(requestId, controller);
             try {
               let sequence = 0;
-              const approvalPolicy: HarnessApprovalPolicy = approval => new Promise<"allow" | "deny">(resolveDecision => {
+              const approvalPolicy: HarnessApprovalPolicy = approval => {
+                socket.send(eventJson(requestId, sequence++, {
+                  type: "approval.request",
+                  session_id: approval.sessionId,
+                  payload: { call_id: approval.call.id, name: approval.call.name, arguments: approval.call.arguments },
+                }));
+                return new Promise<"allow" | "deny">(resolveDecision => {
                 const approvals = pendingApprovals.get(socket) ?? new Map();
                 pendingApprovals.set(socket, approvals);
                 const key = `${approval.requestId}:${approval.call.id}`;
@@ -1336,7 +1342,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
                 approvals.set(key, { resolve: finish });
                 controller.signal.addEventListener("abort", onAbort, { once: true });
                 if (controller.signal.aborted) finish("deny");
-              });
+                });
+              };
               await executeTurn(socket.data.principal, { ...input, requestId }, controller.signal, event => { socket.send(eventJson(requestId, sequence++, event)); }, approvalPolicy);
             } finally {
               const approvals = pendingApprovals.get(socket);

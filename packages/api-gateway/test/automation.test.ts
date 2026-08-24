@@ -20,6 +20,15 @@ function csrf(value: string): string {
   return decodeURIComponent(match[1]!);
 }
 
+function nativeChatCompletionsSse(content: string): Response {
+  const events = [
+    { id: "chatcmpl-native-automation", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }] },
+    { id: "chatcmpl-native-automation", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } },
+  ];
+  const body = `${events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 async function eventually<T>(read: () => Promise<T | undefined>, timeoutMs = 6_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -296,6 +305,78 @@ test("Pi-backed automations persist success and fail closed for approval and pro
     assert.ok(providerCalls >= 3);
     assert.equal(piExecutorCalls, 3);
   } finally {
+    await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("default automation dispatch uses native Pi model resolution", { timeout: 30_000 }, async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "subpolar-native-automation-"));
+  const server = startApiGatewayServer({ port: 0, dataDir, automationPollMs: 100 });
+  const originalFetch = globalThis.fetch;
+  let nativeCalls = 0;
+  let nativeModel: string | undefined;
+  let nativePromptFound = false;
+  let nativeAuthorization: string | null = null;
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await originalFetch(`${server.url}v1/auth/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ username: "native-automation-owner", password: "correct horse" }),
+    });
+    const cookie = cookies(bootstrap);
+    const headers = { "content-type": "application/json", cookie, "x-csrf-token": csrf(cookie), origin };
+    const configured = await originalFetch(`${server.url}v1/setup/provider`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ providerId: "openai-api", baseUrl: "https://native-automation.invalid/v1", apiKey: "native-automation-key", model: "gpt-4o-mini" }),
+    });
+    assert.equal(configured.status, 200);
+
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url === "https://native-automation.invalid/v1/chat/completions") {
+        nativeCalls += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string; messages?: readonly { role: string; content: unknown }[] };
+        nativeModel = body.model;
+        nativePromptFound = body.messages?.some(message => message.role === "user" && JSON.stringify(message.content).includes("Run native automation")) === true;
+        nativeAuthorization = new Headers(init?.headers).get("authorization");
+        return nativeChatCompletionsSse("native automation complete");
+      }
+      return originalFetch(input, init);
+    };
+
+    const projectResponse = await fetch(`${server.url}v1/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Native automation project" }) });
+    const projectId = (await projectResponse.json() as { project: { id: string } }).project.id;
+    const agentResponse = await fetch(`${server.url}v1/agents`, { method: "POST", headers, body: JSON.stringify({ projectId, name: "native-runner", instructions: "Run native automation work.", icon: "bot" }) });
+    const agentId = (await agentResponse.json() as { agent: { id: string } }).agent.id;
+    const create = await fetch(`${server.url}v1/automations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Native report", schedule: { kind: "once", at: new Date(Date.now() + 60_000).toISOString(), timezone: "UTC" }, prompt: "Run native automation", agentId, projectId: null, permissionMode: "pre-approved" }),
+    });
+    assert.equal(create.status, 201);
+    const automationId = (await create.json() as { automation: { id: string } }).automation.id;
+    const queued = await fetch(`${server.url}v1/automations/${automationId}/run`, { method: "POST", headers });
+    assert.equal(queued.status, 202);
+    const run = await eventually(async () => {
+      const response = await fetch(`${server.url}v1/automations/${automationId}/runs`, { headers: { cookie } });
+      const runs = (await response.json() as { runs: readonly { status: string; sessionId: string; error?: string }[] }).runs;
+      const item = runs[0];
+      return item !== undefined && item.status !== "queued" && item.status !== "running" ? item : undefined;
+    });
+    assert.equal(run.status, "completed", `${run.error ?? "automation still running"}; nativeCalls=${nativeCalls}; model=${nativeModel ?? "none"}`);
+    assert.equal(nativeCalls, 1);
+    assert.equal(nativeModel, "gpt-4o-mini");
+    assert.equal(nativePromptFound, true);
+    assert.equal(nativeAuthorization, "Bearer native-automation-key");
+    const transcript = await fetch(`${server.url}v1/sessions/${encodeURIComponent(run.sessionId)}`, { headers: { cookie } });
+    assert.equal(transcript.status, 200);
+    const body = await transcript.json() as { messages: readonly { role: string; content: unknown }[] };
+    assert.ok(body.messages.some(message => message.role === "assistant" && message.content === "native automation complete"));
+  } finally {
+    globalThis.fetch = originalFetch;
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });
   }

@@ -4,6 +4,9 @@ export type SubpolarPiEvent =
 	| { type: "run.started"; runId: string }
 	| { type: "run.budget_exhausted"; runId: string; resource: "turns" | "providerCalls" | "toolCalls" | "tokens"; limit: number }
 	| { type: "run.timed_out"; runId: string; deadline?: number }
+	| { type: "run.compaction_started"; runId: string; reason: string }
+	| { type: "run.compaction_completed"; runId: string; reason: string; aborted: boolean }
+	| { type: "run.queue_updated"; runId: string; steering: number; followUp: number }
 	| { type: "turn.started"; runId: string }
 	| { type: "assistant.text_delta"; runId: string; delta: string }
 	| { type: "assistant.thinking_delta"; runId: string; delta: string }
@@ -83,6 +86,15 @@ export class PiEventProjector {
 					attempt: event.attempt,
 					error: event.errorMessage,
 				});
+				return;
+			case "compaction_start":
+				this.sink({ type: "run.compaction_started", runId: this.runId, reason: event.reason });
+				return;
+			case "compaction_end":
+				this.sink({ type: "run.compaction_completed", runId: this.runId, reason: event.reason, aborted: event.aborted });
+				return;
+			case "queue_update":
+				this.sink({ type: "run.queue_updated", runId: this.runId, steering: event.steering.length, followUp: event.followUp.length });
 				return;
 		}
 	}

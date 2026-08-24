@@ -404,6 +404,8 @@ export type HarnessSessionSetup = {
   readonly model: string;
   readonly runtime: HarnessRuntimeMetadata;
   readonly createdAt: string;
+  /** Application-owned lineage and execution metadata for newly created sessions. */
+  readonly metadata?: HarnessJsonObject;
 };
 
 export type HarnessToolCheckpoint = {

@@ -71,6 +71,9 @@ describe("Subpolar Pi runtime seam", () => {
 		projector.project({ type: "message_update", message: {} as never, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hello", partial: {} as never } });
 		projector.project({ type: "tool_execution_start", toolCallId: "call-1", toolName: "demo", args: { value: 1 } });
 		projector.project({ type: "tool_execution_end", toolCallId: "call-1", toolName: "demo", result: { ok: true }, isError: false });
+		projector.project({ type: "compaction_start", reason: "threshold" });
+		projector.project({ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, willRetry: false });
+		projector.project({ type: "queue_update", steering: ["steer"], followUp: [] });
 		projector.project({ type: "agent_end", messages: [] });
 
 		expect(events.map((event) => event.type)).toEqual([
@@ -78,6 +81,9 @@ describe("Subpolar Pi runtime seam", () => {
 			"assistant.text_delta",
 			"tool.started",
 			"tool.completed",
+			"run.compaction_started",
+			"run.compaction_completed",
+			"run.queue_updated",
 			"run.completed",
 		]);
 	});

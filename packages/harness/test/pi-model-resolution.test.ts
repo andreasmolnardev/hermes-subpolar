@@ -22,15 +22,82 @@ function credentials() {
 	};
 }
 
+const mappedProviderFixtures = [
+	["openai-api", "openai"],
+	["openrouter", "openrouter"],
+	["deepseek", "deepseek"],
+	["xai", "xai"],
+	["nvidia", "nvidia"],
+	["fireworks", "fireworks"],
+	["groq", "groq"],
+	["together", "together"],
+	["mistral", "mistral"],
+	["moonshot", "moonshotai"],
+	["kimi-coding", "kimi-coding"],
+	["zai", "zai"],
+	["minimax", "minimax"],
+	["minimax-cn", "minimax-cn"],
+	["xiaomi-mimo", "xiaomi"],
+	["opencode-zen", "opencode"],
+	["opencode-go", "opencode-go"],
+	["huggingface", "huggingface"],
+	["gemini", "google"],
+	["vertex-ai", "google-vertex"],
+	["anthropic", "anthropic"],
+	["anthropic-oauth", "anthropic"],
+	["copilot", "github-copilot"],
+	["openai-responses", "openai"],
+	["openai-codex", "openai-codex"],
+	["bedrock", "amazon-bedrock"],
+] as const;
+
+const unsupportedProviderFixtures = [
+	"kimi-coding-cn",
+	"ai-gateway",
+	"novita",
+	"arcee",
+	"gmi",
+	"actual-computer",
+	"minimax-oauth",
+	"alibaba-dashscope",
+	"alibaba-coding-plan",
+	"kilo-code",
+	"tencent-tokenhub",
+	"ollama-cloud",
+	"stepfun",
+	"lm-studio",
+	"nous-portal",
+	"qwen-oauth",
+	"xai-oauth",
+	"copilot-acp",
+	"relay",
+	"moa",
+	"custom",
+] as const;
+
 describe("native Pi model resolution", () => {
 	test("uses explicit Hermes-to-Pi provider mappings", () => {
-		expect(mapHermesProviderToPi("openai-api")).toBe("openai");
-		expect(mapHermesProviderToPi("gemini")).toBe("google");
-		expect(mapHermesProviderToPi("vertex-ai")).toBe("google-vertex");
-		expect(mapHermesProviderToPi("copilot")).toBe("github-copilot");
-		expect(mapHermesProviderToPi("bedrock")).toBe("amazon-bedrock");
+		for (const [hermesProviderId, piProviderId] of mappedProviderFixtures) {
+			expect(mapHermesProviderToPi(hermesProviderId)).toBe(piProviderId);
+		}
+		expect(mapHermesProviderToPi(" OPENAI-API ")).toBe("openai");
 		expect(mapHermesProviderToPi("unknown-provider")).toBeUndefined();
 		expect(HERMES_TO_PI_PROVIDER_ID.custom).toBeNull();
+	});
+
+	test("resolves every mapped provider through a Pi catalog without network access", async () => {
+		const runtimePool = new SubpolarPiModelRuntimePool(credentials());
+		for (const [hermesProviderId, piProviderId] of mappedProviderFixtures) {
+			const result = await resolveSubpolarPiModel({
+				hermesProviderId,
+				modelId: `fixture-${hermesProviderId}`,
+				credentials: credentials(),
+				runtimePool,
+			});
+			expect(result.piProviderId).toBe(piProviderId);
+			expect(result.model.provider).toBe(piProviderId);
+			expect(result.model.id).toBe(`fixture-${hermesProviderId}`);
+		}
 	});
 
 	test("maps API-key, OAuth, and Copilot credentials without exposing extra fields", () => {
@@ -132,9 +199,14 @@ describe("native Pi model resolution", () => {
 	});
 
 	test("fails closed for unsupported providers while accepting configured model IDs", async () => {
-		await expect(resolveSubpolarPiModel({ hermesProviderId: "custom", modelId: "gpt-4.1-mini", credentials: credentials() })).rejects.toMatchObject<Partial<SubpolarPiModelResolutionError>>({
-			code: "unsupported_provider",
-		});
+		for (const hermesProviderId of unsupportedProviderFixtures) {
+			expect(mapHermesProviderToPi(hermesProviderId)).toBeUndefined();
+			await expect(resolveSubpolarPiModel({ hermesProviderId, modelId: "gpt-4.1-mini", credentials: credentials() })).rejects.toMatchObject<Partial<SubpolarPiModelResolutionError>>({
+				code: "unsupported_provider",
+				hermesProviderId,
+				piProviderId: undefined,
+			});
+		}
 		const configured = await resolveSubpolarPiModel({ hermesProviderId: "openai-api", modelId: "not-a-catalog-model", credentials: credentials() });
 		expect(configured.model.id).toBe("not-a-catalog-model");
 	});

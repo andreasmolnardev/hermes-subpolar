@@ -5,6 +5,7 @@ import type {
 	SubpolarPiChildEventSink,
 	SubpolarPiParentRunContext,
 } from "./pi-child-session";
+import type { HarnessPersistencePort } from "./index";
 import type { SubpolarPiTool, SubpolarPiToolRequest, SubpolarPiToolResult } from "./pi-tools";
 import { executeSubpolarPiChildRun } from "./pi-child-session";
 
@@ -37,6 +38,7 @@ export interface SubpolarPiSpawnAgentOptions {
 	readonly authorize?: (request: SubpolarPiSpawnAgentRequest) => Promise<"allow" | "deny">;
 	/** Maximum child lifetime. Requested deadlines are clamped to this value. */
 	readonly maxDeadlineMs?: number;
+	readonly persistence?: HarnessPersistencePort;
 	readonly onChildEvent?: SubpolarPiChildEventSink;
 }
 
@@ -189,6 +191,7 @@ export function createSubpolarPiSpawnAgentTool(options: SubpolarPiSpawnAgentOpti
 					modelRuntime: definition.modelRuntime,
 					credentials: definition.credentials,
 					nativeProviders: definition.nativeProviders,
+					persistence: options.persistence,
 					onEvent: options.onChildEvent,
 				});
 				return childToolResult(result);

@@ -2,9 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { CredentialStore, Model, Provider } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ProviderMessage } from "chat-provider-interface";
+import type {
+	HarnessPersistencePort,
+	HarnessSessionSetup,
+	HarnessToolCall,
+	HarnessToolResult,
+} from "./index";
 import { executeSubpolarPiRun, type SubpolarPiRunResult } from "./pi-runtime";
 import type { SubpolarPiEvent, SubpolarPiEventSink } from "./pi-events";
-import type { SubpolarPiRunContext, SubpolarPiTool } from "./pi-tools";
+import type { SubpolarPiRunContext, SubpolarPiTool, SubpolarPiToolResult } from "./pi-tools";
 
 /** Immutable identity inherited by a Subpolar-controlled child run. */
 export type SubpolarPiParentRunContext = Readonly<SubpolarPiRunContext>;
@@ -23,6 +29,8 @@ export interface SubpolarPiChildSessionOptions {
 	readonly modelRuntime?: ModelRuntime;
 	readonly credentials?: CredentialStore;
 	readonly nativeProviders?: readonly Provider[];
+	/** Existing application persistence adapter used for child session metadata and tool recovery. */
+	readonly persistence?: HarnessPersistencePort;
 	readonly onEvent?: SubpolarPiChildEventSink;
 }
 
@@ -54,6 +62,68 @@ function correlate(event: SubpolarPiEvent, parentRunId: string, childRunId: stri
 	return { ...event, parentRunId, childRunId };
 }
 
+function serializeForCheckpoint(value: unknown): string {
+	if (typeof value === "string") return value;
+	try {
+		return JSON.stringify(value) ?? "";
+	} catch {
+		return "[unserializable child tool value]";
+	}
+}
+
+function checkpointResult(result: SubpolarPiToolResult): HarnessToolResult {
+	return {
+		content: serializeForCheckpoint(result.content),
+		...(result.isError === undefined ? {} : { isError: result.isError }),
+	};
+}
+
+function checkpointCall(tool: SubpolarPiTool, request: Parameters<SubpolarPiTool["execute"]>[0]): HarnessToolCall {
+	return {
+		id: request.toolCallId,
+		name: tool.name,
+		arguments: serializeForCheckpoint(request.params),
+	};
+}
+
+function persistentChildTools(
+	tools: readonly SubpolarPiTool[],
+	childContext: SubpolarPiRunContext,
+	persistence: HarnessPersistencePort | undefined,
+): readonly SubpolarPiTool[] {
+	if (persistence?.checkpoint === undefined) return tools;
+	return tools.map(tool => ({
+		...tool,
+		execute: async (request) => {
+			const call = checkpointCall(tool, request);
+			const at = (): string => new Date().toISOString();
+			await persistence.checkpoint!({
+				requestId: childContext.runId,
+				sessionId: childContext.sessionId,
+				turnId: childContext.runId,
+				call,
+				phase: "before-tool",
+				pendingToolCallIds: [call.id],
+				completedToolCalls: [],
+				at: at(),
+			});
+			const result = await tool.execute(request);
+			await persistence.checkpoint!({
+				requestId: childContext.runId,
+				sessionId: childContext.sessionId,
+				turnId: childContext.runId,
+				call,
+				phase: "tool-completed",
+				pendingToolCallIds: [],
+				completedToolCalls: [{ call, result: checkpointResult(result) }],
+				result: checkpointResult(result),
+				at: at(),
+			});
+			return result;
+		},
+	}));
+}
+
 /**
  * Execute one bounded child Pi session under the parent run's Subpolar
  * identity. The child receives only the caller-provided tools and delegates
@@ -74,6 +144,21 @@ export async function executeSubpolarPiChildRun(
 		cwd: options.cwd,
 		agentDir: options.parent.agentDir,
 	});
+	const sessionSetup: HarnessSessionSetup = {
+		sessionId: childContext.sessionId,
+		model: options.model.id,
+		runtime: { runtimeVersion: "pi-child", schemaVersion: 1 },
+		createdAt: new Date().toISOString(),
+		metadata: {
+			runId: childRunId,
+			parentRunId,
+			childRunId,
+			childAgentId: options.childAgentId,
+			conversationId: options.parent.conversationId,
+			role: "child",
+		},
+	};
+	await options.persistence?.ensureSession?.(childContext.sessionId, sessionSetup);
 	const events: SubpolarPiChildEvent[] = [];
 	const onEvent: SubpolarPiEventSink = (event) => {
 		const correlated = correlate(event, parentRunId, childRunId);
@@ -85,7 +170,7 @@ export async function executeSubpolarPiChildRun(
 		...childContext,
 		model: options.model,
 		systemPrompt: options.instructions,
-		tools: options.tools,
+		tools: persistentChildTools(options.tools, childContext, options.persistence),
 		signal: options.signal,
 		history: options.history,
 		modelRuntime: options.modelRuntime,

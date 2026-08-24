@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import {
 	executeSubpolarPiChildRun,
+	type HarnessPersistencePort,
 	type SubpolarPiChildEvent,
 	type SubpolarPiTool,
 } from "../src/index";
@@ -56,6 +57,58 @@ describe("Subpolar child Pi session", () => {
 			expect(result.events.length).toBeGreaterThan(0);
 			expect(result.events).toEqual(observed);
 			expect(result.events.every((event) => event.parentRunId === "parent-run" && event.childRunId === "child-run-1" && event.runId === "child-run-1")).toBe(true);
+		});
+	});
+
+	test("persists child session lineage and tool checkpoints through the application adapter", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([
+				fauxAssistantMessage(fauxToolCall("lookup", { query: "status" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage("child persisted"),
+			]);
+			const setups: NonNullable<Parameters<NonNullable<HarnessPersistencePort["ensureSession"]>>[1]>[] = [];
+			const checkpoints: NonNullable<Parameters<NonNullable<HarnessPersistencePort["checkpoint"]>>[0]>[] = [];
+			const persistence: HarnessPersistencePort = {
+				ensureSession: async (_sessionId, setup) => { if (setup !== undefined) setups.push(setup); },
+				checkpoint: async checkpoint => { checkpoints.push(checkpoint); },
+			};
+			const lookup: SubpolarPiTool = {
+				name: "lookup",
+				label: "Lookup",
+				description: "Return a child-scoped value",
+				parameters: Type.Object({ query: Type.String() }),
+				execute: async () => ({ content: [{ type: "text", text: "ready" }] }),
+			};
+
+			const result = await executeSubpolarPiChildRun({
+				parent,
+				childAgentId: "persisted-worker",
+				childRunId: "child-persisted",
+				model: faux.getModel(),
+				instructions: "Use the lookup tool.",
+				cwd: root,
+				tools: [lookup],
+				nativeProviders: [faux.provider],
+				persistence,
+			});
+
+			expect(result.childRunId).toBe("child-persisted");
+			expect(setups).toHaveLength(1);
+			expect(setups[0]).toMatchObject({
+				sessionId: "session-1.child-persisted",
+				runtime: { runtimeVersion: "pi-child" },
+				metadata: {
+					role: "child",
+					parentRunId: "parent-run",
+					childRunId: "child-persisted",
+					childAgentId: "persisted-worker",
+				},
+			});
+			expect(checkpoints.map(checkpoint => checkpoint.phase)).toEqual(["before-tool", "tool-completed"]);
+			expect(checkpoints.every(checkpoint => checkpoint.sessionId === "session-1.child-persisted" && checkpoint.requestId === "child-persisted")).toBe(true);
+			expect(checkpoints[0]?.call).toMatchObject({ id: expect.any(String), name: "lookup" });
+			expect(checkpoints[1]?.result).toMatchObject({ content: expect.stringContaining("ready") });
 		});
 	});
 

@@ -198,6 +198,9 @@ export function redactErrorMessage(
 ): string {
   if (!policy.retainErrorDetails) {
     if (error === "Server restarted before the automation run completed") return error;
+    for (const prefix of ["Permission required", "Pi provider unavailable"]) {
+      if (error === prefix || error.startsWith(`${prefix}:`)) return prefix;
+    }
     return "Operation failed";
   }
   return redactText(error, policy);

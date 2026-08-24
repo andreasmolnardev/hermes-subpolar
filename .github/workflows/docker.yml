@@ -90,14 +90,9 @@ jobs:
         run: |
           set -euo pipefail
           trap 'docker rm -f hermes-subpolar-smoke >/dev/null 2>&1 || true' EXIT
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker logs hermes-subpolar-smoke
-          exit 1
+          bash scripts/verify-container.sh \
+            --container hermes-subpolar-smoke \
+            --url http://127.0.0.1:18080/api/health
 
 
   # ---------------------------------------------------------------------------

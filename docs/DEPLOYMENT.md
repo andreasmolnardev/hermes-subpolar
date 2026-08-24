@@ -31,6 +31,20 @@ Keep the Bun listener on loopback when possible. A public reverse proxy must:
 The data directory must not be served as static content. Do not expose the
 SQLite file or provider credentials to the browser.
 
+## Container Verification
+
+After starting the Compose deployment, verify that the service reports the
+expected health payload and accepts a graceful shutdown:
+
+```bash
+bash scripts/verify-container.sh --container hermes-subpolar
+```
+
+The check waits for `{"status":"ok"}`, confirms the container is still
+running, sends Docker's normal stop signal, and requires a clean exit. It is
+also used by the repository's Docker CI jobs. Run it before replacing a
+container that uses a persistent `SUBPOLAR_DATA_DIR` volume.
+
 ## Upgrade
 
 ```bash

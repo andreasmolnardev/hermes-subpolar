@@ -10,6 +10,7 @@ on:
       - "packages/**"
       - "scripts/check-package-boundaries.*"
       - ".github/workflows/monorepo-foundation.yml"
+      - "scripts/verify-container.sh"
   push:
     branches: [main]
     paths:
@@ -20,6 +21,7 @@ on:
       - "packages/**"
       - "scripts/check-package-boundaries.*"
       - ".github/workflows/monorepo-foundation.yml"
+      - "scripts/verify-container.sh"
 
 permissions:
   contents: read
@@ -46,15 +48,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: docker compose config --quiet
       - run: docker compose up -d --build
-      - name: Wait for health endpoint
+      - name: Verify health and graceful shutdown
         run: |
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8080/api/health >/dev/null; then
-              exit 0
-            fi
-            sleep 5
-          done
-          docker compose ps
-          exit 1
+          bash scripts/verify-container.sh \
+            --container hermes-subpolar \
+            --url http://127.0.0.1:8080/api/health \
+            --interval-seconds 5
       - if: always()
         run: docker compose down --volumes

@@ -24,7 +24,7 @@ import {
   type AutomationInput,
   type AutomationPermissionMode,
 } from "data-layer";
-import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiCredentialError, SubpolarPiModelResolutionError, toSubpolarPiCredential, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
+import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiCredentialError, SubpolarPiModelResolutionError, SubpolarPiModelRuntimePool, toSubpolarPiCredential, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
 import { createToolHandle, resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { createFilesystemTools } from "tool-runtime";
 import { serveStatic } from "./static";
@@ -536,6 +536,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       }
     },
   };
+  const nativeModelRuntimePool = new SubpolarPiModelRuntimePool(nativeCredentialBackend);
   const piExecutor = options.piExecutor ?? createGatewayPiExecutor({
     cwd: workspaceRoot,
     agentDir: join(dataDir, "pi-agent"),
@@ -547,6 +548,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
         modelId: request.model,
         baseUrl: connection.baseUrl,
         credentials: nativeCredentialBackend,
+        runtimePool: nativeModelRuntimePool,
         ...(request.signal === undefined ? {} : { signal: request.signal }),
       });
     } } : {}),

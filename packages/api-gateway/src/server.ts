@@ -452,7 +452,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     async modify(providerId, fn) {
       const connection = identity.providerConnection();
       if (connection === null || mapHermesProviderToPi(connection.providerId) !== providerId) return fn(undefined);
-      const current = nativeCredential(await configuredCredential(connection));
+      const current = nativeCredential(connection.providerId, await configuredCredential(connection));
       const next = await fn(current);
       if (next === undefined) return current;
       identity.saveProviderCredential(connection.credentialHandle, next.type === "oauth"

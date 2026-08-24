@@ -85,7 +85,7 @@ export function toSubpolarPiCredential(providerId: string, value: unknown): Cred
 	if (!record(value)) invalid(providerId, "Credential must be an object");
 
 	const mode = typeof value.type === "string" ? value.type : typeof value.mode === "string" ? value.mode : undefined;
-	if (mode === "api_key" && (value.key !== undefined || value.apiKey !== undefined || value.env !== undefined)) {
+	if ((mode === "api_key" || mode === undefined) && (value.key !== undefined || value.apiKey !== undefined || value.env !== undefined)) {
 		const key = value.key ?? value.apiKey;
 		if (key !== undefined && typeof key !== "string") invalid(providerId, "API key credential key must be a string");
 		const env = value.env === undefined ? undefined : providerEnv(value.env);

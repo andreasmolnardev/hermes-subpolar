@@ -83,6 +83,22 @@ jobs:
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ (github.event_name != 'pull_request') && matrix.cache-to || '' }}
 
+      - name: Start container smoke test
+        run: docker run -d --name hermes-subpolar-smoke -p 18080:8080 -e SUBPOLAR_HOST=0.0.0.0 -e SUBPOLAR_DATA_DIR=/tmp/subpolar-data "${IMAGE_NAME}:test"
+
+      - name: Verify container health
+        run: |
+          set -euo pipefail
+          trap 'docker rm -f hermes-subpolar-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs hermes-subpolar-smoke
+          exit 1
+
 
   # ---------------------------------------------------------------------------
   # Rebuild and push each architecture only after the unprivileged build/test

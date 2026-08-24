@@ -25,7 +25,8 @@ import {
   type AutomationPermissionMode,
 } from "data-layer";
 import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiCredentialError, SubpolarPiModelResolutionError, toSubpolarPiCredential, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
-import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
+import { createToolHandle, resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
+import { createFilesystemTools } from "tool-runtime";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
 import { createProvider, listProviderModels, listProviderProfiles, resolveProvider } from "./provider-runtime";
@@ -394,6 +395,74 @@ function agentSkillInstructions(agent: { readonly instructions: string }, skills
   return `${agentInstructions}${project}\n<skills>\n${skillInstructions}\n</skills>${clientInstructions}`;
 }
 
+function validFilesystemRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  return !value.startsWith("/") && !value.split(/[\\/]+/).some(segment => segment === ".." || segment === "" || segment === ".");
+}
+
+function diffLines(value: string): readonly string[] {
+  const lines = value.split("\n");
+  return lines.length > 1 && lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+}
+
+function filesystemDiff(path: string, before: string, after: string): string {
+  if (before === after) return "";
+  const oldLines = diffLines(before);
+  const newLines = diffLines(after);
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+    ...oldLines.map(line => `-${line}`),
+    ...newLines.map(line => `+${line}`),
+  ].join("\n");
+}
+
+function withFilesystemDiff(definition: ToolDefinition, read: ToolDefinition): ToolDefinition {
+  if (definition.name !== "filesystem.write" && definition.name !== "filesystem.edit") return definition;
+  if (!("handle" in definition.executable) || definition.executable.handle === undefined || !("handle" in read.executable) || read.executable.handle === undefined) return definition;
+  const execute = definition.executable.handle.execute;
+  const readFile = read.executable.handle.execute;
+  return {
+    ...definition,
+    executable: {
+      handle: createToolHandle(async (...args: readonly unknown[]) => {
+          const input = args[0];
+          const path = typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>).path : undefined;
+          if (!validFilesystemRelativePath(path)) throw new Error("Filesystem writes require a safe relative path");
+          let before = "";
+          try {
+            const result = await readFile({ path });
+            if (typeof result === "object" && result !== null && !Array.isArray(result) && typeof (result as Record<string, unknown>).content === "string") before = (result as Record<string, unknown>).content as string;
+          } catch (error) {
+            if (!(error instanceof Error) || !error.message.includes("ENOENT")) throw error;
+          }
+          const result = await execute(...args);
+          let after = "";
+          try {
+            const current = await readFile({ path });
+            if (typeof current === "object" && current !== null && !Array.isArray(current) && typeof (current as Record<string, unknown>).content === "string") after = (current as Record<string, unknown>).content as string;
+          } catch (error) {
+            if (!(error instanceof Error) || !error.message.includes("ENOENT")) throw error;
+          }
+          const diff = filesystemDiff(path, before, after);
+          return typeof result === "object" && result !== null && !Array.isArray(result)
+            ? { ...(result as Record<string, unknown>), diff }
+            : { result, diff };
+        }),
+    },
+  };
+}
+
+async function nativeFilesystemTools(workspaceRoot: string, projectWorkspace: string): Promise<readonly ToolDefinition[]> {
+  const workspace = await validateRuntimeWorkspace(workspaceRoot, projectWorkspace);
+  const definitions = createFilesystemTools({ workspaceRoot: workspace });
+  const read = definitions.find(definition => definition.name === "filesystem.read");
+  if (read === undefined) throw new Error("Native filesystem read tool is unavailable");
+  return definitions.map(definition => withFilesystemDiff(definition, read));
+}
+
 export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGatewayServer {
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   if (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1) throw new TypeError("maxRequestBytes must be positive");
@@ -496,7 +565,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   const toolDefinitionsFor = async (principal: AuthenticatedPrincipal, project: NonNullable<ReturnType<SQLiteIdentityRepository["getProject"]>> | null): Promise<readonly ToolDefinition[]> => {
     const credential = project?.repository?.credentialId === undefined ? undefined : identity.getGitCredentialRuntime(principal.id, project.repository.credentialId);
     const gitTools = project?.workspace === undefined || project.workspace === "" ? [] : createNativeGitTools(project.workspace, credential, workspaceRoot, project.repository?.remoteName ?? "origin");
-    return [...(options.toolDefinitions ?? []), ...gitTools, ...(await integrations.toolsFor(principal.id))];
+    const filesystemTools = project?.workspace === undefined || project.workspace === "" ? [] : await nativeFilesystemTools(workspaceRoot, project.workspace);
+    return [...(options.toolDefinitions ?? []), ...gitTools, ...filesystemTools, ...(await integrations.toolsFor(principal.id))];
   };
 
   const resolveEffectiveAgentConfiguration = async (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {

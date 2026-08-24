@@ -2,6 +2,24 @@
 
 ## Embedded Pi Runtime
 
+- Native Pi runs now enforce Subpolar turn/provider/tool/token budgets and
+  absolute deadlines through a request-scoped abort controller, with stable
+  budget/timeout events and typed errors. Native image/image_url content is
+  converted to Pi base64 ImageContent without remote retrieval; the gateway
+  accepts the same safe multimodal content shape and documents it in OpenAPI.
+- The authenticated server now rejects provider profiles without a native Pi
+  mapping during setup instead of leaving an unusable native configuration.
+- Explicit `subpolar.spawn_agent` capability assignments inject a restricted
+  Pi custom tool. Child Agents must remain owned by the authenticated user and
+  parent Project, inherit bounded cancellation/deadlines, receive resolved
+  tools without recursive spawn privilege, and project lineage through the
+  public gateway event payloads.
+- Web UI activity projection now preserves run lineage and renders nested child
+  activity, diffs, retries, compaction, and cancellation states.
+- Container verification is scripted in `scripts/verify-container.sh` and runs
+  in CI for readiness and graceful shutdown; local Docker probing remains
+  blocked when the host denies access to `/var/run/docker.sock`.
+
 - Added bounded `spawn_agent` as a Subpolar-owned Pi custom-tool primitive:
   child Agent resolution, authorization, deadline clamping, cancellation,
   recursive privilege stripping, and parent/child event correlation are

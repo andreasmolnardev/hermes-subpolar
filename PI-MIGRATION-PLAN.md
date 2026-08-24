@@ -145,8 +145,9 @@ replace Subpolar policy code.
   conversation transcript.
 - [x] Project Pi text, reasoning, tool, retry, compaction, and terminal events
   into stable Subpolar events.
-- [~] Route existing timeout, retry, fallback, turn-budget, and cost-budget
-  policy around native Pi sessions without reimplementing Pi's agent loop.
+- [x] Route timeout, turn/provider/tool/token budgets around native Pi sessions
+  without reimplementing Pi's agent loop. Retry/fallback policy remains an
+  explicit compatibility concern until the retained provider matrix closes.
 - [x] Tie every Pi session and model runtime to the request abort signal and
   server shutdown. Ensure no model/tool work survives a cancelled or closed
   server.
@@ -170,9 +171,9 @@ tests with no duplicate side effects or terminal events.
   authenticated Subpolar setup/data flow.
 - [x] Preserve configured model IDs and custom endpoints for the native
   `openai-api` path.
-- [~] Complete provider/API-mode mapping for every provider intended to remain
-  supported. Providers with `null` mappings currently fail closed; they must
-  either receive a native Pi adapter or be removed/rejected in setup.
+- [x] Complete provider/API-mode mapping for every provider intended to remain
+  supported. Providers with `null` mappings are rejected by authenticated
+  native setup, while mapped providers resolve through the explicit Pi table.
 - [~] Preserve non-API-key credential modes. AWS credentials, GCP service
   credentials, external-process credentials, Copilot variants, and provider
   environment semantics have explicit Pi mappings or unsupported results;
@@ -184,8 +185,8 @@ tests with no duplicate side effects or terminal events.
   `provider_not_configured`, `unsupported_provider`, and `model_not_found`.
 - [~] Add provider behavior fixtures for streaming, usage, reasoning,
   credentials, custom endpoints, errors, cancellation, and multimodal input.
-  Native OpenAI streaming/usage, endpoint, credential, and unsupported-error
-  fixtures are green; the remaining advertised-provider matrix is pending.
+  Native OpenAI streaming/usage, endpoint, credential, unsupported-setup, and
+  multimodal fixtures are green; mapped-provider-specific fixtures remain.
 
 Exit gate: every advertised provider has a documented Pi transport, credential
 owner, endpoint behavior, and provider-specific behavior/security test.
@@ -257,12 +258,12 @@ observable, and removable.
   coverage includes the native endpoint/credential path, disconnect denial,
   and stale approval rejection.
 - [~] Implement `spawn_agent` as a Subpolar-controlled Pi custom tool with a
-  restricted Agent/Project capability set. The harness tool is production
-  typed and tested with deadlines, cancellation, authorization, recursive
-  privilege stripping, and parent/child event correlation; gateway wiring to
-  persisted child-run records remains.
+  restricted Agent/Project capability set. Harness and authenticated gateway
+  wiring are covered, including deadlines, cancellation, authorization,
+  recursive privilege stripping, and lineage; durable child-run records remain.
 - [~] Link parent/child run IDs and events in persistence and Activity Panel
-  projections.
+  projections. Public gateway payloads and Web UI projections preserve
+  lineage; durable child-run records remain.
 - [~] Add deadline, cancellation, budget, and privilege-isolation tests for
   nested runs. Deadline, cancellation, and privilege isolation are covered;
   nested cost/turn budget accounting remains.
@@ -305,9 +306,9 @@ rows as features are retained.
 | --- | --- | --- |
 | Plain chat | `[x]` | harness and native server tests |
 | Streaming text | `[x]` | native default SSE fixture |
-| Reasoning stream | `[~]` | projection and browser rendering fixture |
+| Reasoning stream | `[x]` | Pi projection and Web UI activity fixture |
 | Cancellation | `[x]` | harness/gateway cancellation tests; add shutdown test |
-| Provider failure/retry | `[~]` | compatibility coverage; native provider matrix pending |
+| Provider failure/retry | `[~]` | compatibility coverage; mapped-provider matrix pending |
 | Usage | `[x]` | native default and persistence assertions |
 | Tool call/continuation | `[x]` | Pi runtime and gateway tool tests |
 | Multiple tool calls | `[x]` | harness/tool loop coverage |
@@ -319,7 +320,7 @@ rows as features are retained.
 | Agent/Project instructions | `[x]` | reusable instruction coverage |
 | Skills/resources | `[~]` | controlled loader exists; full active skill UX pending |
 | Automation invocation | `[x]` | Pi-backed automation coverage |
-| Subagents | `[~]` | restricted child-session/spawn-agent tests; gateway persistence wiring pending |
+| Subagents | `[~]` | restricted child-session/spawn-agent gateway test; durable child-run persistence pending |
 
 ## Batch and commit policy
 

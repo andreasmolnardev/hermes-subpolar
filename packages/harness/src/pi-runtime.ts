@@ -33,7 +33,10 @@ export interface SubpolarPiRuntime {
 	readonly events: readonly SubpolarPiEvent[];
 	prompt(message: string): Promise<void>;
 	subscribe(listener: AgentSessionEventListener): () => void;
-	close(): void;
+	/** Abort the active Pi operation and wait until its session is idle. */
+	abort(): Promise<void>;
+	/** Abort any active work, remove listeners, and wait for the session to settle. */
+	close(): Promise<void>;
 }
 
 export interface ExecuteSubpolarPiRunOptions extends CreateSubpolarPiRuntimeOptions {
@@ -46,7 +49,13 @@ export interface SubpolarPiRunResult {
 	readonly events: readonly SubpolarPiEvent[];
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+}
+
 export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOptions): Promise<SubpolarPiRuntime> {
+	throwIfAborted(options.signal);
 	const modelRuntime = options.modelRuntime ??
 		(await ModelRuntime.create({
 			credentials: options.credentials ?? new InMemoryCredentialStore(),
@@ -77,15 +86,40 @@ export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOp
 		sessionManager,
 	});
 	const unsubscribe = session.subscribe((event) => projector.project(event));
+	let abortPromise: Promise<void> | undefined;
+	let closePromise: Promise<void> | undefined;
+	let closed = false;
+	const abort = (): Promise<void> => {
+		abortPromise ??= session.abort();
+		return abortPromise;
+	};
+	const onAbort = (): void => {
+		void abort().catch(() => undefined);
+	};
+	options.signal?.addEventListener("abort", onAbort, { once: true });
+	if (options.signal?.aborted) onAbort();
+	const close = (): Promise<void> => {
+		if (closePromise) return closePromise;
+		closed = true;
+		options.signal?.removeEventListener("abort", onAbort);
+		closePromise = abort().finally(() => unsubscribe());
+		return closePromise;
+	};
 
 	return {
 		run: options,
 		modelRuntime,
 		session,
 		events,
-		prompt: (message) => session.prompt(message),
+		prompt: async (message) => {
+			if (closed) throw new Error("The Pi runtime is closed.");
+			throwIfAborted(options.signal);
+			await session.prompt(message);
+			throwIfAborted(options.signal);
+		},
 		subscribe: (listener) => session.subscribe(listener),
-		close: () => unsubscribe(),
+		abort,
+		close,
 	};
 }
 
@@ -98,6 +132,6 @@ export async function executeSubpolarPiRun(options: ExecuteSubpolarPiRunOptions)
 		await runtime.prompt(options.userMessage);
 		return { message: runtime.session.messages.at(-1), events: [...runtime.events] };
 	} finally {
-		runtime.close();
+		await runtime.close();
 	}
 }

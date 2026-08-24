@@ -16,7 +16,7 @@ import {
 	type SubpolarPiEvent,
 	type SubpolarPiTool,
 } from "../src/index";
-import { Type, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { resolveToolDescriptors } from "tool-resolver";
 
 async function withTempRun<T>(fn: (root: string) => Promise<T>): Promise<T> {
@@ -35,6 +35,19 @@ const run = {
 	cwd: "/controlled/project",
 	agentDir: "/controlled/agent",
 } as const;
+
+function abortError(): Error {
+	const error = new Error("Pi work aborted");
+	error.name = "AbortError";
+	return error;
+}
+
+function waitFor<T>(promise: Promise<T>, timeoutMs = 2_000): Promise<T> {
+	return Promise.race([
+		promise,
+		new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for Pi runtime")), timeoutMs)),
+	]);
+}
 
 describe("Subpolar Pi runtime seam", () => {
 	test("resource loading is explicit and does not discover project files", () => {
@@ -82,11 +95,101 @@ describe("Subpolar Pi runtime seam", () => {
 			});
 
 			await runtime.prompt("say hello");
-			runtime.close();
+			await runtime.close();
 
 			expect(runtime.session.state.messages.at(-1)).toMatchObject({ role: "assistant" });
 			expect(events.some((event) => event.type === "assistant.text_delta" && event.delta.includes("hello"))).toBe(true);
 			expect(events.at(-1)).toEqual({ type: "run.completed", runId: "run-1" });
+		});
+	});
+
+	test("AbortSignal aborts the active Pi session before prompt settles", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" })]);
+			const controller = new AbortController();
+			let toolStarted: (() => void) | undefined;
+			let toolAborted = false;
+			const toolStartedPromise = new Promise<void>((resolve) => {
+				toolStarted = resolve;
+			});
+			const runtime = await createSubpolarPiRuntime({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				signal: controller.signal,
+				tools: [{
+					name: "wait",
+					label: "Wait",
+					description: "Wait until cancelled",
+					parameters: Type.Object({}),
+					execute: async ({ signal }) => {
+						toolStarted?.();
+						if (!signal) throw new Error("Pi did not pass the tool AbortSignal");
+						if (signal.aborted) {
+							toolAborted = true;
+							throw abortError();
+						}
+						await new Promise<never>((_, reject) => signal.addEventListener("abort", () => {
+							toolAborted = true;
+							reject(abortError());
+						}, { once: true }));
+					},
+				}],
+			});
+
+			const prompt = runtime.prompt("start work").catch(() => undefined);
+			await waitFor(toolStartedPromise);
+			controller.abort(new Error("request cancelled"));
+			await waitFor(prompt);
+			await waitFor(runtime.close());
+
+			expect(toolAborted).toBe(true);
+		});
+	});
+
+	test("close aborts active Pi work, waits for idle, and is idempotent", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" })]);
+			let toolStarted: (() => void) | undefined;
+			let toolAborted = false;
+			const toolStartedPromise = new Promise<void>((resolve) => {
+				toolStarted = resolve;
+			});
+			const runtime = await createSubpolarPiRuntime({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				tools: [{
+					name: "wait",
+					label: "Wait",
+					description: "Wait until cancelled",
+					parameters: Type.Object({}),
+					execute: async ({ signal }) => {
+						toolStarted?.();
+						if (!signal) throw new Error("Pi did not pass the tool AbortSignal");
+						await new Promise<never>((_, reject) => signal.addEventListener("abort", () => {
+							toolAborted = true;
+							reject(abortError());
+						}, { once: true }));
+					},
+				}],
+			});
+
+			const prompt = runtime.prompt("start work").catch(() => undefined);
+			await waitFor(toolStartedPromise);
+			const firstClose = runtime.close();
+			expect(runtime.close()).toBe(firstClose);
+			await waitFor(firstClose);
+			await waitFor(prompt);
+
+			expect(toolAborted).toBe(true);
+			await expect(runtime.prompt("after close")).rejects.toThrow("closed");
 		});
 	});
 

@@ -38,6 +38,9 @@ test("server authenticates users before dispatching owned chat turns", async () 
   try {
     const health = await fetch(`${server.url}api/health`);
     assert.deepEqual(await health.json(), { status: "ok" });
+    const readiness = await fetch(`${server.url}api/ready`);
+    assert.equal(readiness.status, 200);
+    assert.deepEqual(await readiness.json(), { status: "ready" });
     const bootstrap = await fetch(`${server.url}v1/auth/bootstrap`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: new URL(server.url).origin },
@@ -108,6 +111,115 @@ test("server authenticates users before dispatching owned chat turns", async () 
     assert.equal((await fetch(`${server.url}v1/me`, { headers: { cookie: rotatedCookies } })).status, 401);
   } finally {
     await server.shutdown();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("shutdown aborts an active native Pi turn, is idempotent, and prevents post-shutdown effects", async () => {
+  const dataDir = testDataDir();
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let providerAborts = 0;
+  let toolEffects = 0;
+  let signalAtProvider: AbortSignal | undefined;
+  let providerStarted!: () => void;
+  const providerStartedPromise = new Promise<void>(resolve => { providerStarted = resolve; });
+  const server = startApiGatewayServer({
+    port: 0,
+    dataDir,
+    shutdownTimeoutMs: 1_000,
+    toolDefinitions: [{
+      name: "shutdown-tool",
+      capabilityId: "test.shutdown-tool",
+      description: "Must not execute after shutdown begins",
+      inputSchema: { type: "object", properties: {} },
+      source: "test",
+      policy: "allow",
+      executable: { handle: createToolHandle(async () => { toolEffects += 1; return "unexpected"; }) },
+    }],
+  });
+  let shutdownPromise: Promise<void> | undefined;
+  try {
+    const origin = new URL(server.url).origin;
+    const bootstrap = await originalFetch(`${server.url}v1/auth/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ username: "shutdown-user", password: "correct horse" }),
+    });
+    assert.equal(bootstrap.status, 201);
+    const cookies = sessionCookies(bootstrap);
+    const headers = {
+      "content-type": "application/json",
+      cookie: cookies,
+      "x-csrf-token": csrf(cookies),
+      origin,
+    };
+    const configured = await originalFetch(`${server.url}v1/setup/provider`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "openai-api",
+        baseUrl: "https://shutdown-provider.invalid/v1",
+        apiKey: "shutdown-key",
+        model: "shutdown-model",
+      }),
+    });
+    assert.equal(configured.status, 200);
+    const project = await originalFetch(`${server.url}v1/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Shutdown project" }) });
+    assert.equal(project.status, 201);
+    const projectId = (await project.json() as { project: { id: string } }).project.id;
+    const agent = await originalFetch(`${server.url}v1/agents`, { method: "POST", headers, body: JSON.stringify({ projectId, name: "shutdown-runner", instructions: "Wait for the model.", icon: "bot" }) });
+    assert.equal(agent.status, 201);
+    const agentId = (await agent.json() as { agent: { id: string } }).agent.id;
+    const capability = await originalFetch(`${server.url}v1/agents/${agentId}`, { method: "PATCH", headers, body: JSON.stringify({ capabilities: [{ capabilityId: "test.shutdown-tool", enabled: true }], permissions: [{ capabilityId: "test.shutdown-tool", policy: "allow" }] }) });
+    assert.equal(capability.status, 200);
+
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (input instanceof Request || url.startsWith(server.url)) return originalFetch(input, init);
+      if (url !== "https://shutdown-provider.invalid/v1/chat/completions") throw new Error(`Unexpected provider request: ${url}`);
+      providerCalls += 1;
+      signalAtProvider = init?.signal;
+      signalAtProvider?.addEventListener("abort", () => { providerAborts += 1; }, { once: true });
+      providerStarted();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          const abort = () => controller.error(signalAtProvider?.reason ?? new DOMException("aborted", "AbortError"));
+          if (signalAtProvider?.aborted) abort();
+          else signalAtProvider?.addEventListener("abort", abort, { once: true });
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    };
+
+    let turnOutcome = "pending";
+    const turn = fetch(`${server.url}v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: "shutdown-model", projectId, agentId, messages: [{ role: "user", content: "hold this turn" }] }),
+    }).then(async response => { turnOutcome = `${response.status}: ${await response.text()}`; }).catch(error => { turnOutcome = String(error); });
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        providerStartedPromise,
+        new Promise<never>((_, reject) => { startupTimer = setTimeout(() => reject(new Error(`native provider did not start (${turnOutcome})`)), 2_000); }),
+      ]);
+    } finally {
+      if (startupTimer !== undefined) clearTimeout(startupTimer);
+    }
+    const startedAt = performance.now();
+    shutdownPromise = server.shutdown();
+    assert.strictEqual(server.shutdown(), shutdownPromise);
+    await shutdownPromise;
+    assert.ok(performance.now() - startedAt < 2_000);
+    assert.equal(signalAtProvider?.aborted, true);
+    assert.equal(providerAborts, 1);
+    await turn;
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(providerCalls, 1);
+    assert.equal(toolEffects, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (shutdownPromise === undefined) await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

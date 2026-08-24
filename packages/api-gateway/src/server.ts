@@ -24,7 +24,7 @@ import {
   type AutomationInput,
   type AutomationPermissionMode,
 } from "data-layer";
-import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiModelResolutionError, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
+import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiCredentialError, SubpolarPiModelResolutionError, toSubpolarPiCredential, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
 import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
@@ -376,6 +376,7 @@ function promptAttribute(value: string): string {
 function requestErrorCode(error: unknown): string {
   if (error instanceof OwnershipError) return "forbidden";
   if (error instanceof SubpolarPiModelResolutionError) return error.code;
+  if (error instanceof SubpolarPiCredentialError) return error.code;
   if (error instanceof Error && ["provider_not_configured", "model_not_found", "unsupported_provider"].includes(error.message)) return error.message;
   return "request_failed";
 }
@@ -429,25 +430,22 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
   };
 
   type PiCredential = NonNullable<Awaited<ReturnType<SubpolarCredentialBackend["read"]>>>;
-  const nativeCredential = (credentials: Awaited<ReturnType<typeof configuredCredential>>): PiCredential | undefined => {
+  const nativeCredential = (providerId: string, credentials: Awaited<ReturnType<typeof configuredCredential>>): PiCredential | undefined => {
     const access = credentials.accessToken ?? credentials.copilotToken ?? credentials.apiKey;
-    if (access === undefined || access.trim() === "" || access === "env") return undefined;
-    if (credentials.refreshToken !== undefined && credentials.expiresAt !== undefined) {
-      return { type: "oauth", access, refresh: credentials.refreshToken, expires: credentials.expiresAt };
-    }
-    return { type: "api_key", key: access };
+    if ((access === undefined || access.trim() === "" || access === "env") && credentials.accessKeyId === undefined && credentials.clientEmail === undefined && credentials.executable === undefined) return undefined;
+    return toSubpolarPiCredential(providerId, credentials);
   };
   const nativeCredentialBackend: SubpolarCredentialBackend = {
     async read(providerId) {
       const connection = identity.providerConnection();
       if (connection === null || mapHermesProviderToPi(connection.providerId) !== providerId) return undefined;
-      return nativeCredential(await configuredCredential(connection));
+      return nativeCredential(connection.providerId, await configuredCredential(connection));
     },
     async list() {
       const connection = identity.providerConnection();
       if (connection === null) return [];
       const providerId = mapHermesProviderToPi(connection.providerId);
-      const credentials = nativeCredential(await configuredCredential(connection));
+      const credentials = nativeCredential(connection.providerId, await configuredCredential(connection));
       if (providerId === undefined || credentials === undefined) return [];
       return [{ providerId, type: credentials.type }];
     },

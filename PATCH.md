@@ -102,6 +102,12 @@
   values fail with stable unsupported-mode errors instead of being dropped.
 - Added native-default automation and WebSocket approval coverage, including
   disconnect denial and rejection of stale approval responses on a new socket.
+- Added shutdown behavior coverage for active native Pi turns, provider abort
+  propagation, idempotent shutdown, readiness, and prevention of post-shutdown
+  effects.
+- Added a restricted child-session harness primitive that reuses the Pi runner,
+  propagates parent cancellation, accepts only pre-resolved child tools, and
+  correlates child events to parent and child run IDs.
 - Added workspace-confined native filesystem tools with bounded read/write,
   canonical traversal and symlink-escape checks, fail-closed operation
   selection, approval-gated mutations, and explicit shell-interpreter opt-in.

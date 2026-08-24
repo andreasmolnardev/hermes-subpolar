@@ -141,7 +141,7 @@ replace Subpolar policy code.
   into stable Subpolar events.
 - [~] Route existing timeout, retry, fallback, turn-budget, and cost-budget
   policy around native Pi sessions without reimplementing Pi's agent loop.
-- [~] Tie every Pi session and model runtime to the request abort signal and
+- [x] Tie every Pi session and model runtime to the request abort signal and
   server shutdown. Ensure no model/tool work survives a cancelled or closed
   server.
 - [ ] Decide and implement resumable-session hydration after process restart;
@@ -240,11 +240,11 @@ observable, and removable.
 - [x] Add true native-default automation coverage and WebSocket approval E2E;
   coverage includes the native endpoint/credential path, disconnect denial,
   and stale approval rejection.
-- [ ] Implement `spawn_agent` as a Subpolar-controlled Pi custom tool with a
+- [~] Implement `spawn_agent` as a Subpolar-controlled Pi custom tool with a
   restricted Agent/Project capability set.
-- [ ] Link parent/child run IDs and events in persistence and Activity Panel
+- [~] Link parent/child run IDs and events in persistence and Activity Panel
   projections.
-- [ ] Add deadline, cancellation, budget, and privilege-isolation tests for
+- [~] Add deadline, cancellation, budget, and privilege-isolation tests for
   nested runs.
 
 Exit gate: subagents cannot broaden parent privileges and automation execution
@@ -256,7 +256,7 @@ cannot bypass the normal Agent, Project, tool, or credential policy.
   pending approvals, retries, compaction, and cancellation without importing
   Pi types into `web-ui`.
 - [ ] Add reconnect and pending-approval browser/protocol E2E coverage.
-- [ ] Define health/readiness/shutdown behavior for active Pi sessions and
+- [~] Define health/readiness/shutdown behavior for active Pi sessions and
   provider/model runtime initialization.
 - [ ] Verify isolated `SUBPOLAR_DATA_DIR`, workspace root confinement, clean
   install, and container startup with the Pi closure.

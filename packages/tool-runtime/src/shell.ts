@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { createToolHandle, type ToolDefinition } from "tool-resolver";
 
 export type ShellCommandRule = {
@@ -15,6 +15,8 @@ export type ShellPolicy = {
   readonly maxTimeoutMs: number;
   readonly maxOutputBytes: number;
   readonly environment?: Readonly<Record<string, string>>;
+  /** Interpreters are denied unless the caller explicitly opts into shell execution. */
+  readonly allowShell?: boolean;
 };
 
 export type ShellProcess = {
@@ -181,6 +183,8 @@ function matchesRule(executable: string, argv: readonly string[], rules: readonl
     (rule.argumentPrefix === undefined || rule.argumentPrefix.every((item, index) => argv[index + 1] === item)));
 }
 
+const SHELL_INTERPRETERS = new Set(["ash", "bash", "dash", "fish", "ksh", "sh", "tcsh", "zsh", "pwsh", "powershell"]);
+
 async function executeShell(
   inputValue: unknown,
   policy: ShellPolicy,
@@ -194,6 +198,7 @@ async function executeShell(
   const executable = await canonicalWithin(input.argv[0] ?? "", policy.executableRoots, "Executable");
   const executableInfo = await stat(executable);
   if (!executableInfo.isFile() || (executableInfo.mode & 0o111) === 0) throw new Error("Executable is not runnable");
+  if (!policy.allowShell && SHELL_INTERPRETERS.has(basename(executable).toLowerCase())) throw new Error("Shell interpreters require explicit enablement");
   if (policy.deniedExecutables?.includes(executable)) throw new Error("Executable is denied");
   if (!matchesRule(executable, input.argv, policy.allowedCommands)) throw new Error("Command is not allowlisted");
 
@@ -205,6 +210,7 @@ async function executeShell(
   const finalCwd = await canonicalWithin(resolve(input.cwd ?? process.cwd()), policy.cwdRoots, "Working directory");
   if (finalExecutable !== executable || finalCwd !== cwd || !finalExecutableInfo.isFile() ||
       (finalExecutableInfo.mode & 0o111) === 0 || policy.deniedExecutables?.includes(finalExecutable) ||
+      (!policy.allowShell && SHELL_INTERPRETERS.has(basename(finalExecutable).toLowerCase())) ||
       !matchesRule(finalExecutable, input.argv, policy.allowedCommands)) {
     throw new Error("Shell executable or working directory changed during validation");
   }

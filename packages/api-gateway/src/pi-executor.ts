@@ -180,6 +180,14 @@ function projectPiEvent(request: GatewayNormalizedRequest, event: SubpolarPiEven
       return Promise.resolve(sink({ ...base, type: "terminal", outcome: "budget_exhausted", message: `Pi ${event.resource} budget exhausted at ${event.limit}.` }));
     case "run.timed_out":
       return Promise.resolve(sink({ ...base, type: "terminal", outcome: "budget_exhausted", message: "Pi run deadline exceeded." }));
+    case "run.retrying":
+      return Promise.resolve(sink({ ...base, type: "runtime.status", phase: "retrying", metadata: { attempt: event.attempt } }));
+    case "run.compaction_started":
+      return Promise.resolve(sink({ ...base, type: "runtime.status", phase: "compaction.started" }));
+    case "run.compaction_completed":
+      return Promise.resolve(sink({ ...base, type: "runtime.status", phase: event.aborted ? "compaction.aborted" : "compaction.completed" }));
+    case "run.queue_updated":
+      return Promise.resolve(sink({ ...base, type: "runtime.status", phase: "queue.updated", metadata: { steering: event.steering, follow_up: event.followUp } }));
     default:
       return Promise.resolve();
   }

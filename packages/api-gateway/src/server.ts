@@ -685,6 +685,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const nativePiToolFactory = prepared.allowSubagents && nativePiDefault && connection !== null
       ? async (parentRun: SubpolarPiRunContext): Promise<readonly SubpolarPiTool[]> => [createSubpolarPiSpawnAgentTool({
         maxDeadlineMs: 120_000,
+        persistence,
         authorize: async request => {
           const child = identity.getAgent(principal.id, request.requestedAgentId);
           return child !== null && child.projectId === prepared.projectId ? "allow" : "deny";

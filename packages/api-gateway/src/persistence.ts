@@ -151,6 +151,7 @@ export function createGatewayPersistenceAdapter(repository: SessionRepository): 
         updatedAt: createdAt,
         runtime: setup?.runtime === undefined ? RUNTIME : dataRuntime(setup.runtime),
         ...(setup?.model === undefined ? {} : { model: setup.model }),
+        ...(setup?.metadata === undefined ? {} : { metadata: setup.metadata }),
       });
     },
 

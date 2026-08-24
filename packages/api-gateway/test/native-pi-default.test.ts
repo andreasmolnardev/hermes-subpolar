@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "bun:test";
 
+import { HERMES_TO_PI_PROVIDER_ID } from "harness";
 import { startApiGatewayServer } from "../src/server.ts";
 
 function sessionCookies(response: Response): string {
@@ -138,13 +139,29 @@ test("native model resolution reports unsupported providers explicitly", async (
       "x-csrf-token": csrf(cookies),
       origin,
     };
-    const configured = await fetch(`${server.url}v1/setup/provider`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ providerId: "custom", baseUrl: "https://unsupported.example/v1", apiKey: "key", model: "model" }),
-    });
-    assert.equal(configured.status, 400);
-    assert.deepEqual(await configured.json(), { error: "invalid_provider" });
+    for (const [providerId, piProviderId] of Object.entries(HERMES_TO_PI_PROVIDER_ID)) {
+      if (piProviderId === null) {
+        const configured = await fetch(`${server.url}v1/setup/provider`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ providerId, baseUrl: `https://${providerId}.invalid/v1`, apiKey: "key", model: "model" }),
+        });
+        assert.equal(configured.status, 400, `unsupported provider ${providerId} should be rejected`);
+        assert.deepEqual(await configured.json(), { error: "invalid_provider" });
+      }
+    }
+
+    for (const [providerId, piProviderId] of Object.entries(HERMES_TO_PI_PROVIDER_ID)) {
+      if (piProviderId !== null) {
+        const configured = await fetch(`${server.url}v1/setup/provider`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ providerId, baseUrl: `https://${providerId}.invalid/v1`, apiKey: "key", model: "model" }),
+        });
+        assert.equal(configured.status, 200, `mapped provider ${providerId} should be accepted by setup`);
+        assert.deepEqual(await configured.json(), { configured: true });
+      }
+    }
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });

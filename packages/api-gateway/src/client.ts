@@ -89,7 +89,13 @@ export type GatewayDeltaProjectionEvent = GatewayProjectionBase & (
   | { readonly type: "reasoning.delta"; readonly text: string }
 );
 
-export type GatewayEventProjectionInput = HarnessEvent | GatewayProviderProjectionEvent | GatewayDeltaProjectionEvent;
+export type GatewayRuntimeProjectionEvent = GatewayProjectionBase & {
+  readonly type: "runtime.status";
+  readonly phase: string;
+  readonly metadata?: HarnessProviderMetadata;
+};
+
+export type GatewayEventProjectionInput = HarnessEvent | GatewayProviderProjectionEvent | GatewayDeltaProjectionEvent | GatewayRuntimeProjectionEvent;
 
 function usage(value: HarnessUsage): GatewayUsage {
   return {
@@ -152,6 +158,12 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
         type: "status.update",
         session_id: event.sessionId,
         payload: { phase: event.type }
+      };
+    case "runtime.status":
+      return {
+        type: "status.update",
+        session_id: event.sessionId,
+        payload: { phase: event.phase, ...(event.metadata === undefined ? {} : { metadata: event.metadata }), ...runLineage(event) },
       };
     case "provider.completed":
       return {

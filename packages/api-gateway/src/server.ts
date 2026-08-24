@@ -24,8 +24,8 @@ import {
   type AutomationInput,
   type AutomationPermissionMode,
 } from "data-layer";
-import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiCredentialError, SubpolarPiModelResolutionError, SubpolarPiModelRuntimePool, toSubpolarPiCredential, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
-import { createToolHandle, resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
+import { assembleHarnessContext, createSubpolarPiSpawnAgentTool, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiCredentialError, SubpolarPiModelResolutionError, SubpolarPiModelRuntimePool, toSubpolarPiCredential, toSubpolarPiTool, SUBPOLAR_PI_SPAWN_AGENT_TOOL_NAME, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend, type SubpolarPiRunContext, type SubpolarPiTool } from "harness";
+import { createToolHandle, resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput, type ToolDescriptor } from "tool-resolver";
 import { createFilesystemTools } from "tool-runtime";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
@@ -130,7 +130,7 @@ function parseMessages(value: unknown): readonly ProviderMessage[] {
     if (typeof record.content !== "string" && !Array.isArray(record.content)) {
       throw new TypeError("message role and content are invalid");
     }
-    return { role: record.role, content: record.content as ProviderContent };
+    return { role: record.role as "system" | "user" | "assistant", content: record.content as ProviderContent };
   });
   validateProviderRequest({ model: "gateway", messages, tools: [], requestId: "gateway-chat" });
   return messages;
@@ -576,14 +576,34 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     return [...(options.toolDefinitions ?? []), ...gitTools, ...filesystemTools, ...(await integrations.toolsFor(principal.id))];
   };
 
+  const spawnAgentDefinition: ToolDefinition = {
+    name: SUBPOLAR_PI_SPAWN_AGENT_TOOL_NAME,
+    capabilityId: "subpolar.spawn_agent",
+    description: "Run an explicitly authorized Subpolar Agent in a restricted child session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string", minLength: 1 },
+        task: { type: "string", minLength: 1 },
+        deadlineMs: { type: "integer", minimum: 1 },
+      },
+      required: ["agentId", "task"],
+      additionalProperties: false,
+    },
+    source: "subpolar",
+    executable: { reference: "subpolar:spawn_agent" },
+    policy: "allow",
+  };
+
   const resolveEffectiveAgentConfiguration = async (principal: AuthenticatedPrincipal, agent: NonNullable<ReturnType<SQLiteIdentityRepository["getAgent"]>>, sessionId: string, projectId: string | undefined, requestedModel: string, requestedReasoning: "low" | "medium" | "high" | undefined, permissionMode: PermissionMode | undefined) => {
     const project = projectId === undefined ? null : identity.getProject(principal.id, projectId);
     if (projectId !== undefined && project === null) throw new OwnershipError("Project is not owned by the authenticated user");
-    const toolDefinitions = await toolDefinitionsFor(principal, project);
+    const toolDefinitions = [...await toolDefinitionsFor(principal, project), spawnAgentDefinition];
     const projectOverride = projectId === undefined ? null : identity.getAgentProjectOverride(principal.id, projectId, agent.id);
     const model = requestedModel !== "default" ? requestedModel : projectOverride?.model ?? agent.model;
     const effectiveCapabilities = (projectOverride?.capabilities ?? agent.capabilities).map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(principal.id, item.capabilityId) }));
     const effectivePermissions = (projectOverride?.permissions ?? agent.permissions).map(item => ({ ...item, capabilityId: integrations.canonicalCapabilityId(principal.id, item.capabilityId) }));
+    const allowSubagents = effectiveCapabilities.some(item => item.enabled && item.capabilityId === spawnAgentDefinition.capabilityId);
     const enabledCapabilityIds = agent.capabilityMode === "legacy" && projectOverride?.capabilities === undefined
       ? toolDefinitions.map(definition => definition.capabilityId ?? definition.name)
       : effectiveCapabilities.filter(item => item.enabled).map(item => item.capabilityId);
@@ -599,10 +619,10 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const configuredEffort = requestedReasoning ?? projectOverride?.reasoningEffort ?? agent.reasoningEffort;
     const reasoningEffort = configuredEffort === "low" || configuredEffort === "medium" || configuredEffort === "high" ? configuredEffort as "low" | "medium" | "high" : undefined;
     const skills = identity.effectiveAgentSkills(principal.id, agent.id);
-    return { projectOverride, model, tools, reasoningEffort, skills, project };
+    return { projectOverride, model, tools: tools.filter(tool => tool.name !== SUBPOLAR_PI_SPAWN_AGENT_TOOL_NAME), reasoningEffort, skills, project, allowSubagents };
   };
 
-  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; cwd?: string; reasoningEffort?: "low" | "medium" | "high"; contextAssembler?: HarnessContextAssembler }> => {
+  const prepareTurn = async (principal: AuthenticatedPrincipal, input: TurnInput): Promise<{ input: TurnInput; sessionId: string; tools: readonly ToolDefinition[]; cwd?: string; reasoningEffort?: "low" | "medium" | "high"; contextAssembler?: HarnessContextAssembler; allowSubagents?: boolean; projectId?: string }> => {
     const sessionId = input.sessionId ?? randomUUID();
     const ownedSession = identity.listSessions(principal.id).find(item => item.sessionId === sessionId);
     if (ownedSession?.projectId !== undefined && input.projectId !== undefined && ownedSession.projectId !== input.projectId) throw new OwnershipError("Session is assigned to another project");
@@ -638,9 +658,9 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
             sources: [{ kind: "instructions", content: agentSkillInstructions(agent, effectiveAgent?.skills ?? [], clientSystemMessages, project?.instructions ?? "") }],
           }).messages;
         };
-        return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), contextAssembler, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+        return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), contextAssembler, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), ...(effectiveAgent?.allowSubagents ? { allowSubagents: true } : {}), ...(projectId === undefined ? {} : { projectId }) };
       }
-      return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+      return { input: { ...input, model: effectiveModel }, sessionId, tools, ...(project?.workspace ? { cwd: project.workspace } : {}), ...(reasoningEffort === undefined ? {} : { reasoningEffort }), ...(effectiveAgent?.allowSubagents ? { allowSubagents: true } : {}), ...(projectId === undefined ? {} : { projectId }) };
     }
     const projectTools = await toolDefinitionsFor(principal, project);
     const contextAssembler: HarnessContextAssembler | undefined = project === null || project.instructions.trim() === "" ? undefined : (async context => assembleHarnessContext({ ...context, messages: context.messages.filter(message => message.role !== "system") }, { sources: [{ kind: "instructions", content: `<project-instructions>\n${project.instructions}\n</project-instructions>` }] }).messages);
@@ -662,6 +682,55 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
     const nativePiDefault = options.piExecutor === undefined && options.provider === undefined;
     const runtime = nativePiDefault || connection === null ? null : await resolveProvider(connection, () => configuredCredential(connection));
     const approvalPolicy = turnApprovalPolicy ?? options.approvalPolicy;
+    const nativePiToolFactory = prepared.allowSubagents && nativePiDefault && connection !== null
+      ? async (parentRun: SubpolarPiRunContext): Promise<readonly SubpolarPiTool[]> => [createSubpolarPiSpawnAgentTool({
+        maxDeadlineMs: 120_000,
+        authorize: async request => {
+          const child = identity.getAgent(principal.id, request.requestedAgentId);
+          return child !== null && child.projectId === prepared.projectId ? "allow" : "deny";
+        },
+        resolveAgent: async request => {
+          const child = identity.getAgent(principal.id, request.requestedAgentId);
+          if (child === null || child.projectId !== prepared.projectId) throw new OwnershipError("Child Agent is not owned by the authenticated user or project");
+          const childSessionId = `${parentRun.sessionId}.child.${child.id}`;
+          const effectiveChild = await resolveEffectiveAgentConfiguration(principal, child, childSessionId, prepared.projectId, "default", undefined, undefined);
+          const childProject = effectiveChild.project;
+          const childCwd = await validateRuntimeWorkspace(workspaceRoot, childProject?.workspace ?? runtimeCwd ?? workspaceRoot);
+          const childResolution = await resolveSubpolarPiModel({
+            hermesProviderId: connection.providerId,
+            modelId: effectiveChild.model ?? connection.model,
+            baseUrl: connection.baseUrl,
+            credentials: nativeCredentialBackend,
+            runtimePool: nativeModelRuntimePool,
+            signal: request.signal,
+          });
+          const childContext: SubpolarPiRunContext = {
+            ...parentRun,
+            cwd: childCwd,
+            sessionId: childSessionId,
+          };
+          const childTools = effectiveChild.tools.map(descriptor => toSubpolarPiTool(
+            descriptor,
+            childContext,
+            async (resolved, toolRequest) => {
+              if (!("handle" in resolved.executable) || resolved.executable.handle === undefined) {
+                return { content: [{ type: "text", text: `No executable handle for tool ${resolved.name}.` }], isError: true };
+              }
+              const value = await resolved.executable.handle.execute(toolRequest.params, toolRequest.signal);
+              return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) ?? "" }] };
+            },
+          ));
+          return {
+            childAgentId: child.id,
+            model: childResolution.model,
+            modelRuntime: childResolution.modelRuntime,
+            instructions: agentSkillInstructions(child, effectiveChild.skills, [], childProject?.instructions ?? ""),
+            cwd: childCwd,
+            tools: childTools,
+          };
+        },
+      })]
+      : undefined;
     return gateway.executeRequest({
       model: prepared.input.model === "default" && connection !== null ? connection.model : prepared.input.model,
       messages: prepared.input.messages,
@@ -673,6 +742,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
       requestId: prepared.input.requestId ?? randomUUID(),
       ...(prepared.reasoningEffort === undefined ? {} : { options: { reasoningEffort: prepared.reasoningEffort } }),
       signal,
+      ...(nativePiToolFactory === undefined ? {} : { piToolFactory: nativePiToolFactory }),
       eventSink: emit,
       ...(approvalPolicy === undefined ? {} : { approvalPolicy: async approval => {
         const approvalRequestId = `${approval.requestId}:${approval.call.id}`;

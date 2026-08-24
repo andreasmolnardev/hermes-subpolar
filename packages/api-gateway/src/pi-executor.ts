@@ -155,7 +155,14 @@ function gatewayBase(request: GatewayNormalizedRequest, id: string): GatewayProj
 }
 
 function projectPiEvent(request: GatewayNormalizedRequest, event: SubpolarPiEvent, sink: (event: GatewayEventProjectionInput) => void | Promise<void>, nextId: () => string): Promise<void> {
-  const base = gatewayBase(request, nextId());
+  const correlated = event as SubpolarPiEvent & { readonly parentRunId?: string; readonly childRunId?: string };
+  const base = {
+    ...gatewayBase(request, nextId()),
+    runId: event.runId,
+    ...(correlated.parentRunId === undefined ? {} : { parentRunId: correlated.parentRunId }),
+    ...(correlated.childRunId === undefined ? {} : { childRunId: correlated.childRunId }),
+    ...(correlated.childRunId === undefined ? {} : { depth: correlated.parentRunId === undefined ? 1 : 1 }),
+  };
   switch (event.type) {
     case "run.started":
       return Promise.resolve(sink({ ...base, type: "request.started" }));
@@ -268,6 +275,7 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
         return request.approvalPolicy!(approvalRequest);
       },
     ));
+    const additionalTools = await request.piToolFactory?.(run, descriptors) ?? [];
     const assembled = request.contextAssembler === undefined
       ? request.messages
       : await request.contextAssembler({
@@ -297,7 +305,7 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
         ...run,
         model: nativeResolution?.model ?? bridge!.model,
         ...(nativeResolution === undefined ? { nativeProviders: [bridge!.provider] } : { modelRuntime: nativeResolution.modelRuntime }),
-        tools,
+        tools: [...tools, ...additionalTools],
         systemPrompt: systemPrompt || undefined,
         history: assembledUser.history,
         userMessage: assembledUser.userMessage,

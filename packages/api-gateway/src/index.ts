@@ -43,7 +43,9 @@ import {
   type HarnessToolOutputLimits,
   type HarnessContextAssembler,
   type HarnessSessionRepository,
-  type HarnessPersistencePort
+  type HarnessPersistencePort,
+  type SubpolarPiRunContext,
+  type SubpolarPiTool
 } from "harness";
 import {
   resolveTools,
@@ -122,6 +124,8 @@ export type GatewayExecutionRequest = {
   sessionRepository?: GatewaySessionRepository;
   persistence?: HarnessPersistencePort;
   contextAssembler?: HarnessContextAssembler;
+  /** Internal server hook for application-owned Pi custom tools. */
+  piToolFactory?: (run: SubpolarPiRunContext, descriptors: readonly ToolDescriptor[]) => readonly SubpolarPiTool[] | Promise<readonly SubpolarPiTool[]>;
   /** Existing gateway protocol event stream. */
   eventSink?: GatewayProtocolEventSink;
   /** Existing data-layer transport event stream. */
@@ -158,6 +162,7 @@ export type GatewayNormalizedRequest = {
   readonly sessionRepository?: GatewaySessionRepository;
   readonly persistence?: HarnessPersistencePort;
   readonly contextAssembler?: HarnessContextAssembler;
+  readonly piToolFactory?: GatewayExecutionRequest["piToolFactory"];
 };
 
 /** Pi-backed execution seam. Explicit injection remains available for tests and controlled compatibility callers. */
@@ -194,7 +199,7 @@ const GATEWAY_REQUEST_FIELDS = new Set([
   "sessionId", "cwd", "signal", "timeoutMs", "turnLeaseTimeoutMs", "deadline", "options", "cacheHints",
   "metadata", "budgets", "retryPolicy", "toolExecutor", "toolTimeoutMs", "toolConcurrency", "toolOutputLimits",
   "approvalPolicy", "clock", "sleeper", "idGenerator", "sessionRepository", "persistence", "eventSink",
-  "transportEventSink", "contextAssembler"
+  "transportEventSink", "contextAssembler", "piToolFactory"
 ]);
 const GATEWAY_OPTION_FIELDS = new Set([
   "sessionRepository", "persistence", "sessionCwdStore", "toolExecutor", "turnLeaseManager", "turnLease", "piExecutor", "legacyHarness"
@@ -444,7 +449,8 @@ export function normalizeGatewayRequest(request: GatewayExecutionRequest): Gatew
     ...(request.idGenerator === undefined ? {} : { idGenerator: request.idGenerator }),
      ...(request.sessionRepository === undefined ? {} : { sessionRepository: request.sessionRepository }),
      ...(request.persistence === undefined ? {} : { persistence: request.persistence }),
-     ...(request.contextAssembler === undefined ? {} : { contextAssembler: request.contextAssembler })
+     ...(request.contextAssembler === undefined ? {} : { contextAssembler: request.contextAssembler }),
+     ...(request.piToolFactory === undefined ? {} : { piToolFactory: request.piToolFactory })
   };
 }
 

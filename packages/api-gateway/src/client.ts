@@ -18,6 +18,13 @@ type GatewayUsage = {
   cacheReadInputTokens?: number;
 };
 
+type GatewayRunLineage = {
+  run_id?: string;
+  parent_run_id?: string;
+  child_run_id?: string;
+  depth?: number;
+};
+
 export type GatewayClientRequest = {
   workspaceId: WorkspaceSummary["id"];
   message: string;
@@ -25,10 +32,10 @@ export type GatewayClientRequest = {
 
 /** Existing JSON gateway event names, kept local so browser clients need no shared implementation import. */
 export type GatewayProtocolEvent =
-  | { type: "message.start"; session_id: string; payload: { request_id: string } }
-  | { type: "message.delta"; session_id: string; payload: { text: string } }
-  | { type: "message.complete"; session_id: string; payload: { outcome: "completed" } }
-  | { type: "reasoning.delta"; session_id: string; payload: { text: string } }
+  | { type: "message.start"; session_id: string; payload: { request_id: string } & GatewayRunLineage }
+  | { type: "message.delta"; session_id: string; payload: { text: string } & GatewayRunLineage }
+  | { type: "message.complete"; session_id: string; payload: { outcome: "completed" } & GatewayRunLineage }
+  | { type: "reasoning.delta"; session_id: string; payload: { text: string } & GatewayRunLineage }
   | { type: "status.update"; session_id: string; payload: {
     phase: string;
     usage?: GatewayUsage;
@@ -36,12 +43,12 @@ export type GatewayProtocolEvent =
     reasoning?: string;
     provider_request_id?: string;
     metadata?: HarnessProviderMetadata;
-  } }
-  | { type: "approval.request"; session_id: string; payload: { call_id: string; name: string; arguments: string } }
-  | { type: "tool.start"; session_id: string; payload: { call_id: string; name: string } }
-  | { type: "tool.generating"; session_id: string; payload: { call_id: string; name: string; arguments?: string } }
-  | { type: "tool.complete"; session_id: string; payload: { call_id: string; is_error: boolean } }
-  | { type: "error"; session_id: string; payload: { code: string; message: "Request failed" } };
+  } & GatewayRunLineage }
+  | { type: "approval.request"; session_id: string; payload: { call_id: string; name: string; arguments: string } & GatewayRunLineage }
+  | { type: "tool.start"; session_id: string; payload: { call_id: string; name: string } & GatewayRunLineage }
+  | { type: "tool.generating"; session_id: string; payload: { call_id: string; name: string; arguments?: string } & GatewayRunLineage }
+  | { type: "tool.complete"; session_id: string; payload: { call_id: string; is_error: boolean } & GatewayRunLineage }
+  | { type: "error"; session_id: string; payload: { code: string; message: "Request failed" } & GatewayRunLineage };
 
 export type GatewayClientEvent = TransportEvent;
 export type GatewayProtocolEventSink = (event: GatewayProtocolEvent) => void | Promise<void>;
@@ -52,6 +59,10 @@ export type GatewayProjectionBase = {
   readonly requestId: string;
   readonly sessionId: string;
   readonly at: number;
+  readonly runId?: string;
+  readonly parentRunId?: string;
+  readonly childRunId?: string;
+  readonly depth?: number;
 };
 
 /** Provider stream events are promoted to the gateway stream without changing harness contracts. */
@@ -92,6 +103,16 @@ function usage(value: HarnessUsage): GatewayUsage {
   };
 }
 
+function runLineage(event: GatewayEventProjectionInput): GatewayRunLineage {
+  const lineage = event as Partial<GatewayProjectionBase>;
+  return {
+    ...(lineage.runId === undefined ? {} : { run_id: lineage.runId }),
+    ...(lineage.parentRunId === undefined ? {} : { parent_run_id: lineage.parentRunId }),
+    ...(lineage.childRunId === undefined ? {} : { child_run_id: lineage.childRunId }),
+    ...(lineage.depth === undefined ? {} : { depth: lineage.depth }),
+  };
+}
+
 function transportFinishReason(
   value: HarnessFinishReason
 ): "stop" | "length" | "tool_calls" | "content_filter" | "error" | undefined {
@@ -123,7 +144,7 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       return {
         type: "message.start",
         session_id: event.sessionId,
-        payload: { request_id: event.requestId }
+        payload: { request_id: event.requestId, ...runLineage(event) }
       };
     case "provider.requested":
     case "provider.started":
@@ -153,10 +174,10 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       };
     case "provider.text.delta":
     case "message.delta":
-      return { type: "message.delta", session_id: event.sessionId, payload: { text: event.text } };
+      return { type: "message.delta", session_id: event.sessionId, payload: { text: event.text, ...runLineage(event) } };
     case "provider.reasoning.delta":
     case "reasoning.delta":
-      return { type: "reasoning.delta", session_id: event.sessionId, payload: { text: event.text } };
+      return { type: "reasoning.delta", session_id: event.sessionId, payload: { text: event.text, ...runLineage(event) } };
     case "provider.tool-call.delta":
       return generatingEvent(event, event.callId, event.name, event.arguments);
     case "provider.tool-call":
@@ -193,7 +214,7 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       return {
         type: "approval.request",
         session_id: event.sessionId,
-        payload: { call_id: event.call.id, name: event.call.name, arguments: event.call.arguments }
+        payload: { call_id: event.call.id, name: event.call.name, arguments: event.call.arguments, ...runLineage(event) }
       };
     case "approval.resolved":
       return {
@@ -205,13 +226,13 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       return {
         type: "tool.start",
         session_id: event.sessionId,
-        payload: { call_id: event.call.id, name: event.call.name }
+        payload: { call_id: event.call.id, name: event.call.name, ...runLineage(event) }
       };
     case "tool.completed":
       return {
         type: "tool.complete",
         session_id: event.sessionId,
-        payload: { call_id: event.callId, is_error: event.result.isError === true }
+        payload: { call_id: event.callId, is_error: event.result.isError === true, ...runLineage(event) }
       };
     case "retry.scheduled":
       return {
@@ -227,11 +248,11 @@ export function mapHarnessEventToGatewayEvent(event: GatewayEventProjectionInput
       };
     case "terminal":
       return event.outcome === "completed"
-        ? { type: "message.complete", session_id: event.sessionId, payload: { outcome: "completed" } }
+        ? { type: "message.complete", session_id: event.sessionId, payload: { outcome: "completed", ...runLineage(event) } }
         : {
           type: "error",
           session_id: event.sessionId,
-          payload: { code: `harness.${event.outcome}`, message: "Request failed" }
+          payload: { code: `harness.${event.outcome}`, message: "Request failed", ...runLineage(event) }
         };
   }
 }

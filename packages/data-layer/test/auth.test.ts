@@ -317,3 +317,41 @@ test("voice settings persist without exposing provider credentials", async () =>
     repository.close();
   }
 });
+
+test("automation metadata, trigger payloads, and integration errors redact secrets", async () => {
+  const repository = new SQLiteIdentityRepository(":memory:");
+  try {
+    const session = await repository.bootstrap("operator", "correct horse");
+    const project = repository.createProject(session.principal.id, "private");
+    const agent = repository.createAgent(session.principal.id, project.id, "default", "instructions");
+    const automation = repository.createAutomation(session.principal.id, {
+      name: "secure run",
+      enabled: true,
+      schedule: { kind: "once", at: "2027-01-01T00:00:00.000Z", timezone: "UTC" },
+      prompt: "Run the task.",
+      agentId: agent.id,
+      permissionMode: "fail",
+      metadata: { apiKey: "automation-secret", visible: "kept" },
+    });
+    assert.deepEqual(automation.metadata, { visible: "kept" });
+
+    const run = repository.triggerAutomation(session.principal.id, automation.id, {
+        token: "trigger-secret",
+        visible: "kept",
+    });
+    assert.deepEqual(run.triggerMetadata, { manual: true, visible: "kept" });
+    const failed = repository.updateAutomationRun(run.id, "failed", "provider failed apiKey=provider-secret");
+    assert.equal(failed?.error, "Operation failed");
+
+    const integration = repository.createIntegration(session.principal.id, {
+        name: "Docs",
+        type: "mcp",
+        config: { endpoint: "https://example.test/mcp" },
+        secrets: { token: "integration-secret" },
+    });
+    const updated = repository.updateIntegrationStatus(session.principal.id, integration.id, "configuration_error", "integration failed token=integration-secret");
+    assert.equal(updated.lastError, "Operation failed");
+  } finally {
+    repository.close();
+  }
+});

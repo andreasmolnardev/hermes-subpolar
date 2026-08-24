@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { chmodSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { DEFAULT_PERSISTENCE_REDACTION_POLICY, redactErrorMessage, redactJsonRecord } from "./redaction.js";
 
 export type IdentityUser = {
   readonly id: string;
@@ -1012,7 +1013,7 @@ export class SQLiteIdentityRepository {
       config: jsonRecord(row.config_json, "integration config"),
       capabilities,
       ...(row.last_successful_discovery === null ? {} : { lastSuccessfulDiscovery: row.last_successful_discovery }),
-      ...(row.last_error === null ? {} : { lastError: row.last_error }),
+      ...(row.last_error === null ? {} : { lastError: redactErrorMessage(row.last_error) }),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1106,7 +1107,7 @@ export class SQLiteIdentityRepository {
     try {
       this.db.run("DELETE FROM integration_capabilities WHERE integration_id = ?", [integrationId]);
       for (const capability of capabilities) this.db.run("INSERT INTO integration_capabilities (integration_id, capability_id, name, description, source, capabilities_json, native_name, display_name, input_schema_json, discovered_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [integrationId, capability.capabilityId, capability.name, capability.description, capability.source, JSON.stringify(capability.capabilities), capability.nativeName ?? null, capability.displayName ?? null, capability.inputSchema === undefined ? null : JSON.stringify(capability.inputSchema), capability.discoveredAt ?? at, capability.expiresAt ?? null]);
-      this.db.run("UPDATE integrations SET status = ?, protocol = ?, last_successful_discovery = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, protocol ?? row.protocol, status === "connected" ? at : row.last_successful_discovery, error ?? null, at, integrationId, userId]);
+      this.db.run("UPDATE integrations SET status = ?, protocol = ?, last_successful_discovery = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, protocol ?? row.protocol, status === "connected" ? at : row.last_successful_discovery, error === undefined ? null : redactErrorMessage(error), at, integrationId, userId]);
       this.db.run("COMMIT");
     } catch (error) { this.db.run("ROLLBACK"); throw error; }
     return this.getIntegration(userId, integrationId) as IntegrationRecord;
@@ -1115,7 +1116,7 @@ export class SQLiteIdentityRepository {
   updateIntegrationStatus(userId: string, integrationId: string, status: IntegrationStatus, error?: string): IntegrationRecord {
     const row = this.integrationRow(userId, integrationId);
     if (row === null) throw new OwnershipError();
-    this.db.run("UPDATE integrations SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, error ?? null, now(), integrationId, userId]);
+    this.db.run("UPDATE integrations SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [status, error === undefined ? null : redactErrorMessage(error), now(), integrationId, userId]);
     return this.getIntegration(userId, integrationId) as IntegrationRecord;
   }
 
@@ -1587,7 +1588,7 @@ export class SQLiteIdentityRepository {
 
   private automation(row: AutomationDbRow): AutomationRecord {
     const schedule = JSON.parse(row.schedule_json) as AutomationSchedule;
-    const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+    const metadata = redactJsonRecord(JSON.parse(row.metadata_json) as Record<string, unknown>, DEFAULT_PERSISTENCE_REDACTION_POLICY);
     return {
       id: row.id,
       ownerId: row.owner_id,
@@ -1617,8 +1618,8 @@ export class SQLiteIdentityRepository {
       ...(row.started_at === null ? {} : { startedAt: row.started_at }),
       ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
       sessionId: row.session_id,
-      ...(row.error === null ? {} : { error: row.error }),
-      triggerMetadata: JSON.parse(row.trigger_metadata_json) as Record<string, unknown>,
+      ...(row.error === null ? {} : { error: redactErrorMessage(row.error) }),
+      triggerMetadata: redactJsonRecord(JSON.parse(row.trigger_metadata_json) as Record<string, unknown>, DEFAULT_PERSISTENCE_REDACTION_POLICY),
     };
   }
 
@@ -1665,7 +1666,7 @@ export class SQLiteIdentityRepository {
   createAutomation(userId: string, input: AutomationInput): AutomationRecord {
     this.validateAutomationInput(userId, input);
     const at = now();
-    const automation = { id: randomUUID(), ownerId: userId, name: input.name.trim(), enabled: input.enabled !== false, schedule: input.schedule, prompt: input.prompt, agentId: input.agentId, ...(input.projectId === undefined || input.projectId === null ? {} : { projectId: input.projectId }), ...(input.model?.trim() ? { model: input.model.trim() } : {}), permissionMode: input.permissionMode, metadata: input.metadata ?? {}, ...(input.nextRunAt ? { nextRunAt: input.nextRunAt } : {}), createdAt: at, updatedAt: at };
+    const automation = { id: randomUUID(), ownerId: userId, name: input.name.trim(), enabled: input.enabled !== false, schedule: input.schedule, prompt: input.prompt, agentId: input.agentId, ...(input.projectId === undefined || input.projectId === null ? {} : { projectId: input.projectId }), ...(input.model?.trim() ? { model: input.model.trim() } : {}), permissionMode: input.permissionMode, metadata: redactJsonRecord(input.metadata ?? {}, DEFAULT_PERSISTENCE_REDACTION_POLICY), ...(input.nextRunAt ? { nextRunAt: input.nextRunAt } : {}), createdAt: at, updatedAt: at };
     this.db.run("INSERT INTO automations (id, owner_id, name, enabled, schedule_json, prompt, agent_id, project_id, model, permission_mode, metadata_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [automation.id, userId, automation.name, automation.enabled ? 1 : 0, JSON.stringify(automation.schedule), automation.prompt, automation.agentId, automation.projectId ?? null, automation.model ?? null, automation.permissionMode, JSON.stringify(automation.metadata), automation.enabled ? automation.nextRunAt ?? null : null, at, at]);
     return this.getAutomation(userId, automation.id) as AutomationRecord;
   }
@@ -1687,7 +1688,7 @@ export class SQLiteIdentityRepository {
     };
     this.validateAutomationInput(userId, next, existing);
     const at = now();
-    this.db.run("UPDATE automations SET name = ?, enabled = ?, schedule_json = ?, prompt = ?, agent_id = ?, project_id = ?, model = ?, permission_mode = ?, metadata_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [next.name.trim(), next.enabled === false ? 0 : 1, JSON.stringify(next.schedule), next.prompt, next.agentId, next.projectId ?? null, next.model?.trim() || null, next.permissionMode, JSON.stringify(next.metadata ?? {}), next.enabled === false ? null : next.nextRunAt ?? null, at, automationId, userId]);
+    this.db.run("UPDATE automations SET name = ?, enabled = ?, schedule_json = ?, prompt = ?, agent_id = ?, project_id = ?, model = ?, permission_mode = ?, metadata_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND owner_id = ?", [next.name.trim(), next.enabled === false ? 0 : 1, JSON.stringify(next.schedule), next.prompt, next.agentId, next.projectId ?? null, next.model?.trim() || null, next.permissionMode, JSON.stringify(redactJsonRecord(next.metadata ?? {}, DEFAULT_PERSISTENCE_REDACTION_POLICY)), next.enabled === false ? null : next.nextRunAt ?? null, at, automationId, userId]);
     return this.getAutomation(userId, automationId) as AutomationRecord;
   }
 
@@ -1707,7 +1708,7 @@ export class SQLiteIdentityRepository {
     try {
       const row = this.db.query<{ owner_id: string; enabled: number; next_run_at: string | null }, [string]>("SELECT owner_id, enabled, next_run_at FROM automations WHERE id = ?").get(automationId);
       if (row === null || row.enabled !== 1 || row.next_run_at !== scheduledFor) { this.db.run("COMMIT"); return null; }
-      const inserted = this.db.run("INSERT OR IGNORE INTO automation_runs (id, automation_id, owner_id, status, scheduled_for, session_id, trigger_metadata_json) VALUES (?, ?, ?, 'queued', ?, ?, ?)", [run.id, automationId, row.owner_id, scheduledFor, run.sessionId, JSON.stringify(triggerMetadata)]);
+      const inserted = this.db.run("INSERT OR IGNORE INTO automation_runs (id, automation_id, owner_id, status, scheduled_for, session_id, trigger_metadata_json) VALUES (?, ?, ?, 'queued', ?, ?, ?)", [run.id, automationId, row.owner_id, scheduledFor, run.sessionId, JSON.stringify(redactJsonRecord(triggerMetadata, DEFAULT_PERSISTENCE_REDACTION_POLICY))]);
       if (inserted.changes === 0) { this.db.run("COMMIT"); return null; }
       this.db.run("UPDATE automations SET next_run_at = ?, enabled = ?, updated_at = ? WHERE id = ? AND next_run_at = ?", [nextRunAt, nextRunAt === null ? 0 : 1, at, automationId, scheduledFor]);
       this.db.run("COMMIT");
@@ -1720,7 +1721,7 @@ export class SQLiteIdentityRepository {
     if (automation === null) throw new OwnershipError("Automation is not owned by the authenticated user");
     const scheduledFor = now();
     const run = { id: randomUUID(), sessionId: randomUUID() };
-    this.db.run("INSERT INTO automation_runs (id, automation_id, owner_id, status, scheduled_for, session_id, trigger_metadata_json) VALUES (?, ?, ?, 'queued', ?, ?, ?)", [run.id, automationId, userId, scheduledFor, run.sessionId, JSON.stringify({ ...triggerMetadata, manual: true })]);
+    this.db.run("INSERT INTO automation_runs (id, automation_id, owner_id, status, scheduled_for, session_id, trigger_metadata_json) VALUES (?, ?, ?, 'queued', ?, ?, ?)", [run.id, automationId, userId, scheduledFor, run.sessionId, JSON.stringify(redactJsonRecord({ ...triggerMetadata, manual: true }, DEFAULT_PERSISTENCE_REDACTION_POLICY))]);
     return this.getAutomationRun(userId, automationId, run.id) as AutomationRunRecord;
   }
 
@@ -1739,7 +1740,7 @@ export class SQLiteIdentityRepository {
     if (run === null) return null;
     const startedAt = run.started_at ?? (status === "running" ? at : null);
     const terminal = ["completed", "failed", "cancelled", "needs_attention"].includes(status);
-    this.db.run("UPDATE automation_runs SET status = ?, started_at = ?, completed_at = ?, error = ? WHERE id = ?", [status, startedAt, terminal ? at : run.completed_at, error ?? (terminal ? null : run.error), runId]);
+    this.db.run("UPDATE automation_runs SET status = ?, started_at = ?, completed_at = ?, error = ? WHERE id = ?", [status, startedAt, terminal ? at : run.completed_at, error === undefined ? (terminal ? null : run.error) : redactErrorMessage(error), runId]);
     if (terminal) this.db.run("UPDATE automations SET last_run_at = ?, updated_at = ? WHERE id = ?", [at, at, run.automation_id]);
     const updated = this.db.query<AutomationRunDbRow, [string]>("SELECT id, automation_id, owner_id, status, scheduled_for, started_at, completed_at, session_id, error, trigger_metadata_json FROM automation_runs WHERE id = ?").get(runId);
     return updated === null ? null : this.automationRun(updated);

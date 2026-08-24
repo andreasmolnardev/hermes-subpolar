@@ -58,7 +58,12 @@ import {
 
 export { PiEventProjector } from "./pi-events";
 export type { SubpolarPiEvent, SubpolarPiEventSink } from "./pi-events";
-export { createSubpolarPiRuntime, executeSubpolarPiRun } from "./pi-runtime";
+export {
+  createSubpolarPiRuntime,
+  executeSubpolarPiRun,
+  SubpolarPiBudgetError,
+  SubpolarPiTimeoutError,
+} from "./pi-runtime";
 export type {
   CreateSubpolarPiRuntimeOptions,
   ExecuteSubpolarPiRunOptions,
@@ -92,7 +97,7 @@ export type {
 } from "./pi-spawn-agent";
 export { SubpolarPiCredentialError, SubpolarPiCredentialStore, toSubpolarPiCredential } from "./pi-credentials";
 export type { SubpolarCredentialBackend, SubpolarPiCredentialMode, SubpolarPiCredentialErrorCode, SubpolarProviderCredential } from "./pi-credentials";
-export { hydratePiSession, toPiMessages } from "./pi-messages";
+export { hydratePiSession, toPiImages, toPiMessages } from "./pi-messages";
 export { createSubpolarPiProviderBridge, piAssistantMessageToProviderResult } from "./pi-provider-bridge";
 export type { SubpolarPiProviderBridge, SubpolarPiProviderBridgeOptions } from "./pi-provider-bridge";
 export {

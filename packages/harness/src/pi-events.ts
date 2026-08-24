@@ -2,6 +2,8 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 export type SubpolarPiEvent =
 	| { type: "run.started"; runId: string }
+	| { type: "run.budget_exhausted"; runId: string; resource: "turns" | "providerCalls" | "toolCalls" | "tokens"; limit: number }
+	| { type: "run.timed_out"; runId: string; deadline?: number }
 	| { type: "turn.started"; runId: string }
 	| { type: "assistant.text_delta"; runId: string; delta: string }
 	| { type: "assistant.thinking_delta"; runId: string; delta: string }

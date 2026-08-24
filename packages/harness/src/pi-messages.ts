@@ -1,5 +1,5 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { Model, Message, TextContent, ThinkingContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, Model, Message, TextContent, ThinkingContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ProviderContent, ProviderMessage } from "chat-provider-interface";
 
 function parseArguments(value: string | undefined): Record<string, unknown> {
@@ -29,6 +29,28 @@ function textContent(content: ProviderContent): string {
 	}).filter(Boolean).join("\n");
 }
 
+function imageSource(part: { readonly url: string; readonly mimeType?: string }, path: string): ImageContent {
+	const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i.exec(part.url);
+	if (match === null) {
+		throw new Error(`Pi native image input requires a base64 data URL: ${path}`);
+	}
+	return { type: "image", data: match[2]!, mimeType: part.mimeType ?? match[1]! };
+}
+
+/** Convert provider image parts without retrieving remote media. */
+export function toPiImages(content: ProviderContent, path = "content"): ImageContent[] {
+	if (typeof content === "string") return [];
+	return content.flatMap((part, index) => {
+		const partPath = `${path}[${index}]`;
+		if (part.type === "image") return [imageSource(part, partPath)];
+		if (part.type === "image_url") {
+			const url = typeof part.imageUrl === "string" ? part.imageUrl : part.imageUrl.url;
+			return [imageSource({ url }, partPath)];
+		}
+		return [];
+	});
+}
+
 function toAssistantContent(content: ProviderContent): (TextContent | ThinkingContent)[] {
 	if (typeof content === "string") return content === "" ? [] : [{ type: "text", text: content }];
 	const result: (TextContent | ThinkingContent)[] = [];
@@ -39,8 +61,21 @@ function toAssistantContent(content: ProviderContent): (TextContent | ThinkingCo
 	return result;
 }
 
-function toContent(content: ProviderContent): TextContent[] {
-	return toAssistantContent(content).flatMap((part) => part.type === "text" ? [part] : []);
+function toContent(content: ProviderContent, path = "content"): (TextContent | ImageContent)[] {
+	return [
+		...toAssistantContent(content).flatMap((part) => part.type === "text" ? [part] : []),
+		...toPiImages(content, path),
+	];
+}
+
+function toUserContent(content: ProviderContent, path: string): string | (TextContent | ImageContent)[] {
+	const images = toPiImages(content, path);
+	if (images.length === 0) return textContent(content);
+	const result: (TextContent | ImageContent)[] = [];
+	const text = textContent(content);
+	if (text !== "") result.push({ type: "text", text });
+	result.push(...images);
+	return result;
 }
 
 function toToolCalls(message: ProviderMessage): ToolCall[] {
@@ -70,7 +105,7 @@ export function toPiMessages(messages: readonly ProviderMessage[], model: Model<
 	for (const message of messages) {
 		if (message.role === "system") continue;
 		if (message.role === "user") {
-			result.push({ role: "user", content: textContent(message.content) || toContent(message.content), timestamp: Date.now() });
+			result.push({ role: "user", content: toUserContent(message.content, `messages[${result.length}].content`), timestamp: Date.now() });
 			continue;
 		}
 		if (message.role === "assistant") {
@@ -90,7 +125,7 @@ export function toPiMessages(messages: readonly ProviderMessage[], model: Model<
 			role: "toolResult",
 			toolCallId: message.toolCallId ?? "unknown-tool-call",
 			toolName: message.name ?? "tool",
-			content: toContent(message.content),
+			content: toContent(message.content, `messages[${result.length}].content`),
 			isError: false,
 			timestamp: Date.now(),
 		};

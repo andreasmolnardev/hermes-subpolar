@@ -6,11 +6,14 @@ import {
 	createSubpolarPiRuntime,
 	createSubpolarPiProviderBridge,
 	executeSubpolarPiRun,
+	SubpolarPiBudgetError,
+	SubpolarPiTimeoutError,
 	hydratePiSession,
 	PiEventProjector,
 	SubpolarPiCredentialStore,
 	SubpolarResourceLoader,
 	toPiMessages,
+	toPiImages,
 	toPiResolvedTool,
 	toPiToolDefinition,
 	type SubpolarPiEvent,
@@ -100,6 +103,54 @@ describe("Subpolar Pi runtime seam", () => {
 			expect(runtime.session.state.messages.at(-1)).toMatchObject({ role: "assistant" });
 			expect(events.some((event) => event.type === "assistant.text_delta" && event.delta.includes("hello"))).toBe(true);
 			expect(events.at(-1)).toEqual({ type: "run.completed", runId: "run-1" });
+		});
+	});
+
+	test("native Pi enforces turn budgets before the provider call", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage("must not run")]);
+			const events: SubpolarPiEvent[] = [];
+			await expect(executeSubpolarPiRun({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				budgets: { maxTurns: 0 },
+				userMessage: "blocked",
+				onEvent: event => events.push(event),
+			})).rejects.toBeInstanceOf(SubpolarPiBudgetError);
+			expect(faux.state.callCount).toBe(0);
+			expect(events).toContainEqual({ type: "run.budget_exhausted", runId: run.runId, resource: "turns", limit: 0 });
+		});
+	});
+
+	test("native Pi deadline aborts an active tool", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" })]);
+			const events: SubpolarPiEvent[] = [];
+			await expect(executeSubpolarPiRun({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				timeoutMs: 10,
+				tools: [{
+					name: "wait",
+					label: "Wait",
+					description: "Wait until cancelled",
+					parameters: Type.Object({}),
+					execute: async ({ signal }) => {
+						await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+					},
+				}],
+				userMessage: "timeout",
+				onEvent: event => events.push(event),
+			})).rejects.toBeInstanceOf(SubpolarPiTimeoutError);
+			expect(events.some(event => event.type === "run.timed_out")).toBe(true);
 		});
 	});
 
@@ -284,6 +335,46 @@ describe("Subpolar Pi runtime seam", () => {
 		const session = { messages: [] as typeof messages } as never;
 		hydratePiSession(session, [{ role: "user", content: "hello" }], model);
 		expect(session.messages).toHaveLength(1);
+	});
+
+	test("Pi message hydration preserves base64 image parts and never fetches remote media", () => {
+		const faux = fauxProvider();
+		const model = faux.getModel();
+		const image = { type: "image_url" as const, imageUrl: "data:image/png;base64,AA==" };
+		const messages = toPiMessages([{ role: "user", content: [{ type: "text", text: "inspect" }, image] }], model);
+
+		expect(messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "inspect" }, { type: "image", mimeType: "image/png", data: "AA==" }],
+		});
+		expect(() => toPiImages([{ type: "image", url: "https://example.invalid/image.png" }])).toThrow("requires a base64 data URL");
+		expect(() => toPiMessages([{ role: "user", content: [{ type: "image", url: "https://example.invalid/image.png" }] }], model))
+			.toThrow("requires a base64 data URL");
+	});
+
+	test("the Pi execution prompt preserves current-turn images", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			faux.setResponses([(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "user",
+					content: [{ type: "text", text: "inspect" }, { type: "image", mimeType: "image/png", data: "AA==" }],
+				});
+				return fauxAssistantMessage("image received");
+			}]);
+
+			const result = await executeSubpolarPiRun({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				userMessage: "inspect",
+				userImages: [{ type: "image", mimeType: "image/png", data: "AA==" }],
+			});
+
+			expect(result.message).toMatchObject({ role: "assistant" });
+		});
 	});
 
 	test("credential access is delegated to Subpolar storage", async () => {

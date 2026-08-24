@@ -77,6 +77,14 @@
   while retaining the explicit `piExecutor` option for custom runtimes and
   tests. Fixed optional usage serialization so Pi results remain valid JSON for
   idempotency replay.
+- Made the low-level `createGateway()` helper Pi-backed by default as well;
+  callers that still require the old provider loop must opt into the explicit
+  `legacyHarness` compatibility option.
+- Ordered Pi event projection at the gateway boundary and drain projected
+  events before returning or surfacing execution errors, preventing races with
+  persistence and terminal delivery.
+- Mapped native Pi model-resolution failures to stable API error codes and
+  covered unsupported-provider behavior in the native server tests.
 - Added a fail-closed native Pi model-resolution seam with explicit Hermes-to-Pi
   provider mappings and a network-disabled, Subpolar-backed `ModelRuntime`.
 - Added automation coverage proving Pi-backed success persistence, approval
@@ -86,6 +94,9 @@
   selects Pi's Chat Completions API for the Hermes `openai-api` profile.
 - Added a true default-path integration test covering Subpolar credentials,
   custom endpoint dispatch, streaming completion projection, and usage.
+- Added workspace-confined native filesystem tools with bounded read/write,
+  canonical traversal and symlink-escape checks, fail-closed operation
+  selection, approval-gated mutations, and explicit shell-interpreter opt-in.
 
 ## Repository Residue Cleanup
 

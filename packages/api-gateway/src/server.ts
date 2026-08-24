@@ -24,7 +24,7 @@ import {
   type AutomationInput,
   type AutomationPermissionMode,
 } from "data-layer";
-import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
+import { assembleHarnessContext, mapHermesProviderToPi, resolveSubpolarPiModel, SubpolarPiModelResolutionError, type HarnessApprovalPolicy, type HarnessContextAssembler, type SubpolarCredentialBackend } from "harness";
 import { resolveAgentToolDescriptors, type PermissionMode, type ToolDefinition, type ToolPolicyInput } from "tool-resolver";
 import { serveStatic } from "./static";
 import { modelProvider } from "@hermes/shared/model-providers";
@@ -371,6 +371,13 @@ function requestFingerprint(principalId: string, input: TurnInput): string {
 
 function promptAttribute(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function requestErrorCode(error: unknown): string {
+  if (error instanceof OwnershipError) return "forbidden";
+  if (error instanceof SubpolarPiModelResolutionError) return error.code;
+  if (error instanceof Error && ["provider_not_configured", "model_not_found", "unsupported_provider"].includes(error.message)) return error.message;
+  return "request_failed";
 }
 
 function providerContentText(content: ProviderContent): string {
@@ -1246,8 +1253,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
                   if (!closed) controller.enqueue(encoder.encode(`data: ${eventJson(requestId, sequence++, event)}\n\n`));
                 }).then(() => {
                   if (!closed) { closed = true; controller.enqueue(encoder.encode("data: [DONE]\n\n")); controller.close(); }
-                }).catch(() => {
-                  if (!closed) { closed = true; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ protocol: "subpolar.v1", requestId, sequence: sequence++, type: "error", code: "request_failed" })}\n\n`)); controller.close(); }
+                }).catch(error => {
+                  if (!closed) { closed = true; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ protocol: "subpolar.v1", requestId, sequence: sequence++, type: "error", code: requestErrorCode(error) })}\n\n`)); controller.close(); }
                 }).finally(untrackTurn);
               },
               cancel() { turnController.abort(); },
@@ -1275,7 +1282,8 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           }
          } catch (error) {
            if (error instanceof IdempotencyConflictError) return json({ error: "idempotency_conflict" }, 409);
-           return json({ error: error instanceof OwnershipError ? "forbidden" : "request_failed" }, error instanceof OwnershipError ? 403 : 400);
+           const code = requestErrorCode(error);
+           return json({ error: code }, code === "forbidden" ? 403 : 400);
          }
       }
 
@@ -1339,7 +1347,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
               untrackTurn();
             }
           } catch (error) {
-            socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "error", code: error instanceof AuthenticationError ? "unauthorized" : "request_failed", message: "Request failed" }));
+            socket.send(JSON.stringify({ protocol: "subpolar.v1", type: "error", code: error instanceof AuthenticationError ? "unauthorized" : requestErrorCode(error), message: "Request failed" }));
           }
         })();
       },

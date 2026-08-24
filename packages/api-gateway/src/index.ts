@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type {
   ChatMessage,
   ToolPolicy,
@@ -76,6 +77,7 @@ import {
   validateSessionCwd,
   type GatewaySessionCwdStore
 } from "./session-cwd";
+import { createGatewayPiExecutor } from "./pi-executor";
 
 export type GatewayToolInput = ToolDefinition | ToolPolicySnapshot;
 
@@ -158,14 +160,14 @@ export type GatewayNormalizedRequest = {
   readonly contextAssembler?: HarnessContextAssembler;
 };
 
-/** Optional Pi-backed execution seam. The default remains the legacy harness until parity is complete. */
+/** Pi-backed execution seam. Explicit injection remains available for tests and controlled compatibility callers. */
 export type GatewayPiExecutor = (
   request: GatewayNormalizedRequest,
   provider: ChatProvider,
   eventSink?: (event: GatewayEventProjectionInput) => void | Promise<void>
 ) => Promise<HarnessResult>;
 
-export { createGatewayPiExecutor } from "./pi-executor";
+export { createGatewayPiExecutor };
 export type { GatewayPiExecutorOptions } from "./pi-executor";
 
 export type GatewayOptions = {
@@ -176,6 +178,8 @@ export type GatewayOptions = {
   readonly turnLeaseManager?: GatewayTurnLeaseManager;
   readonly turnLease?: GatewayTurnLeaseManagerOptions;
   readonly piExecutor?: GatewayPiExecutor;
+  /** Explicit migration escape hatch for callers that still require the old Harness loop. */
+  readonly legacyHarness?: boolean;
 };
 
 export type Gateway = {
@@ -193,7 +197,7 @@ const GATEWAY_REQUEST_FIELDS = new Set([
   "transportEventSink", "contextAssembler"
 ]);
 const GATEWAY_OPTION_FIELDS = new Set([
-  "sessionRepository", "persistence", "sessionCwdStore", "toolExecutor", "turnLeaseManager", "turnLease", "piExecutor"
+  "sessionRepository", "persistence", "sessionCwdStore", "toolExecutor", "turnLeaseManager", "turnLease", "piExecutor", "legacyHarness"
 ]);
 
 function rejectUnsupportedFields(value: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): void {
@@ -1002,6 +1006,10 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   rejectUnsupportedFields(options as Record<string, unknown>, GATEWAY_OPTION_FIELDS, "Gateway");
   const sessionCwdStore = options.sessionCwdStore ?? new MemoryGatewaySessionCwdStore();
   const turnLeases = options.turnLeaseManager ?? new GatewayTurnLeaseManager(options.turnLease);
+  const piExecutor = options.piExecutor ?? createGatewayPiExecutor({
+    cwd: process.cwd(),
+    agentDir: join(process.env.SUBPOLAR_DATA_DIR ?? join(process.cwd(), ".subpolar"), "pi-agent"),
+  });
 
   return {
     async executeRequest(request, provider): Promise<HarnessResult> {
@@ -1021,8 +1029,8 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
       try {
         const configured = configureHarnessRequest(normalized, options);
         const eventSink = safeHarnessEventSink(request);
-        if (options.piExecutor !== undefined) return await options.piExecutor(configured, provider, eventSink);
-        return await harnessRuntimeAdapter.execute(configured, provider, eventSink);
+        if (options.legacyHarness === true) return await harnessRuntimeAdapter.execute(configured, provider, eventSink);
+        return await piExecutor(configured, provider, eventSink);
       } finally {
         lease.release();
       }

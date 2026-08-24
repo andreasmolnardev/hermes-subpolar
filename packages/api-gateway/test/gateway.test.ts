@@ -7,7 +7,6 @@ import { test } from "bun:test";
 import {
   createGateway,
   createGatewayPiExecutor,
-  executeRequest,
   normalizeGatewayRequest,
   GatewayTurnLeaseError,
   GatewayTurnLeaseManager,
@@ -139,6 +138,45 @@ test("opt-in Pi executor runs resolved descriptor tools through the gateway cont
   assert.equal(executed, true);
   assert.equal(providerCalls, 2);
   assert.deepEqual(events.map(event => event.type).filter(type => ["message.start", "tool.start", "tool.complete", "message.complete"].includes(type)), ["message.start", "tool.start", "tool.complete", "message.complete"]);
+});
+
+test("Pi executor awaits ordered event projection before returning", async () => {
+  const events: string[] = [];
+  let activeDeliveries = 0;
+  let maximumActiveDeliveries = 0;
+  const result = await createGateway({
+    piExecutor: createGatewayPiExecutor({ cwd: mkdtempSync(join(tmpdir(), "subpolar-pi-cwd-")), agentDir: mkdtempSync(join(tmpdir(), "subpolar-pi-agent-")) })
+  }).executeRequest({
+    model: "pi-model",
+    requestId: "pi-ordered-events-request",
+    sessionId: "pi-ordered-events-session",
+    messages: [{ role: "user", content: "hello" }],
+    eventSink: async event => {
+      activeDeliveries += 1;
+      maximumActiveDeliveries = Math.max(maximumActiveDeliveries, activeDeliveries);
+      events.push(`start:${event.type}`);
+      await new Promise(resolve => setTimeout(resolve, 1));
+      events.push(`end:${event.type}`);
+      activeDeliveries -= 1;
+    },
+    toolPolicies: []
+  }, {
+    async complete() {
+      return completion;
+    }
+  });
+
+  assert.equal(result.message.content, "safe");
+  assert.equal(activeDeliveries, 0);
+  assert.equal(maximumActiveDeliveries, 1);
+  assert.deepEqual(events.filter(event => event.startsWith("start:")), [
+    "start:message.start",
+    "start:message.complete"
+  ]);
+  assert.deepEqual(events.filter(event => event.startsWith("end:")), [
+    "end:message.start",
+    "end:message.complete"
+  ]);
 });
 
 test("opt-in Pi executor commits the final assistant result through gateway persistence", async () => {
@@ -323,8 +361,8 @@ test("injected session repository resumes persisted history", async () => {
     sessionRepository: fake.repository
   };
 
-  await createGateway().executeRequest(request, provider);
-  await createGateway().executeRequest({ ...request, messages: [{ role: "user", content: "resume" }] }, provider);
+  await createGateway({ legacyHarness: true }).executeRequest(request, provider);
+  await createGateway({ legacyHarness: true }).executeRequest({ ...request, messages: [{ role: "user", content: "resume" }] }, provider);
 
   assert.equal(toolEffects, 1);
   assert.equal(providerCalls, 3);
@@ -381,7 +419,7 @@ test("harness provider request preserves signal and provider fidelity", async ()
   const controller = new AbortController();
   const options = { temperature: 0.25, maxOutputTokens: 128, reasoningEffort: "high" as const };
   let seen: ProviderRequest | undefined;
-  const result = await executeRequest({
+  const result = await createGateway({ legacyHarness: true }).executeRequest({
     model: "fidelity-model",
     sessionId: "fidelity-session",
     requestId: "fidelity-request",
@@ -404,7 +442,7 @@ test("harness provider request preserves signal and provider fidelity", async ()
 
 test("mapped events stay ordered and deduplicate terminal output", async () => {
   const events: GatewayProtocolEvent[] = [];
-  await executeRequest({
+  await createGateway({ legacyHarness: true }).executeRequest({
     model: "fake",
     sessionId: "events-session",
     messages: [{ role: "user", content: "hello" }],
@@ -501,7 +539,7 @@ test("turn lease release is generation-safe", async () => {
 
 test("gateway retries transient provider failures through the harness", async () => {
   let calls = 0;
-  await executeRequest({
+  await createGateway({ legacyHarness: true }).executeRequest({
     model: "retry-model",
     sessionId: "retry-session",
     messages: [{ role: "user", content: "retry" }],

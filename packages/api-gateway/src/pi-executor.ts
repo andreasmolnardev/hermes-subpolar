@@ -195,6 +195,11 @@ function requestUserMessage(messages: readonly ProviderMessage[]): { history: re
 export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): GatewayPiExecutor {
   let eventSequence = 0;
   return async (request, provider, eventSink): Promise<HarnessResult> => {
+    let eventProjection = Promise.resolve();
+    const enqueueEvent = (event: SubpolarPiEvent): void => {
+      if (eventSink === undefined) return;
+      eventProjection = eventProjection.then(() => projectPiEvent(request, event, eventSink, () => `pi-${++eventSequence}`));
+    };
     const run: SubpolarPiRunContext = {
       runId: request.requestId,
       conversationId: request.sessionId,
@@ -279,19 +284,25 @@ export function createGatewayPiExecutor(options: GatewayPiExecutorOptions): Gate
       modelId: request.model,
       chatProvider: provider,
     }) : undefined;
-    const result = await executeSubpolarPiRun({
-      ...run,
-      model: nativeResolution?.model ?? bridge!.model,
-      ...(nativeResolution === undefined ? { nativeProviders: [bridge!.provider] } : { modelRuntime: nativeResolution.modelRuntime }),
-      tools,
-      systemPrompt: systemPrompt || undefined,
-      history: assembledUser.history,
-      userMessage: assembledUser.userMessage,
-      signal,
-      onEvent: event => {
-        if (eventSink !== undefined) void projectPiEvent(request, event, eventSink, () => `pi-${++eventSequence}`);
-      },
-    });
+    let result: Awaited<ReturnType<typeof executeSubpolarPiRun>> | undefined;
+    let executionError: unknown;
+    try {
+      result = await executeSubpolarPiRun({
+        ...run,
+        model: nativeResolution?.model ?? bridge!.model,
+        ...(nativeResolution === undefined ? { nativeProviders: [bridge!.provider] } : { modelRuntime: nativeResolution.modelRuntime }),
+        tools,
+        systemPrompt: systemPrompt || undefined,
+        history: assembledUser.history,
+        userMessage: assembledUser.userMessage,
+        signal,
+        onEvent: enqueueEvent,
+      });
+    } catch (error) {
+      executionError = error;
+    }
+    await eventProjection;
+    if (result === undefined) throw executionError;
     const providerResult = piAssistantMessageToProviderResult(result.message?.role === "assistant" ? result.message : undefined);
     await persistPiResult(request, providerResult);
     return providerResult;

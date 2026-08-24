@@ -148,7 +148,7 @@ replace Subpolar policy code.
   Pi JSONL must not become the authoritative database.
 - [ ] Persist compaction, model switching, steering/follow-up, and retry
   metadata where the public Activity Panel needs them.
-- [ ] Make event delivery awaitable and ordered at the gateway boundary;
+- [x] Make event delivery awaitable and ordered at the gateway boundary;
   fire-and-forget projection must not race persistence or terminal delivery.
 
 Exit gate: cancellation, shutdown, restart, and event ordering have behavior
@@ -170,7 +170,7 @@ tests with no duplicate side effects or terminal events.
   result; they must not be silently converted to `undefined`.
 - [ ] Share a server-level `ModelRuntime`/provider catalog where safe instead
   of creating a model runtime for every request.
-- [ ] Map native resolution errors to stable API errors such as
+- [x] Map native resolution errors to stable API errors such as
   `provider_not_configured`, `unsupported_provider`, and `model_not_found`.
 - [ ] Add provider behavior fixtures for streaming, usage, reasoning,
   credentials, custom endpoints, errors, cancellation, and multimodal input.
@@ -221,16 +221,13 @@ lose a terminal result, expose a secret, or cross an owner/session boundary.
 - [x] Make the application server's default executor Pi-backed.
 - [x] Keep explicit executor/provider injection available for migration tests
   and controlled compatibility callers.
-- [~] Decide whether the low-level `createGateway()` helper should also default
-  to Pi. It currently retains the legacy harness adapter because it lacks the
-  server composition context (data directory, credentials, model connection,
-  workspace root). If changed, add an explicit legacy adapter option and
-  migrate its tests in the same API-gateway batch.
-- [ ] Ensure no production server route reaches the legacy provider loop when
+- [x] Make the low-level `createGateway()` helper default to Pi, with an
+  explicit `legacyHarness` compatibility option for legacy contract tests.
+- [x] Ensure no production server route reaches the legacy provider loop when
   the native Pi path is configured.
 - [ ] Remove duplicate provider-loop, retry, token-budget, and message
   normalization code only after the parity matrix is green.
-- [ ] Update public docs and package comments so “default” and “compatibility”
+- [x] Update public docs and package comments so “default” and “compatibility”
   have one unambiguous meaning.
 
 Exit gate: production composition uses Pi; compatibility is explicit, bounded,

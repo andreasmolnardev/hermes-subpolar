@@ -99,11 +99,12 @@ Reference batches:
 Current verification baseline:
 
 ```text
-harness       101 tests passing
-api-gateway   50 tests passing
+harness       105 tests passing
+api-gateway   51 tests passing
 data-layer    54 tests passing
 tool-runtime  25 tests passing
 tool-resolver 19 tests passing
+web-ui        18 Vitest + 3 Bun tests passing
 browser E2E   1 test passing
 package       boundary and vendored-Pi checks passing
 ```
@@ -279,15 +280,16 @@ cannot bypass the normal Agent, Project, tool, or credential policy.
 - [x] Add reconnect and pending-approval browser/protocol E2E coverage.
 - [~] Define health/readiness/shutdown behavior for active Pi sessions and
   provider/model runtime initialization. Health/readiness, abort, idempotent
-  shutdown, and native runtime pooling are covered; live container probing is
-  host-permission blocked.
+  shutdown, native runtime pooling, and a CI container probe are covered; live
+  local container probing is host-permission blocked.
 - [~] Verify isolated `SUBPOLAR_DATA_DIR`, workspace root confinement, clean
-  install, and container startup with the Pi closure. Workspace/data-path and
-  clean-install manifests are covered; Docker health probing is blocked by
-  the host Docker socket permissions.
+  install, and container startup with the Pi closure. Workspace/data-path,
+  frozen-lockfile install, and CI readiness/shutdown checks are covered; local
+  Docker health probing is blocked by host socket permissions.
 - [~] Run the complete repository gates from the TypeScript migration plan:
-  `bun run check:monorepo`, `bun run typecheck:runtime`, `bun run test`, browser
-  E2E, clean-install build, and Docker health checks.
+  `bun run check:monorepo`, `bun run typecheck:runtime`, `bun run test`, web
+  build, browser E2E, frozen-lockfile install, and CI Docker health checks are
+  green; the local Docker daemon is inaccessible to this user.
 - [~] Remove stale Python/provider/CLI claims only after the retained Bun
   capability inventory is current. Active runtime docs describe the Bun/Pi
   path; historical migration records retain Python references intentionally.

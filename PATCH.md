@@ -94,6 +94,9 @@
   selects Pi's Chat Completions API for the Hermes `openai-api` profile.
 - Added a true default-path integration test covering Subpolar credentials,
   custom endpoint dispatch, streaming completion projection, and usage.
+- Documented the exact Pi refresh sequence, closure safeguards, package checks,
+  security gates, local-patch review, and one package-batched commit policy;
+  vendor tests now protect the procedure as well as the source closure.
 - Added explicit Pi credential conversion with provider scoping. API-key,
   OAuth, and Copilot values map deliberately; AWS, GCP, and external-process
   values fail with stable unsupported-mode errors instead of being dropped.

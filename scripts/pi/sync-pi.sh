@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Pi vendor maintenance contract:
+# - PINNED_COMMIT must be updated to an immutable upstream commit first.
+# - This script imports only the seven package src directories documented in
+#   scripts/pi/README.md; manifests, lockfiles, and Subpolar adapters stay local.
+# - After syncing, run Pi checks, Subpolar/security checks, review local patches,
+#   and use one package-batched commit for the pin and imported source.
+#
+# The exact procedure and required commands live in scripts/pi/README.md. Keep
+# this script's pin check and copy scope in sync with that documented contract.
+
 if [[ $# -ne 1 ]]; then
   echo "usage: $0 /path/to/pi-checkout" >&2
   exit 2

@@ -125,7 +125,7 @@ package       boundary checks passing
   policy.
 - [x] Add a repeatable CI check that the imported package list and pinned
   commit agree with `scripts/pi/PINNED_COMMIT` and `scripts/pi/README.md`.
-- [ ] Define the update procedure: import, Pi package tests, Subpolar tests,
+- [x] Define the update procedure: import, Pi package tests, Subpolar tests,
   security tests, review of local patches, then one Pi package batch commit.
 - [ ] Keep changes to `pi-*` packages exceptional and independently reviewable.
 

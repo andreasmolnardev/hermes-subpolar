@@ -116,6 +116,10 @@ type ChatMessage =
       readonly role: SubpolarActivityKind
       readonly content: string
       readonly sequence?: number
+      readonly runId?: string
+      readonly parentRunId?: string
+      readonly childRunId?: string
+      readonly depth?: number
     }
 
 type PromptMessage = {
@@ -627,12 +631,13 @@ function Chat({
           <div className="mx-auto max-w-3xl space-y-5">
             {messages.map((message, index) => (
               <article
-                key={`${message.sequence ?? index}-${message.role}`}
+                key={`${message.sequence ?? index}-${message.role}-${'runId' in message ? message.runId ?? 'root' : 'root'}`}
                 className={
                   message.role === 'user'
                     ? 'ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-[var(--color-primary,var(--midground-base))] px-4 py-3 text-sm text-[var(--color-primary-foreground,var(--background-base))]'
                     : 'max-w-[90%] rounded-2xl rounded-bl-sm border border-[color-mix(in_srgb,var(--midground-base)_16%,transparent)] bg-[var(--color-card,var(--background-base))] px-4 py-3 text-sm leading-7'
                 }
+                style={'depth' in message && message.depth !== undefined ? { marginLeft: `${Math.min(message.depth, 8) * 1.25}rem` } : undefined}
               >
                 <div className="mb-1 text-[10px] uppercase tracking-widest opacity-60">{message.role}</div>
                 <div className="whitespace-pre-wrap">{messageText(message)}</div>
@@ -962,7 +967,11 @@ export default function WorkspacePage({ user, onLogout }: { user: SubpolarUser; 
         {
           role: activity.kind,
           content: activity.text,
-          ...(activity.sequence === undefined ? {} : { sequence: activity.sequence })
+          ...(activity.sequence === undefined ? {} : { sequence: activity.sequence }),
+          ...(activity.runId === undefined ? {} : { runId: activity.runId }),
+          ...(activity.parentRunId === undefined ? {} : { parentRunId: activity.parentRunId }),
+          ...(activity.childRunId === undefined ? {} : { childRunId: activity.childRunId }),
+          ...(activity.depth === undefined ? {} : { depth: activity.depth })
         }
       ])
     if (type === 'message.delta')

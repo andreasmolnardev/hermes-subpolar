@@ -42,3 +42,51 @@ test("projects approval resolution status into the timeline", () => {
     event: { type: "status.update", payload: { phase: "approval.allow" } },
   })).toMatchObject({ kind: "status", text: "Tool approval granted", sequence: 4 });
 });
+
+test("projects native Pi child-run events with lineage and nested depth", () => {
+  const activity = projectSubpolarActivity({
+    protocol: "subpolar.v1",
+    requestId: "request-child",
+    sequence: 7,
+    event: {
+      type: "tool.started",
+      payload: {
+        run_id: "child-run",
+        parent_run_id: "parent-run",
+        name: "read",
+        depth: 2,
+      },
+    },
+  });
+
+  expect(activity).toMatchObject({
+    kind: "tool",
+    text: "Child run: read started",
+    runId: "child-run",
+    parentRunId: "parent-run",
+    depth: 2,
+  });
+});
+
+test("projects Pi diff, retry, compaction, and cancellation events", () => {
+  const events = [
+    { protocol: "subpolar.v1", event: { type: "workspace.diff.created", payload: { path: "src/app.ts" } } },
+    { protocol: "subpolar.v1", event: { type: "run.retrying", payload: { attempt: 2 } } },
+    { protocol: "subpolar.v1", event: { type: "compaction.completed", payload: {} } },
+    { protocol: "subpolar.v1", event: { type: "run.cancelled", payload: {} } },
+  ] as const;
+
+  expect(events.map(event => projectSubpolarActivity(event))).toMatchObject([
+    { kind: "diff", text: "Diff created for src/app.ts" },
+    { kind: "status", text: "Retrying (attempt 2)" },
+    { kind: "status", text: "Context compaction completed" },
+    { kind: "status", text: "Run cancelled" },
+  ]);
+});
+
+test("projects a cancelled terminal outcome without losing the terminal state", () => {
+  expect(projectSubpolarActivity({
+    protocol: "subpolar.v1",
+    event: { type: "terminal", payload: { outcome: "cancelled" } },
+  })).toMatchObject({ kind: "terminal", text: "Cancelled" });
+});

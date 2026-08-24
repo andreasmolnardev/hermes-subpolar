@@ -143,14 +143,8 @@ test("native model resolution reports unsupported providers explicitly", async (
       headers,
       body: JSON.stringify({ providerId: "custom", baseUrl: "https://unsupported.example/v1", apiKey: "key", model: "model" }),
     });
-    assert.equal(configured.status, 200);
-    const completion = await fetch(`${server.url}v1/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ model: "model", messages: [{ role: "user", content: "hello" }] }),
-    });
-    assert.equal(completion.status, 400);
-    assert.deepEqual(await completion.json(), { error: "unsupported_provider" });
+    assert.equal(configured.status, 400);
+    assert.deepEqual(await configured.json(), { error: "invalid_provider" });
   } finally {
     await server.shutdown();
     rmSync(dataDir, { recursive: true, force: true });

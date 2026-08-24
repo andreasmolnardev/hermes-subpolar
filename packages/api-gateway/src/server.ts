@@ -958,6 +958,7 @@ export function startApiGatewayServer(options: ApiGatewayServerOptions): ApiGate
           const provider = String(value.providerId ?? value.provider ?? "openai-api");
           const profile = modelProvider(provider);
           if (profile === undefined) throw new Error("provider is invalid");
+          if (mapHermesProviderToPi(profile.id) == null) throw new Error("provider is not supported by native Pi");
           identity.configureProvider(profile.id, String(value.baseUrl ?? profile.baseUrl ?? ""), String(value.apiKey ?? ""), String(value.model ?? ""));
           return json({ configured: true });
         } catch { return json({ error: "invalid_provider" }, 400); }

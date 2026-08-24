@@ -187,7 +187,7 @@ owner, endpoint behavior, and provider-specific behavior/security test.
   approval persistence; automation approval fails closed.
 - [x] Keep Pi built-ins disabled by default and validate project workspaces
   before native filesystem/Git execution.
-- [~] Finish native filesystem tool integration (`read`, `write`, `edit`,
+- [x] Finish native filesystem tool integration (`read`, `write`, `edit`,
   `grep`, `find`, `ls`) with canonical workspace confinement and diff metadata.
 - [~] Finish explicitly gated `bash`/shell execution with timeout, output,
   cancellation, and approval coverage.
@@ -210,7 +210,7 @@ resolved descriptor, policy decision, workspace check, and bounded runtime.
   behavior; verify a stale approval cannot execute a later run.
 - [ ] Verify event ordering across HTTP, SSE, and WebSocket clients, including
   cancellation and transport disconnects.
-- [ ] Add retention/redaction tests for provider payloads, credentials,
+- [x] Add retention/redaction tests for provider payloads, credentials,
   tool arguments, tool output, reasoning, and error details.
 
 Exit gate: a server restart or client reconnect cannot duplicate a tool effect,
@@ -255,7 +255,7 @@ cannot bypass the normal Agent, Project, tool, or credential policy.
 - [~] Render the projected model-step/tool timeline, reasoning state, diffs,
   pending approvals, retries, compaction, and cancellation without importing
   Pi types into `web-ui`.
-- [ ] Add reconnect and pending-approval browser/protocol E2E coverage.
+- [x] Add reconnect and pending-approval browser/protocol E2E coverage.
 - [~] Define health/readiness/shutdown behavior for active Pi sessions and
   provider/model runtime initialization.
 - [ ] Verify isolated `SUBPOLAR_DATA_DIR`, workspace root confinement, clean

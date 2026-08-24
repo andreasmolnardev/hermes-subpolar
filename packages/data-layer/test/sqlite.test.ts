@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { SQLiteSessionRepository, UnsupportedSchemaError } from "../src/sqlite.js";
+import { SQLiteSessionRepository, UnsupportedSchemaError, type SQLiteSessionRepositoryOptions } from "../src/sqlite.js";
 import type { SessionRecord, SessionMessageDraft } from "../src/contracts.js";
 
 function homePath(): { home: string; database: string } {
@@ -27,9 +27,19 @@ function message(content: SessionMessageDraft["content"], extra: Partial<Session
   return { role: "user", content, createdAt: "2026-08-05T00:00:01.000Z", ...extra };
 }
 
-async function withRepo<T>(operation: (repo: SQLiteSessionRepository, database: string) => Promise<T>): Promise<T> {
+const retainAllPolicy = {
+  retainProviderPayloads: true,
+  retainCredentials: true,
+  retainToolArguments: true,
+  retainToolOutput: true,
+  retainReasoning: true,
+  retainErrorDetails: true,
+  retainApprovalArguments: true,
+} as const;
+
+async function withRepo<T>(operation: (repo: SQLiteSessionRepository, database: string) => Promise<T>, options: Partial<SQLiteSessionRepositoryOptions> = {}): Promise<T> {
   const paths = homePath();
-  const repo = new SQLiteSessionRepository(paths.database);
+  const repo = new SQLiteSessionRepository({ path: paths.database, ...options });
   try {
     return await operation(repo, paths.database);
   } finally {
@@ -59,7 +69,7 @@ test("SQLite repository orders messages and correlates tools", async () => {
   });
 });
 
-test("SQLite round-trips structured content and every message sidecar exactly", async () => {
+test("SQLite round-trips structured content and every explicitly retained message sidecar exactly", async () => {
   await withRepo(async (repo) => {
     await repo.createSession(session());
     const message: SessionMessageDraft = {
@@ -110,7 +120,7 @@ test("SQLite round-trips structured content and every message sidecar exactly", 
       usage: message.usage,
       createdAt: message.createdAt,
     }]);
-  });
+  }, { redactionPolicy: retainAllPolicy });
 });
 
 test("SQLite transaction rolls back all writes", async () => {
@@ -181,7 +191,7 @@ test("SQLite commitTurn atomically persists recovery metadata and usage", async 
     expect((await repo.getCheckpoint("session-1", "checkpoint-1"))?.formatVersion).toBe(1);
     expect((await repo.getMigrationState("session-1"))?.recovery?.pendingToolCallIds).toEqual(["call-1"]);
 
-    const restarted = new SQLiteSessionRepository(database);
+    const restarted = new SQLiteSessionRepository({ path: database, redactionPolicy: retainAllPolicy });
     try {
       expect((await restarted.listUsage("session-1"))[0]?.usage.totalTokens).toBe(5);
       expect((await restarted.getCheckpoint("session-1", "checkpoint-1"))?.runtime.runtimeVersion)
@@ -220,7 +230,7 @@ test("SQLite commitTurn atomically persists recovery metadata and usage", async 
     } finally {
       restarted.close();
     }
-  });
+  }, { redactionPolicy: retainAllPolicy });
 });
 
 test("SQLite rolls back the complete turn write set on a failed recovery check", async () => {

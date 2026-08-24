@@ -8,6 +8,16 @@ import {
   type SessionRecord,
 } from "../src/index.ts";
 
+const retainAllPolicy = {
+  retainProviderPayloads: true,
+  retainCredentials: true,
+  retainToolArguments: true,
+  retainToolOutput: true,
+  retainReasoning: true,
+  retainErrorDetails: true,
+  retainApprovalArguments: true,
+} as const;
+
 const runtime = {
   runtimeVersion: "test-runtime",
   schemaVersion: PERSISTENCE_SCHEMA_VERSION,
@@ -417,7 +427,7 @@ describe("InMemorySessionRepository", () => {
   });
 
   test("round-trips message sidecars through drafts and atomic writes defensively", async () => {
-    const repository = new InMemorySessionRepository();
+    const repository = new InMemorySessionRepository({ redactionPolicy: retainAllPolicy });
     await repository.createSession(session());
     const content = [{ type: "text" as const, text: "visible" }];
     const apiContent = [{ type: "text" as const, text: "provider" }];

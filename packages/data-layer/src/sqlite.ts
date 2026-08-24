@@ -36,6 +36,15 @@ import type {
   Usage,
   UsageRecord,
 } from "./contracts.js";
+import {
+  normalizePersistenceRedactionPolicy,
+  redactCheckpoint,
+  redactJsonValue,
+  redactPendingApproval,
+  redactSessionMessage,
+  type PersistenceRedactionPolicy,
+  type PersistenceRedactionPolicyInput,
+} from "./redaction.js";
 
 type SqlValue = string | number | null | undefined;
 type SqlBinding = string | number | null;
@@ -48,6 +57,7 @@ export type SQLiteSessionRepositoryOptions = {
   approvalRetentionMs?: number;
   maxIdempotencyRecords?: number;
   maxApprovalRecords?: number;
+  redactionPolicy?: PersistenceRedactionPolicyInput;
 };
 
 export class UnsupportedSchemaError extends Error {
@@ -313,6 +323,7 @@ export class SQLiteSessionRepository implements SessionRepository {
   private readonly approvalRetentionMs: number;
   private readonly maxIdempotencyRecords: number;
   private readonly maxApprovalRecords: number;
+  private readonly redactionPolicy: PersistenceRedactionPolicy;
   private queue = Promise.resolve();
 
   constructor(path: string);
@@ -326,6 +337,7 @@ export class SQLiteSessionRepository implements SessionRepository {
     this.approvalRetentionMs = this.positiveOption(options.approvalRetentionMs ?? 7 * 24 * 60 * 60 * 1000, "approvalRetentionMs");
     this.maxIdempotencyRecords = this.positiveIntegerOption(options.maxIdempotencyRecords ?? 10_000, "maxIdempotencyRecords");
     this.maxApprovalRecords = this.positiveIntegerOption(options.maxApprovalRecords ?? 10_000, "maxApprovalRecords");
+    this.redactionPolicy = normalizePersistenceRedactionPolicy(options.redactionPolicy);
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
     try {
@@ -616,7 +628,7 @@ export class SQLiteSessionRepository implements SessionRepository {
       const id = draft.id ?? `${sessionId}:message:${nextSequence + offset}`;
       if (id.length === 0 || ids.has(id)) throw new Error(`Duplicate message id: ${id}`);
       ids.add(id);
-      return copy({ ...draft, schemaVersion: PERSISTENCE_SCHEMA_VERSION, id, sessionId,
+      return copy({ ...redactSessionMessage(draft, this.redactionPolicy), schemaVersion: PERSISTENCE_SCHEMA_VERSION, id, sessionId,
         sequence: nextSequence + offset });
     });
     assertValidSessionMessages([...existing, ...appended], sessionId);
@@ -884,7 +896,8 @@ export class SQLiteSessionRepository implements SessionRepository {
     const existing = this.getIdempotencyNow(requestKey);
     if (existing === null) throw new Error(`Idempotency key has not been claimed: ${requestKey}`);
     if (existing.requestFingerprint !== requestFingerprint) throw new IdempotencyConflictError();
-    const payload = json(terminalPayload);
+    const redactedPayload = redactJsonValue(terminalPayload, this.redactionPolicy);
+    const payload = json(redactedPayload);
     if (existing.status === "completed") {
       if (existing.terminalPayload === undefined || json(existing.terminalPayload) !== payload) {
         throw new Error("Idempotency key already has a different terminal payload");
@@ -939,10 +952,11 @@ export class SQLiteSessionRepository implements SessionRepository {
     if (!isJsonObject(approval.arguments) || approval.status !== "pending") {
       throw new TypeError("Pending approval must contain JSON arguments and have pending status");
     }
+    const redactedApproval = redactPendingApproval(approval, this.redactionPolicy);
     const existing = this.getPendingApprovalNow(approval.requestId);
     if (existing !== null) {
-      if (existing.sessionId !== approval.sessionId || existing.callId !== approval.callId ||
-          existing.toolName !== approval.toolName || json(existing.arguments) !== json(approval.arguments)) {
+      if (existing.sessionId !== redactedApproval.sessionId || existing.callId !== redactedApproval.callId ||
+          existing.toolName !== redactedApproval.toolName || json(existing.arguments) !== json(redactedApproval.arguments)) {
         throw new Error(`Approval request already exists: ${approval.requestId}`);
       }
       return;
@@ -952,8 +966,9 @@ export class SQLiteSessionRepository implements SessionRepository {
       `INSERT INTO pending_approvals
         (request_id, session_id, call_id, tool_name, arguments_json, status, created_at, updated_at, resolved_at)
        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL)`,
-      approval.requestId, approval.sessionId, approval.callId, approval.toolName, json(approval.arguments),
-      approval.createdAt, approval.updatedAt,
+      redactedApproval.requestId, redactedApproval.sessionId, redactedApproval.callId,
+      redactedApproval.toolName, json(redactedApproval.arguments), redactedApproval.createdAt,
+      redactedApproval.updatedAt,
     );
   }
 
@@ -1079,7 +1094,8 @@ export class SQLiteSessionRepository implements SessionRepository {
        snapshot_json = excluded.snapshot_json, format_version = excluded.format_version,
        label = excluded.label`,
       checkpoint.id, checkpoint.sessionId, checkpoint.schemaVersion, checkpoint.messageSequence,
-      checkpoint.createdAt, checkpoint.reason, json(checkpoint.runtime), json(checkpoint.snapshot),
+      checkpoint.createdAt, checkpoint.reason, json(checkpoint.runtime),
+      json(redactCheckpoint(checkpoint, this.redactionPolicy).snapshot),
       checkpoint.formatVersion ?? CHECKPOINT_FORMAT_VERSION, checkpoint.label ?? null,
     );
   }
@@ -1098,7 +1114,7 @@ export class SQLiteSessionRepository implements SessionRepository {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         session.id, session.schemaVersion, session.workspaceId, session.status, session.createdAt,
         session.updatedAt, json(session.runtime), session.title ?? null, session.model ?? null,
-        session.provider ?? null, optionalJson(session.metadata),
+        session.provider ?? null, session.metadata === undefined ? null : optionalJson(redactJsonValue(session.metadata, this.redactionPolicy)),
       );
       await transaction.getSession(session.id);
     });

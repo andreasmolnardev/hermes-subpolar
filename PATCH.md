@@ -114,6 +114,14 @@
 - Added restart/recovery and pending-approval behavior coverage for both the
   in-memory and SQLite repositories, including reconnect filtering,
   idempotent decisions, conflicting decisions, and retention pruning.
+- Added configurable persistence redaction for provider payloads, credentials,
+  tool arguments/output, reasoning, checkpoints, approvals, and error details;
+  in-memory and SQLite tests inspect stored records and raw database rows.
+- Wired confined native filesystem capabilities into project tool resolution,
+  including arbitrary workspace support, capability filtering, and edit/write
+  diff metadata.
+- Added browser-client reconnect coverage for pending approval responses,
+  cursor resume, event deduplication, and projected Pi status activity.
 - Projected native Pi status phases into the WebUI activity timeline without
   importing Pi package types into the browser.
 

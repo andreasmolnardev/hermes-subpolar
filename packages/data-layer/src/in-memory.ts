@@ -5,6 +5,15 @@ import {
   assertSupportedSchemaVersion,
   assertValidSessionMessages,
 } from "./contracts.js";
+import {
+  normalizePersistenceRedactionPolicy,
+  redactCheckpoint,
+  redactJsonValue,
+  redactPendingApproval,
+  redactSessionMessage,
+  type PersistenceRedactionPolicy,
+  type PersistenceRedactionPolicyInput,
+} from "./redaction.js";
 import type {
   AppendMessagesOptions,
   AppendMessagesResult,
@@ -13,6 +22,7 @@ import type {
   AtomicTurnWrite,
   IdempotencyClaim,
   IdempotencyRecord,
+  JsonObject,
   JsonValue,
   MigrationStateRecord,
   PendingApprovalRecord,
@@ -40,6 +50,14 @@ type RepositoryState = {
   approvals: Map<string, PendingApprovalRecord>;
 };
 
+export type InMemorySessionRepositoryOptions = {
+  idempotencyRetentionMs?: number;
+  approvalRetentionMs?: number;
+  maxIdempotencyRecords?: number;
+  maxApprovalRecords?: number;
+  redactionPolicy?: PersistenceRedactionPolicyInput;
+};
+
 function copy<T>(value: T): T {
   if (Array.isArray(value)) return value.map((item) => copy(item)) as T;
   if (value !== null && typeof value === "object") {
@@ -47,6 +65,16 @@ function copy<T>(value: T): T {
     for (const [key, item] of Object.entries(value)) result[key] = copy(item);
     return result as T;
   }
+  return value;
+}
+
+function positiveOption(value: number, label: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new TypeError(`${label} must be positive`);
+  return value;
+}
+
+function positiveIntegerOption(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer`);
   return value;
 }
 
@@ -174,34 +202,41 @@ function completeIdempotency(
   requestKey: string,
   requestFingerprint: string,
   terminalPayload: JsonValue,
+  policy: PersistenceRedactionPolicy,
 ): void {
   requestPart(requestKey, "Idempotency request key");
   requestPart(requestFingerprint, "Idempotency request fingerprint");
   const existing = state.idempotency.get(requestKey);
   if (existing === undefined) throw new Error(`Idempotency key has not been claimed: ${requestKey}`);
   if (existing.requestFingerprint !== requestFingerprint) throw new IdempotencyConflictError();
+  const redactedPayload = redactJsonValue(terminalPayload, policy);
   if (existing.status === "completed") {
-    if (JSON.stringify(existing.terminalPayload) !== JSON.stringify(terminalPayload)) {
+    if (JSON.stringify(existing.terminalPayload) !== JSON.stringify(redactedPayload)) {
       throw new Error("Idempotency key already has a different terminal payload");
     }
     return;
   }
   const completedAt = new Date().toISOString();
   state.idempotency.set(requestKey, {
-    ...copy(existing), status: "completed", terminalPayload: copy(terminalPayload),
+    ...copy(existing), status: "completed", terminalPayload: copy(redactedPayload),
     updatedAt: completedAt, completedAt,
   });
 }
 
-function savePendingApproval(state: RepositoryState, approval: PendingApprovalRecord): void {
+function savePendingApproval(
+  state: RepositoryState,
+  approval: PendingApprovalRecord,
+  policy: PersistenceRedactionPolicy,
+): void {
   for (const [value, label] of [[approval.requestId, "Approval request id"], [approval.sessionId, "Approval session id"], [approval.callId, "Approval call id"], [approval.toolName, "Approval tool name"]] as const) {
     requestPart(value, label);
   }
   if (approval.status !== "pending") throw new TypeError("Pending approval must have pending status");
   const existing = state.approvals.get(approval.requestId);
+  const redactedApproval = redactPendingApproval(approval, policy);
   if (existing !== undefined) {
-    if (existing.sessionId !== approval.sessionId || existing.callId !== approval.callId ||
-        existing.toolName !== approval.toolName || JSON.stringify(existing.arguments) !== JSON.stringify(approval.arguments)) {
+    if (existing.sessionId !== redactedApproval.sessionId || existing.callId !== redactedApproval.callId ||
+        existing.toolName !== redactedApproval.toolName || JSON.stringify(existing.arguments) !== JSON.stringify(redactedApproval.arguments)) {
       throw new Error(`Approval request already exists: ${approval.requestId}`);
     }
     return;
@@ -209,7 +244,7 @@ function savePendingApproval(state: RepositoryState, approval: PendingApprovalRe
   if ([...state.approvals.values()].some((item) => item.sessionId === approval.sessionId && item.callId === approval.callId)) {
     throw new Error(`Approval call already exists: ${approval.callId}`);
   }
-  state.approvals.set(approval.requestId, copy(approval));
+  state.approvals.set(approval.requestId, copy(redactedApproval));
 }
 
 function resolvePendingApproval(
@@ -232,14 +267,35 @@ function resolvePendingApproval(
   return copy(result);
 }
 
-function pruneState(state: RepositoryState, at: string): RetentionPruneResult {
-  const cutoff = Date.parse(at) - 7 * 24 * 60 * 60 * 1000;
-  if (!Number.isFinite(cutoff)) throw new TypeError("Retention timestamp is invalid");
+function pruneState(
+  state: RepositoryState,
+  at: string,
+  idempotencyRetentionMs: number,
+  approvalRetentionMs: number,
+  maxIdempotencyRecords: number,
+  maxApprovalRecords: number,
+): RetentionPruneResult {
+  const now = Date.parse(at);
+  if (!Number.isFinite(now)) throw new TypeError("Retention timestamp is invalid");
+  const idempotencyCutoff = now - idempotencyRetentionMs;
+  const approvalCutoff = now - approvalRetentionMs;
   for (const [key, record] of state.idempotency) {
-    if (Date.parse(record.updatedAt) < cutoff) state.idempotency.delete(key);
+    if (Date.parse(record.updatedAt) < idempotencyCutoff) state.idempotency.delete(key);
   }
   for (const [key, record] of state.approvals) {
-    if (Date.parse(record.updatedAt) < cutoff) state.approvals.delete(key);
+    if (Date.parse(record.updatedAt) < approvalCutoff) state.approvals.delete(key);
+  }
+  const oldestFirst = <T extends { updatedAt: string }>(left: T, right: T) =>
+    Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
+  while (state.idempotency.size > maxIdempotencyRecords) {
+    const oldest = [...state.idempotency.entries()].sort((left, right) => oldestFirst(left[1], right[1]))[0];
+    if (oldest === undefined) break;
+    state.idempotency.delete(oldest[0]);
+  }
+  while (state.approvals.size > maxApprovalRecords) {
+    const oldest = [...state.approvals.entries()].sort((left, right) => oldestFirst(left[1], right[1]))[0];
+    if (oldest === undefined) break;
+    state.approvals.delete(oldest[0]);
   }
   return { idempotencyRecords: state.idempotency.size, approvalRecords: state.approvals.size };
 }
@@ -247,6 +303,19 @@ function pruneState(state: RepositoryState, at: string): RetentionPruneResult {
 export class InMemorySessionRepository implements SessionRepository {
   private state = emptyState();
   private queue = Promise.resolve();
+  private readonly idempotencyRetentionMs: number;
+  private readonly approvalRetentionMs: number;
+  private readonly maxIdempotencyRecords: number;
+  private readonly maxApprovalRecords: number;
+  private readonly redactionPolicy: PersistenceRedactionPolicy;
+
+  constructor(options: InMemorySessionRepositoryOptions = {}) {
+    this.idempotencyRetentionMs = positiveOption(options.idempotencyRetentionMs ?? 7 * 24 * 60 * 60 * 1000, "idempotencyRetentionMs");
+    this.approvalRetentionMs = positiveOption(options.approvalRetentionMs ?? 7 * 24 * 60 * 60 * 1000, "approvalRetentionMs");
+    this.maxIdempotencyRecords = positiveIntegerOption(options.maxIdempotencyRecords ?? 10_000, "maxIdempotencyRecords");
+    this.maxApprovalRecords = positiveIntegerOption(options.maxApprovalRecords ?? 10_000, "maxApprovalRecords");
+    this.redactionPolicy = normalizePersistenceRedactionPolicy(options.redactionPolicy);
+  }
 
   private runExclusive<T>(operation: () => Promise<T> | T): Promise<T> {
     const previous = this.queue;
@@ -312,7 +381,7 @@ export class InMemorySessionRepository implements SessionRepository {
           throw new Error("Checkpoint references a future message sequence");
         }
         const stored = copy({
-          ...checkpoint,
+          ...redactCheckpoint(checkpoint, this.redactionPolicy),
           formatVersion: checkpoint.formatVersion ?? CHECKPOINT_FORMAT_VERSION,
         });
         const checkpoints = state.checkpoints.get(checkpoint.sessionId) ?? [];
@@ -324,13 +393,13 @@ export class InMemorySessionRepository implements SessionRepository {
       claimIdempotency: async (requestKey, requestFingerprint) =>
         claimIdempotency(state, requestKey, requestFingerprint),
       completeIdempotency: async (requestKey, requestFingerprint, terminalPayload) =>
-        completeIdempotency(state, requestKey, requestFingerprint, terminalPayload),
+        completeIdempotency(state, requestKey, requestFingerprint, terminalPayload, this.redactionPolicy),
       getIdempotency: async (requestKey) => {
         requestPart(requestKey, "Idempotency request key");
         const record = state.idempotency.get(requestKey);
         return record === undefined ? null : copy(record);
       },
-      savePendingApproval: async (approval) => savePendingApproval(state, approval),
+      savePendingApproval: async (approval) => savePendingApproval(state, approval, this.redactionPolicy),
       getPendingApproval: async (requestId) => {
         requestPart(requestId, "Approval request id");
         const approval = state.approvals.get(requestId);
@@ -412,7 +481,7 @@ export class InMemorySessionRepository implements SessionRepository {
       if (ids.has(id)) throw new Error(`Duplicate message id: ${id}`);
       ids.add(id);
       return copy({
-        ...draft,
+        ...redactSessionMessage(draft, this.redactionPolicy),
         schemaVersion: PERSISTENCE_SCHEMA_VERSION,
         id,
         sessionId,
@@ -468,7 +537,10 @@ export class InMemorySessionRepository implements SessionRepository {
   }
 
   async createSession(session: SessionRecord): Promise<void> {
-    const value = copy(session);
+    const value = copy({
+      ...session,
+      ...(session.metadata === undefined ? {} : { metadata: redactJsonValue(session.metadata, this.redactionPolicy) as JsonObject }),
+    });
     await this.runExclusive(() => {
       assertSupportedSchemaVersion(value.schemaVersion);
       validateRuntimeSchema(value.runtime);
@@ -594,7 +666,8 @@ export class InMemorySessionRepository implements SessionRepository {
   async prune(at = new Date().toISOString()): Promise<RetentionPruneResult> {
     return this.runExclusive(() => {
       const next = copyState(this.state);
-      const result = pruneState(next, at);
+      const result = pruneState(next, at, this.idempotencyRetentionMs, this.approvalRetentionMs,
+        this.maxIdempotencyRecords, this.maxApprovalRecords);
       this.state = next;
       return result;
     });

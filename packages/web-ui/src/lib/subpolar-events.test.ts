@@ -33,3 +33,12 @@ test("projects native Pi status updates into stable timeline activity", () => {
     { kind: "status", type: "status.update", text: "Unknown Phase", sequence: 3 },
   ]);
 });
+
+test("projects approval resolution status into the timeline", () => {
+  expect(projectSubpolarActivity({
+    protocol: "subpolar.v1",
+    requestId: "request-approval",
+    sequence: 4,
+    event: { type: "status.update", payload: { phase: "approval.allow" } },
+  })).toMatchObject({ kind: "status", text: "Tool approval granted", sequence: 4 });
+});

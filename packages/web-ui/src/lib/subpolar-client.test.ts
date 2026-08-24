@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import { SubpolarWebSocketClient } from "./subpolar-client";
+import { projectSubpolarActivity } from "./subpolar-events";
 
 class FakeSocket extends EventTarget {
   readonly sent: string[] = [];
@@ -83,4 +84,66 @@ test("browser client sends heartbeat and resumes only after server capability ad
   vi.advanceTimersByTime(1);
   second.open();
   expect(JSON.parse(second.sent.at(-1) as string).cursor).toBe(0);
+  client.close();
+});
+
+test("browser client preserves pending approvals and projects resumed Pi status once", async () => {
+  vi.useFakeTimers();
+  const first = new FakeSocket();
+  const second = new FakeSocket();
+  const sockets = [first, second];
+  const timeline: ReturnType<typeof projectSubpolarActivity>[] = [];
+  const client = new SubpolarWebSocketClient({
+    url: "ws://localhost/v1/ws",
+    socketFactory: () => sockets.shift() as unknown as WebSocket,
+    reconnect: true,
+    reconnectDelayMs: 1,
+    maxReconnectAttempts: 1,
+    onEvent: event => {
+      const activity = projectSubpolarActivity(event);
+      if (activity !== undefined) timeline.push(activity);
+    },
+  });
+  first.open();
+  first.message({ protocol: "subpolar.v1", type: "connected", features: ["resume"] });
+  await client.start({ requestId: "request-approval", model: "test", messages: [{ role: "user", content: "hi" }] });
+  first.message({
+    protocol: "subpolar.v1",
+    requestId: "request-approval",
+    sequence: 0,
+    event: { type: "approval.request", payload: { call_id: "call-1", name: "write", arguments: "{}" } },
+  });
+  await Promise.resolve();
+  first.closed();
+
+  const response = client.respondPermission("request-approval", "call-1", "allow");
+  vi.advanceTimersByTime(1);
+  second.open();
+  await response;
+  expect(JSON.parse(second.sent.at(-1) as string)).toMatchObject({
+    type: "permission_response",
+    requestId: "request-approval",
+    callId: "call-1",
+    decision: "allow",
+  });
+  expect(JSON.parse(second.sent[0] as string)).toMatchObject({ type: "chat.start", cursor: 0 });
+
+  second.message({
+    protocol: "subpolar.v1",
+    requestId: "request-approval",
+    sequence: 0,
+    event: { type: "approval.request", payload: { call_id: "call-1", name: "write", arguments: "{}" } },
+  });
+  second.message({
+    protocol: "subpolar.v1",
+    requestId: "request-approval",
+    sequence: 1,
+    event: { type: "status.update", payload: { phase: "provider.started" } },
+  });
+  await Promise.resolve();
+  expect(timeline).toMatchObject([
+    { kind: "approval", text: "Approval requested for write", sequence: 0 },
+    { kind: "status", text: "Model started", sequence: 1 },
+  ]);
+  client.close();
 });

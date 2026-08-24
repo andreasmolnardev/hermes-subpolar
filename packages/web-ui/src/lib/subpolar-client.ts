@@ -41,6 +41,11 @@ export type SubpolarWebSocketOptions = {
   readonly maxReconnectAttempts?: number;
 };
 
+type OpenWaiter = {
+  readonly resolve: () => void;
+  readonly reject: (reason: Error) => void;
+};
+
 const DEFAULT_MAX_BUFFERED_EVENTS = 256;
 const DEFAULT_RECONNECT_DELAY_MS = 500;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
@@ -85,6 +90,8 @@ export class SubpolarWebSocketClient {
   private resolveOpened: (() => void) | undefined;
   private rejectOpened: ((reason: Error) => void) | undefined;
   private explicitlyClosed = false;
+  private reconnecting = false;
+  private readonly openWaiters = new Set<OpenWaiter>();
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -120,17 +127,17 @@ export class SubpolarWebSocketClient {
 
   async start(request: SubpolarChatRequest): Promise<void> {
     this.startedRequest = request;
-    await this.opened;
+    await this.waitUntilOpen();
     this.sendStart(request);
   }
 
   async cancel(requestId: string): Promise<void> {
-    await this.opened;
+    await this.waitUntilOpen();
     this.send({ type: "chat.cancel", requestId });
   }
 
   async respondPermission(requestId: string, callId: string, decision: "allow" | "deny"): Promise<void> {
-    await this.opened;
+    await this.waitUntilOpen();
     this.send({ type: "permission_response", requestId, callId, decision });
   }
 
@@ -140,6 +147,7 @@ export class SubpolarWebSocketClient {
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.clearHeartbeat();
+    this.rejectOpenWaiters(new Error("WebSocket connection closed"));
     this.socket?.close();
     this.socket = null;
   }
@@ -155,12 +163,14 @@ export class SubpolarWebSocketClient {
     });
 
     socket.addEventListener("open", () => {
+      this.reconnecting = false;
       this.reconnectAttempts = 0;
       this.lastActivityAt = Date.now();
       this.startHeartbeat();
       this.resolveOpened?.();
       this.resolveOpened = undefined;
       this.rejectOpened = undefined;
+      this.resolveOpenWaiters();
       if (this.startedRequest !== undefined && this.resumeSupported) this.sendStart(this.startedRequest);
       this.onReconnect?.(this.startedRequest === undefined ? undefined : this.getCursor(this.startedRequest.requestId));
     }, { once: true });
@@ -184,12 +194,31 @@ export class SubpolarWebSocketClient {
     reject?.(new Error("WebSocket connection closed"));
     this.onClose?.(event);
     if (!this.explicitlyClosed && this.reconnectEnabled && this.resumeSupported && this.startedRequest !== undefined && this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnecting = true;
       this.reconnectAttempts += 1;
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = undefined;
         this.opened = this.createSocket();
       }, this.reconnectDelayMs * this.reconnectAttempts);
+    } else {
+      this.rejectOpenWaiters(new Error("WebSocket connection closed"));
     }
+  }
+
+  private waitUntilOpen(): Promise<void> {
+    if (this.socket?.readyState === 1) return Promise.resolve();
+    if (!this.reconnecting) return this.opened;
+    return new Promise<void>((resolve, reject) => this.openWaiters.add({ resolve, reject }));
+  }
+
+  private resolveOpenWaiters(): void {
+    for (const waiter of this.openWaiters) waiter.resolve();
+    this.openWaiters.clear();
+  }
+
+  private rejectOpenWaiters(reason: Error): void {
+    for (const waiter of this.openWaiters) waiter.reject(reason);
+    this.openWaiters.clear();
   }
 
   private receive(raw: unknown): void {

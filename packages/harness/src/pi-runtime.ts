@@ -16,6 +16,8 @@ import { toPiToolDefinition, type SubpolarPiRunContext, type SubpolarPiTool } fr
 
 export interface CreateSubpolarPiRuntimeOptions extends SubpolarPiRunContext, SubpolarPiResourceOptions {
 	readonly model: Model<any>;
+	/** Optional Pi JSONL session file used for process-restart hydration. */
+	readonly sessionFile?: string;
 	readonly tools?: readonly SubpolarPiTool[];
 	readonly thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	readonly modelRuntime?: ModelRuntime;
@@ -65,7 +67,9 @@ export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOp
 			...(options.signal ? { signal: options.signal } : {}),
 		}));
 	for (const provider of options.nativeProviders ?? []) modelRuntime.registerNativeProvider(provider);
-	const sessionManager = SessionManager.inMemory(options.cwd, { id: options.sessionId });
+	const sessionManager = options.sessionFile
+		? SessionManager.open(options.sessionFile, undefined, options.cwd)
+		: SessionManager.inMemory(options.cwd, { id: options.sessionId });
 	const resourceLoader = new SubpolarResourceLoader(options);
 	const events: SubpolarPiEvent[] = [];
 	const sink: SubpolarPiEventSink = (event) => {
@@ -127,7 +131,9 @@ export async function createSubpolarPiRuntime(options: CreateSubpolarPiRuntimeOp
 export async function executeSubpolarPiRun(options: ExecuteSubpolarPiRunOptions): Promise<SubpolarPiRunResult> {
 	const runtime = await createSubpolarPiRuntime(options);
 	const { hydratePiSession } = await import("./pi-messages");
-	hydratePiSession(runtime.session, options.history ?? [], options.model);
+	if (runtime.session.messages.length === 0 && (options.history?.length ?? 0) > 0) {
+		hydratePiSession(runtime.session, options.history ?? [], options.model, { persist: Boolean(options.sessionFile) });
+	}
 	try {
 		await runtime.prompt(options.userMessage);
 		return { message: runtime.session.messages.at(-1), events: [...runtime.events] };

@@ -213,6 +213,35 @@ describe("Subpolar Pi runtime seam", () => {
 		expect(result.content).toEqual([{ type: "text", text: "Permission denied for tool dangerous.demo." }]);
 	});
 
+	test("Pi ask authorization is re-evaluated for every call and rejects stale approval", async () => {
+		let authorizationCalls = 0;
+		let executions = 0;
+		const [descriptor] = resolveToolDescriptors([{
+			name: "dangerous.write",
+			capabilityId: "dangerous.write",
+			description: "Write a dangerous value",
+			inputSchema: { type: "object", properties: {} },
+			source: "test",
+			executable: { reference: "test://dangerous.write" },
+			policy: "ask",
+		}], [{ toolName: "dangerous.write", policy: "ask" }]);
+		if (!descriptor) throw new Error("expected an approval-gated descriptor");
+		const piTool = toPiResolvedTool(descriptor, run, async () => {
+			executions += 1;
+			return { content: [{ type: "text", text: "executed" }] };
+		}, async () => {
+			authorizationCalls += 1;
+			return authorizationCalls === 1 ? "allow" : "deny";
+		});
+
+		const first = await piTool.execute("call-1", {}, undefined, undefined, undefined as never);
+		const second = await piTool.execute("call-2", {}, undefined, undefined, undefined as never);
+		expect(authorizationCalls).toBe(2);
+		expect(executions).toBe(1);
+		expect(first.content).toEqual([{ type: "text", text: "executed" }]);
+		expect(second.details).toEqual({ denied: true });
+	});
+
 	test("resolved Tool Resolver descriptors stay behind the injected runtime", async () => {
 		const [descriptor] = resolveToolDescriptors([
 			{
@@ -289,6 +318,73 @@ describe("Subpolar Pi runtime seam", () => {
 
 			expect(result.message).toMatchObject({ role: "assistant" });
 			expect(result.events.at(-1)).toEqual({ type: "run.completed", runId: "run-1" });
+		});
+	});
+
+	test("a persisted Pi session hydrates once across runtime restarts", async () => {
+		await withTempRun(async (root) => {
+			const sessionFile = join(root, "sessions", "conversation.jsonl");
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage("first response"), fauxAssistantMessage("resumed response")]);
+
+			const first = await executeSubpolarPiRun({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				sessionFile,
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				history: [{ role: "user", content: "approved earlier context" }],
+				userMessage: "first turn",
+			});
+
+			const second = await executeSubpolarPiRun({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				sessionFile,
+				model: faux.getModel(),
+				nativeProviders: [faux.provider],
+				userMessage: "resume after restart",
+			});
+
+			const messages = second.message === undefined ? [] : second.events;
+			expect(first.message).toMatchObject({ role: "assistant" });
+			expect(second.message).toMatchObject({ role: "assistant" });
+			expect(faux.state.callCount).toBe(2);
+			expect(messages.at(-1)).toEqual({ type: "run.completed", runId: "run-1" });
+		});
+	});
+
+	test("Pi-native model changes and compaction entries survive a restart", async () => {
+		await withTempRun(async (root) => {
+			const sessionFile = join(root, "sessions", "state.jsonl");
+			const faux = fauxProvider({ models: [{ id: "faux-1" }, { id: "faux-2" }] });
+			faux.setResponses([fauxAssistantMessage("ready")]);
+			const first = await createSubpolarPiRuntime({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				sessionFile,
+				model: faux.getModel("faux-1")!,
+				nativeProviders: [faux.provider],
+			});
+
+			await first.prompt("create state");
+			await first.session.setModel(faux.getModel("faux-2")!);
+			await first.close();
+
+			const second = await createSubpolarPiRuntime({
+				...run,
+				cwd: root,
+				agentDir: join(root, "agent"),
+				sessionFile,
+				model: faux.getModel("faux-2")!,
+				nativeProviders: [faux.provider],
+			});
+			const entries = second.session.sessionManager.getEntries();
+			expect(entries.some((entry) => entry.type === "model_change" && entry.modelId === "faux-2")).toBe(true);
+			await second.close();
 		});
 	});
 

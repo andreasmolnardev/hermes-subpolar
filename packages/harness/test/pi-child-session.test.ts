@@ -139,4 +139,47 @@ describe("Subpolar child Pi session", () => {
 			expect(result.events.some((event) => event.type === "tool.started" && event.toolName === "safe")).toBe(true);
 		});
 	});
+
+	test("a child model cannot invoke a parent-only capability", async () => {
+		await withTempRun(async (root) => {
+			const faux = fauxProvider();
+			let parentOnlyExecutions = 0;
+			faux.setResponses([
+				fauxAssistantMessage(fauxToolCall("parent-only", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage("child completed without escalation"),
+			]);
+			const safe: SubpolarPiTool = {
+				name: "safe",
+				label: "Safe",
+				description: "The only child capability",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text", text: "safe" }] }),
+			};
+			const parentOnly: SubpolarPiTool = {
+				name: "parent-only",
+				label: "Parent only",
+				description: "Must never be inherited",
+				parameters: Type.Object({}),
+				execute: async () => {
+					parentOnlyExecutions += 1;
+					return { content: [{ type: "text", text: "escalated" }] };
+				},
+			};
+
+			const result = await executeSubpolarPiChildRun({
+				parent,
+				childAgentId: "restricted-worker",
+				childRunId: "child-no-escalation",
+				model: faux.getModel(),
+				instructions: "Do not access parent capabilities.",
+				cwd: root,
+				tools: [safe],
+				nativeProviders: [faux.provider],
+			});
+
+			expect(parentOnlyExecutions).toBe(0);
+			expect(result.message).toMatchObject({ role: "assistant" });
+			expect(result.events.some((event) => event.type === "tool.completed" && event.toolName === "parent-only" && event.isError)).toBe(true);
+		});
+	});
 });

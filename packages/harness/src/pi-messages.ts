@@ -99,6 +99,15 @@ export function toPiMessages(messages: readonly ProviderMessage[], model: Model<
 	return result;
 }
 
-export function hydratePiSession(session: AgentSession, messages: readonly ProviderMessage[], model: Model<any>): void {
-	session.messages.push(...toPiMessages(messages, model));
+export function hydratePiSession(
+	session: AgentSession,
+	messages: readonly ProviderMessage[],
+	model: Model<any>,
+	options: { persist?: boolean } = {},
+): void {
+	const hydrated = toPiMessages(messages, model);
+	if (options.persist && session.sessionManager.isPersisted()) {
+		for (const message of hydrated) session.sessionManager.appendMessage(message);
+	}
+	session.messages.push(...hydrated);
 }

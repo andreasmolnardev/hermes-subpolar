@@ -84,6 +84,12 @@ export type {
   SubpolarPiToolResult
 } from "./pi-tools";
 export type { SubpolarPiResolvedToolExecutor } from "./pi-tools";
+export { createSubpolarPiSpawnAgentTool, SUBPOLAR_PI_SPAWN_AGENT_TOOL_NAME } from "./pi-spawn-agent";
+export type {
+  SubpolarPiChildAgentDefinition,
+  SubpolarPiSpawnAgentOptions,
+  SubpolarPiSpawnAgentRequest
+} from "./pi-spawn-agent";
 export { SubpolarPiCredentialError, SubpolarPiCredentialStore, toSubpolarPiCredential } from "./pi-credentials";
 export type { SubpolarCredentialBackend, SubpolarPiCredentialMode, SubpolarPiCredentialErrorCode, SubpolarProviderCredential } from "./pi-credentials";
 export { hydratePiSession, toPiMessages } from "./pi-messages";

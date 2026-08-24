@@ -6,6 +6,11 @@ import {
 	resolveSubpolarPiModel,
 	SubpolarPiModelResolutionError,
 } from "../src/index";
+import {
+	SubpolarPiCredentialError,
+	SubpolarPiCredentialStore,
+	toSubpolarPiCredential,
+} from "../src/pi-credentials";
 
 function credentials() {
 	return {
@@ -25,6 +30,48 @@ describe("native Pi model resolution", () => {
 		expect(mapHermesProviderToPi("bedrock")).toBe("amazon-bedrock");
 		expect(mapHermesProviderToPi("unknown-provider")).toBeUndefined();
 		expect(HERMES_TO_PI_PROVIDER_ID.custom).toBeNull();
+	});
+
+	test("maps API-key, OAuth, and Copilot credentials without exposing extra fields", () => {
+		expect(toSubpolarPiCredential("openai-api", { type: "api_key", apiKey: "api-secret" })).toEqual({ type: "api_key", key: "api-secret" });
+		expect(toSubpolarPiCredential("anthropic-oauth", { type: "oauth", accessToken: "access", refreshToken: "refresh", expiresAt: 123 })).toEqual({ type: "oauth", access: "access", refresh: "refresh", expires: 123 });
+		expect(toSubpolarPiCredential("copilot", { mode: "copilot", copilotToken: "copilot-token", subject: "private" })).toEqual({ type: "api_key", key: "copilot-token" });
+	});
+
+	test("rejects non-API credential modes with stable errors instead of dropping them", () => {
+		for (const [providerId, value, mode] of [
+			["bedrock", { mode: "aws_sdk", accessKeyId: "access", secretAccessKey: "secret" }, "aws_sdk"],
+			["vertex-ai", { mode: "gcp", clientEmail: "service@example.test", privateKey: "private" }, "gcp"],
+			["custom", { mode: "external_process", executable: "/bin/provider", arguments: [] }, "external_process"],
+		] as const) {
+			expect(() => toSubpolarPiCredential(providerId, value)).toThrow(SubpolarPiCredentialError);
+			try {
+				toSubpolarPiCredential(providerId, value);
+				throw new Error("expected credential mapping to fail");
+			} catch (error) {
+				expect(error).toMatchObject({ code: "unsupported_credential_mode", providerId, mode });
+			}
+		}
+		expect(() => toSubpolarPiCredential("anthropic-oauth", { type: "oauth", accessToken: "access" })).toThrow("OAuth credential requires access, refresh, and finite expires values");
+	});
+
+	test("scopes credential reads, writes, and metadata to the resolved Pi provider", async () => {
+		const calls: string[] = [];
+		const store = new SubpolarPiCredentialStore({
+			read: async providerId => { calls.push(`read:${providerId}`); return { type: "api_key", key: "secret" }; },
+			list: async () => [{ providerId: "openai", type: "api_key" }, { providerId: "anthropic", type: "oauth" }],
+			modify: async (providerId, fn) => { calls.push(`modify:${providerId}`); return fn({ type: "api_key", key: "secret" }); },
+			delete: async providerId => { calls.push(`delete:${providerId}`); },
+		}, { providerId: "openai" });
+
+		expect(await store.read("anthropic")).toBeUndefined();
+		expect(await store.read("openai")).toEqual({ type: "api_key", key: "secret" });
+		expect(await store.list()).toEqual([{ providerId: "openai", type: "api_key" }]);
+		expect(await store.modify("anthropic", async current => current)).toBeUndefined();
+		expect(await store.modify("openai", async current => current)).toEqual({ type: "api_key", key: "secret" });
+		await store.delete("anthropic");
+		await store.delete("openai");
+		expect(calls).toEqual(["read:openai", "modify:openai", "delete:openai"]);
 	});
 
 	test("resolves a catalog model through a Subpolar-backed ModelRuntime", async () => {

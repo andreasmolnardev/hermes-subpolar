@@ -166,8 +166,8 @@ tests with no duplicate side effects or terminal events.
   either receive a native Pi adapter or be removed/rejected in setup.
 - [~] Preserve non-API-key credential modes. AWS credentials, GCP service
   credentials, external-process credentials, Copilot variants, and provider
-  environment semantics need explicit adapters or an explicit unsupported
-  result; they must not be silently converted to `undefined`.
+  environment semantics have explicit Pi mappings or unsupported results;
+  server-level native credential wiring and provider-specific fixtures remain.
 - [ ] Share a server-level `ModelRuntime`/provider catalog where safe instead
   of creating a model runtime for every request.
 - [x] Map native resolution errors to stable API errors such as
@@ -237,9 +237,9 @@ observable, and removable.
 
 - [x] Run automations through the same server harness/Pi executor path as chat.
 - [x] Preserve automation permission modes and fail interactive approval closed.
-- [ ] Add true native-default automation coverage and WebSocket approval E2E;
-  current automation coverage includes the explicit compatibility provider
-  seam as well as the shared Pi executor boundary.
+- [x] Add true native-default automation coverage and WebSocket approval E2E;
+  coverage includes the native endpoint/credential path, disconnect denial,
+  and stale approval rejection.
 - [ ] Implement `spawn_agent` as a Subpolar-controlled Pi custom tool with a
   restricted Agent/Project capability set.
 - [ ] Link parent/child run IDs and events in persistence and Activity Panel

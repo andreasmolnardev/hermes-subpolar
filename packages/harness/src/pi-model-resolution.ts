@@ -87,6 +87,7 @@ export class SubpolarPiModelResolutionError extends Error {
 
 export interface CreateSubpolarPiModelRuntimeOptions {
 	readonly credentials: SubpolarCredentialBackend;
+	readonly providerId?: string;
 	readonly signal?: AbortSignal;
 }
 
@@ -165,7 +166,7 @@ export function createSubpolarPiModelRuntime(
 	options: CreateSubpolarPiModelRuntimeOptions,
 ): Promise<ModelRuntime> {
 	return ModelRuntime.create({
-		credentials: new SubpolarPiCredentialStore(options.credentials),
+		credentials: new SubpolarPiCredentialStore(options.credentials, options.providerId === undefined ? {} : { providerId: options.providerId }),
 		modelsPath: null,
 		allowModelNetwork: false,
 		refreshOnCreate: false,
@@ -183,7 +184,7 @@ export async function resolveSubpolarPiModel(
 		throw new SubpolarPiModelResolutionError("unsupported_provider", hermesProviderId, options.modelId);
 	}
 
-	const modelRuntime = await createSubpolarPiModelRuntime(options);
+	const modelRuntime = await createSubpolarPiModelRuntime({ ...options, providerId: piProviderId });
 	const model = resolveConfiguredModel(modelRuntime, piProviderId, options.modelId, options.baseUrl, HERMES_NATIVE_API[hermesProviderId]);
 	if (!model) {
 		throw new SubpolarPiModelResolutionError("model_not_found", hermesProviderId, options.modelId, piProviderId);

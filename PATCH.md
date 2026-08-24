@@ -94,6 +94,11 @@
   selects Pi's Chat Completions API for the Hermes `openai-api` profile.
 - Added a true default-path integration test covering Subpolar credentials,
   custom endpoint dispatch, streaming completion projection, and usage.
+- Added explicit Pi credential conversion with provider scoping. API-key,
+  OAuth, and Copilot values map deliberately; AWS, GCP, and external-process
+  values fail with stable unsupported-mode errors instead of being dropped.
+- Added native-default automation and WebSocket approval coverage, including
+  disconnect denial and rejection of stale approval responses on a new socket.
 - Added workspace-confined native filesystem tools with bounded read/write,
   canonical traversal and symlink-escape checks, fail-closed operation
   selection, approval-gated mutations, and explicit shell-interpreter opt-in.

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { CredentialStore, Model, ModelRuntime, Provider } from "@earendil-works/pi-ai";
+import type { CredentialStore, Model, Provider } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ProviderMessage } from "chat-provider-interface";
 import { executeSubpolarPiRun, type SubpolarPiRunResult } from "./pi-runtime";
 import type { SubpolarPiEvent, SubpolarPiEventSink } from "./pi-events";

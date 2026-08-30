@@ -1,5 +1,7 @@
 # Hermes Subpolar
 
+! This is slop. Feel free to ignore. !
+
 Hermes Subpolar is a self-hosted web application for workspace-scoped AI
 development. It is a Bun and TypeScript service with a React web UI, one HTTP
 process, one OpenAI-compatible model connection, native tool boundaries, and a
